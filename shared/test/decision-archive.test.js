@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, join } from 'node:path';
 
@@ -146,14 +147,42 @@ const NOT_SWEPT = new Map([
   ['android-native/.gradle', 'Gradle caches'],
 ]);
 
-/** Every file in the repository the sweep will read, as paths from the root. */
-function sweptFiles(dir = root, rel = '', out = []) {
-  for (const e of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name < b.name ? -1 : 1)) {
+/**
+ * Every file in the repository the sweep will read, as paths from the root.
+ *
+ * A directory that cannot be READ — permissions, a broken mount, a race with
+ * something deleting it — is collected into `unreadable` and walked past,
+ * rather than thrown out of the middle of the walk. The throw was the wrong
+ * failure for a guard whose whole subject is failing loudly: it escapes as a
+ * crash naming `readdirSync`, which reports the stack instead of the check.
+ *
+ * Collecting is not the same as tolerating, and the caller asserts the list is
+ * empty. Leaning on the floors below instead would not work and it is worth
+ * saying why, because it is the tempting version: they sit ~100 files under
+ * the real count so ordinary work does not trip them, so a locked directory of
+ * a dozen files clears every one of them and the sweep then reports an empty
+ * offender list over a denominator it silently shrank — the exact shape this
+ * file exists to refuse one directory over. And a floor that DID fire would
+ * blame the walk for not recursing, which is a true sentence about the wrong
+ * cause. The walk continues past one so the report can name every unreadable
+ * directory rather than the first.
+ */
+function sweptFiles(dir = root, rel = '', out = [], unreadable = []) {
+  let here;
+  try {
+    here = readdirSync(dir, { withFileTypes: true });
+  } catch (err) {
+    // The code is carried because it is what tells the two apart: EACCES is a
+    // permission this checkout has, ENOENT is the tree moving under the walk.
+    unreadable.push(`${rel || '.'} (${err.code || err.message})`);
+    return out;
+  }
+  for (const e of here.sort((a, b) => a.name < b.name ? -1 : 1)) {
     const path = rel ? `${rel}/${e.name}` : e.name;
     if (NOT_SWEPT.has(path) || NOT_SWEPT.has(e.name)) continue;
     // `isDirectory()` on a Dirent is false for a symlink, so a link out of the
     // tree — `node_modules/@habiterall/shared` is one — is never followed.
-    if (e.isDirectory()) sweptFiles(join(dir, e.name), path, out);
+    if (e.isDirectory()) sweptFiles(join(dir, e.name), path, out, unreadable);
     else if (e.isFile()) out.push(path);
   }
   return out;
@@ -170,6 +199,43 @@ const ARCHIVE_PATH = /docs\/decisions\/([A-Za-z0-9._-]+\.md)/gi;
 
 /** A backticked filename, which is how every pointer file spells one. */
 const BACKTICKED_MD = /`([^`\n]+\.md)`/gi;
+
+/**
+ * The same path CUT at the archive's own slash, which is how one is rewrapped.
+ *
+ * A line that ENDS in the archive's directory is the strong signal, and it is
+ * strong because it is not a shape that occurs innocently: a sentence naming
+ * the DIRECTORY spells it `` `docs/decisions/` `` and so ends in a backtick,
+ * or carries on with the rest of its clause — the root `CLAUDE.md`'s own
+ * "is in `docs/decisions/`, which is not loaded into context" is both. Ending
+ * a line on the bare slash is a path whose filename went to the next line.
+ *
+ * This is deliberately NOT "join every comment line and re-match", which is
+ * what #314 declined and was right to: joining lines makes a filename at the
+ * head of any continuation into a reference, and a paragraph that happens to
+ * open a line with `awards.md` is honest prose the guard would then fail on.
+ * The signal here is the PREVIOUS line's ending, so the false-positive surface
+ * is one line shape rather than every line.
+ *
+ * What it still cannot see is a path broken anywhere ELSE — `docs/deci` /
+ * `sions/x.md`, or `day-` / `states.md`. Both wrapped references this repo has
+ * break at the slash, which is where an editor and a person both wrap.
+ */
+const WRAPPED_PREFIX = /docs\/decisions\/[ \t]*$/;
+
+/**
+ * The record such a path resumes with, at the very head of the next line.
+ *
+ * The name has to be the FIRST thing on the continuation, after at most one
+ * comment marker, because that is what a cut path looks like when it resumes;
+ * anything else on the line first means the line is prose rather than the rest
+ * of a path. The character class is `ARCHIVE_PATH`'s own, so the two forms
+ * accept exactly the same filenames. No `NOT_A_RECORD` exemption, deliberately:
+ * this is the path form, which may legitimately name `README.md`, and it
+ * resolves against `archiveByFold` like every other path does.
+ */
+const CONTINUED_NAME = /^[ \t]*(?:\*|\/\/|#+|--|>)?[ \t]*([A-Za-z0-9._-]+\.md)/;
+const continuedRecord = (line) => CONTINUED_NAME.exec(line)?.[1] ?? null;
 
 /**
  * The files where a BARE `` `foo.md` `` is a reference to the archive.
@@ -243,6 +309,54 @@ function backtickedRecord(text) {
   if (!BARE_NAME.test(text)) return null;
   if (NOT_A_RECORD.has(text.toLowerCase())) return null;
   return text;
+}
+
+/**
+ * Every archive reference in ONE file's text, which is the whole extraction.
+ *
+ * A function rather than the sweep's loop body because of the wrapped form: it
+ * fires on two lines of this repository, so the only backstop the other forms
+ * have — a floor over how many the sweep found — would sit AT the real figure
+ * and fail the day somebody rewraps either comment, which is honest work and
+ * would get the branch deleted. Handed two lines of its own instead, the
+ * branch is pinned by construction, and there is one implementation for the
+ * sweep to reach for rather than a second one written in the test beside it.
+ *
+ * @param {string} path the file's path from the root, which decides two things
+ * @param {string} text its contents, already known not to be binary
+ * @returns {{file: string, where: string, name: string, form: string, wrapped: boolean}[]}
+ */
+function referencesIn(path, text) {
+  const refs = [];
+  const bare = pointsAtTheArchive(path);
+  const lines = text.split('\n');
+  lines.forEach((line, i) => {
+    // Deduped per line, because a pointer file spells both forms of the same
+    // reference on one line — the table's first row is
+    // `docs/decisions/day-states.md`, then four bare names — and counting
+    // that twice would inflate the inventory the floors are read off.
+    // The PATH form wins the tie, since it is the form that was written, and
+    // the three writes below are ordered by that rule: a name arriving as a
+    // whole path on this line is not reported as a wrapped one.
+    const named = new Map();
+    if (bare) {
+      for (const m of line.matchAll(BACKTICKED_MD)) {
+        const name = backtickedRecord(m[1]);
+        if (name) named.set(name, { form: 'bare', wrapped: false });
+      }
+    }
+    // A path the PREVIOUS line cut at the archive's slash. Filed at the line
+    // the filename is on rather than the one the path opened on: that is the
+    // line a rename has to edit, and it is one line below what a grep for
+    // `docs/decisions` prints.
+    const carried = i > 0 && WRAPPED_PREFIX.test(lines[i - 1]) ? continuedRecord(line) : null;
+    if (carried) named.set(carried, { form: 'path', wrapped: true });
+    for (const m of line.matchAll(ARCHIVE_PATH)) named.set(m[1], { form: 'path', wrapped: false });
+    for (const [name, { form, wrapped }] of named) {
+      refs.push({ file: path, where: `${path}:${i + 1}`, name, form, wrapped });
+    }
+  });
+  return refs;
 }
 
 /**
@@ -448,12 +562,108 @@ test('the sweep can recognise every record that exists, and refuses what is not 
   assert.ok(!pointsAtTheArchive('shared/src/stats.js') && !pointsAtTheArchive('README.md'),
     'the bare form has widened past the two kinds of pointer file, which is what makes it noisy rather than useful');
 
+  // The wrapped form, probed through `referencesIn` — the function the sweep
+  // itself calls — rather than through its two regexes, because what has to
+  // hold is that a two-line reference reaches the offender list, and a regex
+  // being right does not make its caller use it. Built from the records on
+  // disk for the reason the loop above is, and in the two shapes this repo
+  // wraps in: a bare path inside a sentence, and a backticked one whose
+  // closing backtick went to the second line.
+  for (const record of records) {
+    for (const [opening, continuation] of [
+      [' * empty sections (see "Do not seed default categories", docs/decisions/', ` * ${record}). Each carries its own`],
+      [' * The device\'s calendar day and never a named zone — `docs/decisions/', ` * ${record}\`: \`resolveTimeZone\` asks`],
+      ['read the long form in docs/decisions/', `${record} before re-opening it`],
+    ]) {
+      assert.deepEqual(
+        referencesIn('shared/src/example.js', `${opening}\n${continuation}`)
+          .map((r) => `${r.where} ${r.name} ${r.form} ${r.wrapped}`),
+        [`shared/src/example.js:2 ${record} path true`],
+        `a path to ${record} broken across two lines at the archive's slash is not read, so rewrapping a comment silently stops that reference being checked`);
+    }
+  }
+
+  // And the shapes that must NOT read as one, which is what keeps the signal
+  // from being "any line mentioning the directory". The first is the sentence
+  // the root CLAUDE.md opens with, naming the DIRECTORY: it closes its
+  // backtick, so the line does not end on the slash. The rest are a
+  // continuation that is prose rather than the rest of a path.
+  for (const [why, text] of [
+    ['the directory named in backticks, wrapped after it', 'the reasoning is in `docs/decisions/`\nawards.md is not what this line means'],
+    ['a continuation that does not resume a filename', 'everything is written down in docs/decisions/\n * and is read before re-opening a decision'],
+    ['a placeholder rather than a record', 'to add one, write docs/decisions/\n * <topic>.md and give it a row'],
+    ['a filename that is not first on the line', 'see docs/decisions/\n * the record awards.md for this'],
+  ]) {
+    assert.deepEqual(referencesIn('shared/src/example.js', text), [],
+      `the wrapped form reads a reference out of ${why}, which is honest prose — a guard that fails on that gets deleted`);
+  }
+
   // And what must NOT read as a record. The first two are the prose this guard
   // is likeliest to be written about — a sentence in a pointer file explaining
   // how to add a record — and both were failures before the shape check.
   for (const notAName of ['<topic>.md', '*.md', '.md', 'docs/decisions/awards.md', 'CLAUDE.md', 'traps.md']) {
     assert.equal(backtickedRecord(notAName), null,
       `\`${notAName}\` is read as a bare record reference, and it is not one: honest prose in a pointer file would fail this guard`);
+  }
+});
+
+test('a directory the walk cannot read is named, and does not take the suite down', (t) => {
+  // The walk is the sweep's denominator, and `readdirSync` throwing inside it
+  // used to escape as a CRASH — the suite reporting a stack from node:fs
+  // instead of a check, which is the failure mode this whole file argues
+  // against one directory over. Nobody could construct one without `sudo`,
+  // which is why it was left; `chmod 000` on a directory this process owns is
+  // the construction, and it needs no privilege at all.
+  //
+  // Built in the system temp directory rather than under the repo on purpose.
+  // A `chmod 000` directory left behind inside a checkout breaks every later
+  // run in it AND in any sibling worktree — this test would be the thing that
+  // makes the guard it is defending unrunnable — and `sweptFiles` takes the
+  // directory to walk, so nothing is lost by walking one somewhere else.
+  const dir = mkdtempSync(join(tmpdir(), 'habiterall-archive-'));
+  const locked = join(dir, 'locked');
+  try {
+    mkdirSync(join(dir, 'readable'));
+    writeFileSync(join(dir, 'readable', 'seen.md'), 'x\n');
+    mkdirSync(locked);
+    writeFileSync(join(locked, 'unseen.md'), 'x\n');
+    chmodSync(locked, 0o000);
+
+    // Asked rather than assumed: root reads a 0o000 directory happily, and so
+    // does a filesystem with no POSIX permissions, and there the assertions
+    // below would pass for having built nothing. CI runs this unprivileged.
+    let readableAnyway = true;
+    try { readdirSync(locked); } catch { readableAnyway = false; }
+    if (readableAnyway) {
+      t.skip('this process can read a 0o000 directory — running as root, or on a filesystem without POSIX permissions — so there is no unreadable directory here to have named');
+      return;
+    }
+
+    const unreadable = [];
+    const files = sweptFiles(dir, '', [], unreadable);
+
+    // It walked PAST it: the sibling directory was still read, which is what
+    // makes the report able to name every unreadable directory rather than
+    // dying at the first.
+    assert.deepEqual(files, ['readable/seen.md'],
+      'the walk did not carry on past a directory it could not read, so one locked directory still costs the rest of the tree');
+    // And the file it could not see is missing from that list, which is the
+    // whole reason this cannot be a warning: the inventory is now wrong by one
+    // file and says nothing about it.
+    // The PATH and the presence of a reason, not WHICH reason: Linux and macOS
+    // both answer `EACCES` here, but pinning the code makes a platform that
+    // answers `EPERM` fail saying the directory "was not reported by path and
+    // reason" — which is the opposite of what happened, and sends the reader
+    // at the reporting rather than at the errno.
+    assert.equal(unreadable.length, 1, `expected one unreadable directory, got ${unreadable.join(', ')}`);
+    assert.match(unreadable[0], /^locked \([A-Z]+\)$/,
+      'an unreadable directory was not reported by path and reason, so the sweep would print an inventory it has no denominator for');
+  } finally {
+    // Before `rmSync`, which cannot recurse into 0o000 either — and after a
+    // skip or a failed assertion just the same, or the temp directory is left
+    // undeletable for whoever cleans /tmp.
+    try { chmodSync(locked, 0o700); } catch { /* never created */ }
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -472,38 +682,39 @@ test('every reference to the archive anywhere in the repo names a file that exis
   // filename is a path and is unambiguous wherever it appears, so it is read
   // out of every text file in the repository — this file included, which is
   // how the first draft of this comment failed the test it was describing, by
-  // spelling the form with a filename nobody had written a record for. A bare
-  // backticked filename is a reference only by convention,
-  // so it is read only where that convention holds — a `CLAUDE.md` or a record
-  // (`pointsAtTheArchive`). What is deliberately NOT covered: a bare name in a
-  // source comment or in any other markdown, and a path broken across two
-  // lines, which `shared/public/ui/habit-dialog.js` has one of. Both are
+  // spelling the form with a filename nobody had written a record for. It is
+  // read across a line break too, where the break falls on the archive's own
+  // slash (`WRAPPED_PREFIX`): that was a stated blind spot rather than one
+  // found later, and the class kept arriving — a second wrapped reference
+  // landed in `shared/public/ui/detail.js` between the guard being written and
+  // this being closed, so rewrapping the one comment that had it would have
+  // fixed an instance of something still happening. A bare backticked filename
+  // is a reference only by convention, so it is read only where that convention
+  // holds — a `CLAUDE.md` or a record (`pointsAtTheArchive`). What is
+  // deliberately NOT covered: a bare name in a source comment or in any other
+  // markdown, and a path broken anywhere other than at that slash. Both are
   // false-NEGATIVES, which cost this guard some reach; a false positive would
   // cost it its life, since a guard that fails on honest prose gets deleted.
-  const files = sweptFiles();
+  const unreadable = [];
+  const files = sweptFiles(root, '', [], unreadable);
+
+  // Asserted BEFORE the inventory is printed, and before every floor below it.
+  // The sweep's whole value is its denominator, so a walk that could not read
+  // part of the tree must not report a clean inventory — printing one and
+  // failing afterwards is a guard telling a reader the count it just proved it
+  // could not stand behind. Named here rather than left to a floor, which
+  // would either not fire at all or blame the recursion.
+  assert.deepEqual(unreadable, [],
+    'the sweep could not read these directories, so it walked only part of the tree and every count below is drawn from a denominator it cannot state: '
+    + unreadable.join(', '));
+
   const refs = [];
   for (const path of files) {
     const buf = readFileSync(join(root, path));
     // A NUL byte is the test for binary rather than an extension allowlist,
     // which is a list that goes stale the first time a file type is added.
     if (buf.includes(0)) continue;
-    const bare = pointsAtTheArchive(path);
-    buf.toString('utf8').split('\n').forEach((line, i) => {
-      // Deduped per line, because a pointer file spells both forms of the same
-      // reference on one line — the table's first row is
-      // `docs/decisions/day-states.md`, then four bare names — and counting
-      // that twice would inflate the inventory the floors below are read off.
-      // The PATH form wins the tie, since it is the form that was written.
-      const named = new Map();
-      if (bare) {
-        for (const m of line.matchAll(BACKTICKED_MD)) {
-          const name = backtickedRecord(m[1]);
-          if (name) named.set(name, 'bare');
-        }
-      }
-      for (const m of line.matchAll(ARCHIVE_PATH)) named.set(m[1], 'path');
-      for (const [name, form] of named) refs.push({ file: path, where: `${path}:${i + 1}`, name, form });
-    });
+    refs.push(...referencesIn(path, buf.toString('utf8')));
   }
 
   // The denominator, and it is the whole game: an extraction that has stopped
@@ -518,6 +729,16 @@ test('every reference to the archive anywhere in the repo names a file that exis
     + `out of ${files.length} files read — ${byForm('path')} written as a path, ${byForm('bare')} as a bare filename, `
     + `${[...byFile.keys()].filter((f) => !f.endsWith('.md')).length} of the referring files not markdown`);
   console.log('      ' + [...byFile].sort().map(([f, n]) => `${f} (${n})`).join(', '));
+
+  // The wrapped form is printed by NAME rather than counted, and that is its
+  // false-positive audit: it is the one extractor here that reads a line for
+  // something another line said, so what it decided has to be checkable at a
+  // glance. Two lines in this repo end on the archive's slash, and both are a
+  // real reference; a third appearing here that is not one is how the shape
+  // being "not innocent" stops being true. Not floored — see `referencesIn`.
+  const wrapped = refs.filter((r) => r.wrapped);
+  console.log(`      of those, ${wrapped.length} written as a path BROKEN across two lines `
+    + `(not asserted on): ${wrapped.map((r) => `${r.where} -> ${r.name}`).join(', ') || 'none'}`);
 
   // The walk reaching the tree at all. This one can be pinned near its real
   // value because it only ever grows: a skip list that eats a directory, or a
