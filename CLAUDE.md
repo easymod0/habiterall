@@ -365,10 +365,14 @@ Several layers, and they catch different things:
 
 CI runs all of these on every pull request, plus both Docker builds. Publishing
 images to a registry is a separate job that skips itself when the credentials
-are absent — see `.github/workflows/README.md`. The `compose` job is the one
-exception to the docs-only skip, deliberately: it is the job that guards
-documentation, and it is where `docker compose config` actually resolves
-`extends`.
+are absent — see `.github/workflows/README.md`. **Three jobs are exceptions to
+the docs-only skip, and they are the jobs that GUARD documentation** — a guard
+gated on `code == 'true'` cannot see the change class it exists for. `compose`
+is where `docker compose config` actually resolves `extends`; `site` is where a
+renamed README heading is caught; `archive` is where a decision record with no
+index row is. `compose` and `site` are required checks; `archive` is not, so it
+shows red without blocking — and on a docs-only pull request every gated job
+reports Success, so its red is the only red there is.
 
 The round-trip suites export every backup format, import it back, and assert
 nothing changed. Three suites build a ~15-line fake DOM instead of a browser —

@@ -671,6 +671,36 @@ jobs:
       - name: The site builds, and every link in it resolves
         run: npm run site:build -- --offline
 
+  archive:
+    name: Decision archive
+    runs-on: ubuntu-latest
+    # Deliberately NOT gated on `changes`, for the same reason `compose` and
+    # `site` are not: this is a job that guards DOCUMENTATION, so a
+    # documentation-only pull request is exactly when it has to run. Every case
+    # `shared/test/decision-archive.test.js` exists for — a record added with no
+    # index row, a row left behind by a deleted record, a pointer in the root
+    # CLAUDE.md naming a file that is gone — is a change whose diff is `.md`
+    # only, which the `code == 'true'` filter calls docs and skips. Gated, the
+    # guard would have run on every pull request except the ones it is about,
+    # and reported Success on those.
+    #
+    # `npm test` runs the same file on a pull request that touches code, and
+    # that duplication is the same one `site` already has with
+    # `shared/test/site.test.js`: the suite covers the code path, this job
+    # covers the docs path.
+    #
+    # No `npm ci` — the guard imports node builtins only, so an install would be
+    # the entire cost of the job. A dependency added to it later fails here with
+    # ERR_MODULE_NOT_FOUND, which is loud rather than quiet.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+
+      - name: Every record is indexed, and every pointer names one that exists
+        run: node --test shared/test/decision-archive.test.js
+
   docker:
     name: Docker images
     runs-on: ubuntu-latest
