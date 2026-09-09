@@ -426,6 +426,13 @@ through the same join via a `reload:` callback, since the marker and a CDP
 call cannot be one evaluation. No suite issues either kind of reload on its
 own.
 
+**A suite's page-side source is a TEMPLATE LITERAL, so a backtick inside it —
+including one inside a `//` comment — ends the string early.** The variant that
+costs the time is the one that leaves VALID host code behind: `node --check`
+passes and the suite fails at runtime naming an identifier that appears nowhere
+in the app. `docs/decisions/testing.md` has both variants, the symptom of each,
+and why a per-line backtick count finds neither.
+
 **A `Page.navigate` is the same race and joins the same way** — it too resolves
 before the new document commits. The marker is sound only where the navigation
 is CROSS-document, and a target with no `#` fragment always is, which is every

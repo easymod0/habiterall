@@ -263,21 +263,80 @@ exists to protect the dashboard's habit-name column, which this card does not
 have.
 
 **Offline, the strip and the calendar card agree about a day (#230).** They draw
-one pair of maps, and a tap moves it before it writes, so `detailHost.repaint`
-redraws the calendar beside the cells rather than waiting on the refetch
-`writeDay` ends in — which offline never runs, which is why the two grids used
-to show one date two ways until reconnect. Both halves are nulled by `render()`
-before a rebuild, or a tap redraws a card that has been detached.
+one pair of maps — three, with the notes — and a tap moves them before it
+writes, so `detailHost.repaint` redraws the calendar beside the cells rather
+than waiting on the refetch `writeDay` ends in, which offline never runs. All
+of them are nulled by `render()` before a rebuild, or a tap redraws a card that
+has been detached.
+
+**A QUEUED write from the day editor closes the dialog and repaints too.**
+`saveDay` (`ui/day-dialog.js`) awaits `api()` and offline `api()` stages the
+write and THROWS, so with the close and the `emit('change')` both after the
+await, a toast said *Saved offline* while the dialog stayed open on the old
+value and both grids painted the pre-edit day — three contradictions of a write
+that was correct and durable. It takes the opening page's host, exactly as
+`openCountDialog` does, and does `edit` + `repaint`; it reaches no
+`emit('change')`, because that is a refetch offline cannot answer and could
+repaint the queued write straight back out. **`edit` therefore takes a NOTE:**
+absent means the write says nothing about it — every tap from a strip, matching
+`PUT /entries/:date` preserving a note it was not asked to change — a string is
+a stated note, `''` a stated clear, and a `'clear'` takes the note with the
+row. A genuine failure (anything ANSWERED; only an unsent request carries
+`queued`) still leaves the dialog open and says so.
 
 **The redraw draws the STORED position, and re-resolves today when there is
 none** — not "the window on screen", which is the same sentence only while a
 position exists. `draw` reads `state.calEnd` and never writes it, so #274
 cannot repeat; but with `calEnd` null, which is the default, `draw` and
-`calendarChart` both resolve today afresh. A page left open across local
-midnight therefore has its calendar jump a day on the next tap while the strip
-keeps its pre-midnight columns, and nothing cures the staleness first: the
-nudge's refresh declines while a habit is open, and `'reload'` fires only
-offline→online. Same one-sided shape #230 closed, one card further in.
+`calendarChart` both resolve today afresh. That used to mean a page left open
+across local midnight had its calendar jump a day on the next tap while the
+strip kept its pre-midnight columns — cured now by the day watch below, which
+is the whole view rather than this card.
+
+**The page is drawn for ONE local day, and it asks again when that day ends.**
+`render()` records `todayISO()` and `refreshIfDayChanged` refetches when the
+browser's own calendar day has moved past it — the whole view, because the
+strip's columns, both draws' `todayISO()`, `calendarChart`'s `realToday` and
+every window on the page are frozen at render time the same way, and fixing one
+card moves the page from "one card is stale" to "one card jumps differently".
+The browser's own date, never a named zone: this is the question `callerDay`
+answers, not the one `resolveTimeZone` does
+(`docs/decisions/timezones.md`). **Two triggers, and neither is enough alone** —
+one timer armed for the next local midnight (`setHours(24, 0, 0, 0)`, so a DST
+day gets the right instant) and re-armed per fire, plus `visibilitychange`,
+because a suspended device runs no timer and the staleness costs nothing until
+somebody looks. Both ask the same date comparison, so a timer that fires early
+or a tab switch on the same day does nothing, and a zone CHANGE is covered by
+the same rule. A refetch and not a local redraw: every figure on the page is
+computed as of a date the SERVER anchors, so redrawing locally would move the
+columns and leave the numbers answering yesterday.
+
+**A memoised `Intl` formatter is only valid while the device's clock stays
+put, and `ui/dates.js` drops its own when the UTC offset moves.** A formatter
+resolves its zone at CONSTRUCTION, so one built at page load goes on rendering
+for the zone a device has left — a laptop carried across the date line, an OS
+clock corrected — and every caption, readout and popover is an offset out while
+the cells beside them are right. The check is at the USE (`clockNow` /
+`perClock`), not in a reset a caller has to remember: **every** path that
+redraws after a zone change reaches this — paging, a tap, a save, the midnight
+rebuild — so an invalidator wired to one of them fixes that one and leaves the
+rest silently stale. `getTimezoneOffset()` and never
+`resolvedOptions().timeZone`, which constructs the very thing being memoised on
+a per-cell path; it over-fires on a DST transition and under-fires between two
+zones sharing an offset, and **both are harmless and neither is a reason to
+tighten it**. Three memos hang off the one question, and the REFERENCE WEEK is
+the one to know about: those seven sample dates are local midnights, so
+rebuilding the formatters while freezing the sample renders each as the
+previous day and rotates every weekday caption in the app by one — the defect
+`weekcheck.mjs` exists for, introduced by fixing half of this.
+
+**A calendar rebuild keeps the roving tab stop.** `calendarChart` takes a
+`tabStop` date and `draw` reads it off the outgoing grid before removing it, so
+paging, Today and #230's repaint no longer send a keyboard user back to the most
+recent day. A DATE and not an index — the cell array is only the editable
+cells, so the same index in a window with fewer future days is a different day —
+and a date the new window does not draw falls back to the last cell, which is
+what paging gets. No cell-level repaint was added: see the #230 argument above.
 
 **What the repaint cannot reach stays stale, and THAT is accepted rather than
 missed**: strength, streaks, resilience, history, awards, the weekday
@@ -539,6 +598,20 @@ itself is being typed — so it is a plain `type="text"` box straight over
 still one answer to the decimal-point question rather than a second guess at
 it. `readTarget` (`ui/habit-dialog.js`) is the reader, and two decisions about
 it are not obvious from the code alone.
+
+**And a target is an AMOUNT wherever it is WRITTEN DOWN too, which
+`targetLabel` was left out of.** It spells the number through the caller's
+`showAmount` — `formatAmount` bound to `convention()`, declared as one line in
+`ui/detail.js` and in `ui/dashboard.js` — so the detail head and the dashboard
+row read `≥ 8,5 pages` on the same account whose Edit box holds `8,5`, instead
+of `≥ 8.5` three lines away from it. Passed IN rather than looked up because
+`ui/dates.js` has NO imports (`label-widths.mjs` evaluates its source in a
+page; `dates.test.js` imports it under Node), and DEFAULTED to `String`
+because `shellFirst` can serve one boot this module over a cached older caller
+and that boot must be an old-looking label rather than a TypeError in
+`render()`. Every live caller passes one, and `countcheck.mjs` pins the two
+visible surfaces on a comma account, because a default nobody notices is how a
+call site comes to rely on it.
 
 **The target box submits what was typed; an untouched box submits what was
 stored.** Typing runs through `parseAmount`, bounded to `[1e-6, 1e12]` and
@@ -840,6 +913,30 @@ settings dialog has to refresh both, and the detail view has to open the day
 editor. Written as direct calls those are circular imports; written as one
 2,100-line file — which is what this was — they are eleven scattered
 `renderDashboard()` calls and no way to split it.
+
+**An emit may carry ONE thing the mutator already has, and it stays a hand-off
+rather than a second channel.** `emit(event, what)` passes it to every
+listener, nothing is stored, and every listener must be right when it is absent
+because most emitters send nothing. The one emitter is `habit-dialog`'s
+`announce`, handing on the reply to `PUT /habits/:id` so a habit's own page can
+redraw its head from what was STORED instead of showing the pre-save habit for
+the length of two round trips — and the Edit button behind that dialog captures
+the habit it was drawn from, so that window was a press away from reverting the
+save (`PUT /habits/:id` REPLACES). The refetch still happens; the seed is an
+early paint of the same fact, and a field on `state` was refused because it
+would outlive the emit and be a second source of truth for the habit.
+
+**A view that seeds must refetch through `refresh`, never `open` — what
+overwrites a seed cannot be allowed to be OLDER than it.** `ui/detail.js`'s
+`'change'` listener bypassed that guard, and the seed is what made it reachable:
+it puts the stored habit in the Edit box, so a second save inside the first
+refetch became two ordinary presses, and two `/stats` replies land in whatever
+order the server answers them. The older one landing last redraws the head from
+the pre-second-save habit and re-arms the same revert, with nothing left to
+correct it. `refresh` runs one at a time and remembers the one that arrived
+mid-flight, so the last request is always issued after the last write; a stale
+reply can still flicker past on its way, which is a different (and much
+smaller) claim than the page settling wrong.
 
 **A module owns its subtree, and `test/ui-modules.test.js` enforces it.** No
 element id may be reached for by two modules; `ui/views.js` exists because
@@ -1354,6 +1451,17 @@ dashboard reloads the list. It cannot simply call the detail view — that is th
 import cycle the store exists to break — and it cannot always emit `'change'`,
 because on the dashboard that is a repaint from stale state and a newly created
 habit would not appear. Deleting still goes home: the page you were on is gone.
+
+**...and the page it returns you to is SEEDED from the save, not left to the
+refetch.** `announce(saved)` passes the reply on, and `ui/detail.js` redraws
+from it synchronously before starting its `/stats` + `/entries` round trips —
+because the head's Edit button captures the habit it was drawn from, so in that
+gap pressing Edit reopened the dialog on the pre-save habit and Save from there
+wrote the edit back out. The seed is the SERVER's answer (`parseHabit`
+normalises as well as validates) merged OVER the habit the page holds, never
+assigned wholesale: `unlogged_is_success` rides on the `/stats` payload and not
+on a habit write, so assigning would drop it and a limit would lose its ghost
+ticks until the refetch landed.
 
 **The time picker's parser is mirrored in Kotlin.** `public/ui/time.js` and
 `android-native/.../ReminderTime.kt` accept the same inputs and produce the same

@@ -338,3 +338,155 @@ COUNT rather than a `file:line` pin, in the spirit of `notMirrored`: a line
 pin goes stale on the next edit above it and gets updated mechanically, which
 is how a registry stops being read, while a count changes only when an
 exemption is added or removed.
+
+## Injected page source is a TEMPLATE LITERAL, and a backtick in a comment closes it
+
+Every browser suite builds its page-side JavaScript as a template literal and
+hands it to `Runtime.evaluate` (or to `Page.addScriptToEvaluateOnNewDocument`).
+So a backtick inside that source ends the literal early — including a backtick
+inside a `//` comment, which JavaScript is not reading as a comment at that
+point, because to the outer file it is just text in a string.
+
+`themesync.mjs` has carried the note "(No backticks in here: this block is one
+template literal.)" for a while. What it did not record is the variant that
+costs the most time, and it cost two rounds in one sitting:
+
+**The break does not have to be a syntax error, and when it is not,
+`node --check` is clean and the suite runs.** Written into `calcheck.mjs`:
+
+    // Counted BEFORE the `/api/habits` read above can add to it: `/stats` is
+    // the only pattern this block paused and the only one counted.
+
+the first backtick closed the template, the rest of the line parsed as host
+expressions, and the file was still valid JavaScript. The suite ran and failed
+with
+
+    ERROR: api is not defined
+
+— a runtime error naming an identifier that appears nowhere in the app, from a
+line that is a comment. `node --check` had passed on the file immediately
+before. The other variant, which is the lucky one, breaks the parse outright:
+
+    SyntaxError: missing ) after argument list
+
+pointing at a `${...}` several lines later, which reads as an unbalanced
+parenthesis and is not one.
+
+What follows from that:
+
+- **`node --check` is not a guard for this class.** It catches the syntax-error
+  variant and cannot see the valid-host-code one. The only reliable check is to
+  RUN the suite; a block whose new code did not execute is the symptom to look
+  for, not a clean parse.
+- **A scan has to track template state, not count backticks.** Parity counting
+  per line reports nothing, because these comments contain an even number.
+  Tracking quotes, escapes, `${...}` re-entry and both comment forms through the
+  file finds them; ~40 lines of Python, run over the changed files, was enough.
+- **Say it without the backticks.** Every one of these was a comment quoting an
+  identifier out of habit. Prose naming the same thing costs nothing: "counted
+  before the habits read above can add to it".
+
+The rule generalises past comments — a template literal, a shell command or a
+Markdown fence inside injected source is the same event — but the comment is
+where it actually happens, because that is where a writer stops thinking about
+the quoting.
+
+## Holding a REQUEST and holding a REPLY are different instruments
+
+CDP's `Fetch` domain can pause at either stage, and which one a block picks
+decides what it is able to prove. Both are in use and the distinction cost a
+false pass before it was written down.
+
+**`requestStage: 'Request'` holds a request that has not reached the server.**
+That is what `hangcheck.mjs` wants — a request that never arrives — and what
+`countcheck.mjs`'s Edit-in-the-gap block wants: the page must sit with its
+refetch outstanding, and nothing about the server's answer matters, because
+the answer never comes. Its guard is a resource-timing count of zero landed
+`/stats` responses.
+
+**`requestStage: 'Response'` holds a reply the server has already computed**,
+and that is the only way to make a HELD answer a STALE one. `countcheck.mjs`'s
+second block needs two refetches outstanding across a second write and then
+needs the older one to land last. Paused at the Request stage, releasing it
+after the second write sends it to the server *then*, and the answer comes back
+reflecting the second write — fresh. Measured, against deliberately unfixed
+code: the block passed, printing `2 refetch(es) were outstanding` and a correct
+head. Every part of that output was true and the test proved nothing.
+
+At the Response stage the same block fails against the same code, with the head
+naming the first save while storage holds the second. The releases are
+newest-first, one at a time, each answer DRAWN before the next is let go, so
+the interleaving is FORCED rather than hoped for — the worst legal ordering,
+every run, on any machine.
+
+Two practical notes. The continue command differs (`Fetch.continueRequest`
+against `Fetch.continueResponse`), so a helper releasing both should choose from
+what the event carried — `params.responseStatusCode === undefined` — rather than
+from which pattern the file enabled last. And `api()` abandons a request after
+ten seconds, so a held reply on a loaded fleet can be abandoned rather than
+delivered: the block that depends on the interleaving having happened asserts
+that every held reply LANDED, or a slow machine turns the whole thing into a
+quiet pass.
+
+## A reply that LANDED is not a render that happened
+
+That block shipped a ~4% flake, and it is worth the space because the failing
+output was indistinguishable from the passing one everywhere except the answer
+itself:
+
+    FAIL  the page settles on the LAST save even when the older refetch answers
+          after it :: {"head":"Every day · ≥ 12.5 pages","stored":9.5,
+          "statsLanded":2} (1 refetch(es) were outstanding)
+
+A passing instance printed the same `statsLanded: 2` and the same
+`1 refetch(es) were outstanding`. Same state, different head — so the
+difference was not in what the block reached but in what had been DRAWN when it
+looked.
+
+The cause was the release loop's bookkeeping, and it is the "wait for the app,
+never for a duration" rule collecting on all three of its settles at once.
+Released, the held stale reply took ~15ms to render and the coalesced re-run
+went out ~2ms after that — 16-20ms after the release, and so INSIDE the 700ms
+settle that followed it, where a `paused.length = 0` meant for the loop's own
+bookkeeping dropped the re-run's requestId unreleased. The bounded poll after
+it (twelve iterations, `sleep(500)`) therefore had nothing to let through, spun
+its full six seconds, and the reply was finally freed by `Fetch.disable` — at
+which point the page's `/entries` round trip and the assertion's own
+`fetch('/api/habits')` were running against each other, with the render landing
+3-4ms before the read in the instances that passed. Instrumented rather than
+reasoned about: a `MutationObserver` logging every render beside a wrapped
+`fetch` logging every request, which is what showed the re-run being dropped and
+the finish being that close.
+
+Three things follow, and the third is the one that generalises.
+
+- **A resource-timing count says a reply arrived, not that the page has
+  answered it.** `statsLanded` was a true statement about the network and the
+  check beside it was about the DOM. Both guards are kept, and the second one —
+  "and both of them were DRAWN" — is what makes the first non-vacuous.
+- **`paused.length = 0` is a race with the app.** The array is filled by an
+  event and drained by the block, so anything that empties it wholesale
+  discards whatever arrived while the block was not looking. Entries are popped
+  as they are released now.
+- **The settle has to be satisfied in BOTH worlds, exactly like a wait.**
+  "Release everything and wait for the head to read 9.5" is a condition only
+  the fixed code reaches, and it turns the mutation into a 20s timeout with no
+  named FAIL. What is true either way is that two `/stats` answers were
+  computed and each is drawn once — under `refresh` the held reply and the
+  re-run behind it, without it the two independent refetches — so the drain
+  waits for two post-seed RENDERS and stops. The count is the predicate for the
+  same reason: released newest-first without `refresh`, the first answer drawn
+  paints the `≥ 9.5 pages` the seed already painted, so a wait on the subtitle
+  changing cannot see that render at all.
+
+What is left is one `sleep(700)`, kept and now doing only its own job: after
+the second save's seed has been drawn — a positive wait, and the announce, the
+seed and the refetch decision are one synchronous task — it establishes that NO
+second refetch was issued, which is the negative observation the rule carves
+out and has no predicate to poll. It also has to be long enough for the second
+request's `Fetch.requestPaused` to reach the runner in the world where one IS
+issued, or the mutation releases a request nobody knew was held.
+
+Measured: 48 consecutive instances at eight `countcheck`s pinned to two cores,
+against 1 failure in 24 before, and the block's own dead six seconds went with
+it — the suite runs ~22.5s under that contention against ~29.5s.

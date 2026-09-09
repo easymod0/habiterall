@@ -729,6 +729,446 @@ try {
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({calendarZoom:'default'})}).then(r=>r.ok)`);
 
+  /* ---------- offline, a day saved from the day EDITOR ---------- */
+
+  console.log('\n--- the day editor, offline ---');
+  /*
+   * `saveDay` (`ui/day-dialog.js`) awaits `api()` and had both `dialog.close()`
+   * and `emit('change')` after the await, with `catch (e) { toast(e.message) }`
+   * as the only other path. Offline `api()` stages the write in the outbox and
+   * THROWS with `queued: true` — so the toast said *Saved offline — will sync
+   * when you reconnect* while the dialog stayed OPEN on the old value and both
+   * grids went on painting the pre-edit day, for a write that really was going
+   * to land. Three things contradicting a write that was correct all along.
+   *
+   * Only a real browser can see it: the write has to reach `api()`'s offline
+   * path, the answer is a real listener on a real `<dialog>`, and the assertion
+   * is the `fill` on an SVG cell of a page the app rendered. And the note is
+   * asserted by REOPENING the editor, because `notesByDate` is what the
+   * calendar's `onPick` hands back — the map #230 had nothing to plumb and this
+   * write moves.
+   *
+   * `setBypassServiceWorker` is load bearing here for the reason the paging
+   * block above records: devtools network emulation does not reach the WORKER's
+   * own fetches, so with it in front the PUT would be attempted for real.
+   */
+  const day = await ev(`(async () => {
+    const dates = await import('/shared/ui/dates.js');
+    const habits = await (await fetch('/api/habits')).json();
+    const h = habits.find(x => x.type === 'boolean' && !x.archived);
+    // Three days back: inside both grids' windows (each ends today), not
+    // today itself, and not a future day, which the calendar draws unclickable.
+    const date = dates.addDaysISO(dates.todayISO(), -3);
+    // Emptied so the flip has somewhere to go — the fixtures answer most days.
+    await fetch('/api/habits/' + h.id + '/entries/' + date, { method: 'DELETE' });
+    return { id: h.id, name: h.name, color: h.color, type: h.type, date };})()`);
+  ck('there is a yes/no habit to edit a day of, whose editor saves on a choice button',
+    day?.type === 'boolean' && typeof day.color === 'string', JSON.stringify(day));
+
+  // By fragment rather than by clicking a row, so the habit under test is the
+  // one named — `stripcheck.mjs`'s own `openHabit`, including the `?open=`
+  // cache-buster that keeps the navigation CROSS-document and so keeps
+  // `reloadAndWaitFor`'s marker sound.
+  await reloadAndWaitFor(ev, `!!document.querySelector('#view-detail .day-strip .check')`, {
+    reload: () => send('Page.navigate',
+      { url: `${APP}/?open=daydialog#/habit/${day.id}` }, sessionId),
+    what: 'the detail page with its day strip',
+  });
+  await sleep(400);
+
+  const calFill = (date) => ev(`(() => {
+    const r = ${calCardSel}?.querySelector('.cal-cell[data-date="${date}"]');
+    return r ? (r.getAttribute('fill') ?? '') : null;})()`);
+  const stripGlyph = (date) => ev(
+    `(document.querySelector('#view-detail .day-strip .check[data-date="${date}"] .check-box')`
+    + `?.textContent ?? '').trim()`);
+  const outbox = () => ev(
+    `(async () => (await import('/shared/ui/store.js')).state.pending ?? 0)()`);
+
+  const before = {
+    cal: await calFill(day.date),
+    strip: await stripGlyph(day.date),
+  };
+  ck('both grids draw the emptied day as nothing to start from',
+    before.cal === 'var(--grid-empty)' && before.strip === '', JSON.stringify(before));
+
+  await send('Network.enable', {}, sessionId);
+  await send('Network.setBypassServiceWorker', { bypass: true }, sessionId);
+  await send('Network.emulateNetworkConditions',
+    { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 }, sessionId);
+
+  const NOTE = 'written while offline';
+  const opened = await ev(`(() => {
+    const r = ${calCardSel}?.querySelector('.cal-cell[data-date="${day.date}"]');
+    if (!r) return false;
+    r.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return document.getElementById('day-dialog').open === true;})()`);
+  ck('a calendar cell opens the day editor', opened === true, String(opened));
+  await ev(`(() => {
+    document.getElementById('day-notes').value = ${JSON.stringify(NOTE)};
+    [...document.getElementById('day-boolean').querySelectorAll('.day-choice')]
+      .find(b => b.dataset.action === 'done').click();
+    return true;})()`);
+  await sleep(1200);
+
+  const queued = {
+    dialogOpen: await ev(`document.getElementById('day-dialog').open`),
+    cal: await calFill(day.date),
+    strip: await stripGlyph(day.date),
+    outbox: await outbox(),
+    toast: await ev(`document.getElementById('toast').textContent`),
+  };
+  // The guard that makes the rest mean anything: had the PUT reached the
+  // server, `emit('change')` would have refetched and rebuilt the whole page,
+  // and every check below would pass against a build that does nothing for a
+  // queued write at all.
+  ck('the offline save was queued rather than sent', queued.outbox >= 1,
+    JSON.stringify(queued));
+  ck('...and it says so', /offline/i.test(queued.toast), JSON.stringify(queued.toast));
+  ck('a queued day-write CLOSES the editor rather than leaving it open on the '
+    + 'old value', queued.dialogOpen === false, JSON.stringify(queued));
+  // The exact fill, not "something other than empty": a cell painted the skip
+  // grey (`var(--surface-2)`) or the slipped red disagrees with a done day just
+  // as loudly, and both are reachable through `edit`'s own branches. Read from
+  // `/api/habits` rather than computed with `shade`, which is the function
+  // `charts.js` paints with — calling it here would compare the implementation
+  // against itself.
+  ck("...and the calendar cell flips to the habit's own colour",
+    queued.cal === day.color, `${JSON.stringify(queued)} expected ${day.color}`);
+  ck('...and the strip cell beside it flips too', queued.strip === '✓',
+    JSON.stringify(queued));
+
+  // The note, asked of the surface that has to carry it: `onPick` fills the
+  // editor from `notesByDate`, which is the map #230 left alone because nothing
+  // local moved it. This write moves it, so a redraw hands the editor the note
+  // that was just typed rather than the one the card was built with.
+  const reopened = await ev(`(() => {
+    const r = ${calCardSel}?.querySelector('.cal-cell[data-date="${day.date}"]');
+    r.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return {
+      open: document.getElementById('day-dialog').open,
+      note: document.getElementById('day-notes').value,
+      done: [...document.getElementById('day-boolean').querySelectorAll('.day-choice')]
+        .find(b => b.dataset.action === 'done')?.getAttribute('aria-pressed'),
+    };})()`);
+  ck('reopening the day offline shows the note the queued write carried',
+    reopened.open === true && reopened.note === NOTE, JSON.stringify(reopened));
+  ck('...and the day reads as answered', reopened.done === 'true', JSON.stringify(reopened));
+  await ev(`document.getElementById('day-cancel').click(); true`);
+
+  await send('Network.emulateNetworkConditions',
+    { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, sessionId);
+  await send('Network.setBypassServiceWorker', { bypass: false }, sessionId);
+  // The optimistic paint is only honest if the write it drew actually lands,
+  // which is `unknowncheck.mjs`'s model: ask the API what the row says rather
+  // than believing the cell. Bounded rather than slept on — the outbox drains
+  // on the reconnect the watcher notices, which is not instant.
+  const landed = await settled(`(async () => {
+    const rows = await (await fetch('/api/habits/${day.id}/entries')).json();
+    const row = rows.find(e => e.date === '${day.date}');
+    return !!row && row.notes === ${JSON.stringify(NOTE)};})()`, 15_000);
+  const finalRow = await ev(`(async () => {
+    const rows = await (await fetch('/api/habits/${day.id}/entries')).json();
+    const row = rows.find(e => e.date === '${day.date}');
+    return row ? { value: row.value, status: row.status, notes: row.notes } : null;})()`);
+  ck('and the queued write lands on reconnect, note and all, so the repaint told '
+    + 'the truth', landed === true && finalRow?.value === 2,
+    JSON.stringify(finalRow));
+
+  /* ---------- the page is drawn for ONE local day ---------- */
+
+  console.log('\n--- local midnight ---');
+  /*
+   * `draw` resolves `state.calEnd ?? todayISO()` per call and `calendarChart`
+   * recomputes `realToday` per call, so with no stored position a repaint is
+   * "today, re-resolved" rather than the window on screen. Left open across
+   * local midnight, a tap therefore shifted the calendar a day while
+   * `repaintCells` touched no nodes and the strip kept its pre-midnight
+   * columns — one card jumping on its own. Nothing else in the app cures the
+   * staleness: the nudge's refresh declines while a habit is open (`app.js`)
+   * and `'reload'` fires only offline→online (`ui/connectivity.js`).
+   *
+   * **The clock is moved with `Emulation.setTimezoneOverride`, and that is the
+   * one thing about this block worth reading.** It changes the renderer's zone,
+   * so `new Date()`'s LOCAL fields move with it — which is exactly what
+   * `todayISO()` reads (`iso()` is `getFullYear`/`getMonth`/`getDate`) and
+   * exactly the question this page renders from: the browser's own calendar
+   * day, never a named zone (`docs/decisions/timezones.md` — `resolveTimeZone`
+   * asks where an ACCOUNT is, `callerDay` asks what day it is for the client
+   * making the request, and a rendering decision is the second). It needs no
+   * virtual time and no clock stub, and a device carried across the date line
+   * is a real instance of the same event.
+   *
+   * The two extremes are 26 hours apart, so whatever this machine's real local
+   * date is, at least one of them is a different calendar day — the override
+   * is verified in the page rather than assumed.
+   */
+  const zoneDay = () => ev(`(async () => {
+    const dates = await import('/shared/ui/dates.js');
+    return dates.todayISO();})()`);
+
+  await reloadAndWaitFor(ev, `!!document.querySelector('#view-detail .day-strip .check')`, {
+    reload: () => send('Page.navigate',
+      { url: `${APP}/?open=midnight#/habit/${day.id}` }, sessionId),
+    what: 'the detail page with its day strip',
+  });
+  await sleep(400);
+
+  // Sorted rather than taken from the DOM's own order: `dayOrder` can draw the
+  // strip newest-first, and which end of the row today sits at is not what this
+  // block is about.
+  const lastColumn = () => ev(`(() => {
+    const cells = [...document.querySelectorAll('#view-detail .day-strip .check[data-date]')];
+    return cells.map(c => c.getAttribute('data-date')).sort().at(-1) ?? null;})()`);
+  /**
+   * The most recent EDITABLE calendar cell, which is the calendar's own answer
+   * to "what is today".
+   *
+   * `role="gridcell"` is set only where `onPick && !isFuture`, so the newest of
+   * them is `todayISO()` as `calendarChart` resolved it on that build.
+   *
+   * **Read as DATA rather than off `.cal-range`, and that is still deliberate
+   * now that the readout can be trusted.** It could not be when this block was
+   * written: `ui/dates.js` memoised each `Intl` formatter at module scope, so
+   * after the override below every label was still rendered for the zone the
+   * device had left — measured here, a newest cell of `2026-09-10` under a
+   * readout saying `→ 9 Sept 2026`. `dates.js` drops those memos itself now,
+   * gated on the device's UTC offset, and the check below asserts the two
+   * AGREE. This one keeps reading the datum because a date is what it is
+   * asking for: `data-date` is `todayISO()`'s own spelling, where the readout
+   * is `Intl` prose in the runner's locale and calendar. Not a workaround
+   * still in force.
+   */
+  const lastEditableCell = () => ev(`(() => {
+    const cells = [...(${calCardSel}?.querySelectorAll('rect[role="gridcell"]') ?? [])];
+    return cells.map(c => c.getAttribute('data-date')).sort().at(-1) ?? null;})()`);
+
+  const drawnFor = await zoneDay();
+  const drawnColumn = await lastColumn();
+  const drawnCell = await lastEditableCell();
+  ck('the strip and the calendar both end on the day the page was drawn for',
+    drawnColumn === drawnFor && drawnCell === drawnFor,
+    `strip ${drawnColumn}, calendar ${drawnCell} (drawn for ${drawnFor})`);
+
+  // Whichever of the two extremes is not this machine's own calendar day.
+  let moved = null;
+  for (const zone of ['Pacific/Kiritimati', 'Etc/GMT+12']) {
+    await send('Emulation.setTimezoneOverride', { timezoneId: zone }, sessionId);
+    if (await zoneDay() !== drawnFor) { moved = zone; break; }
+  }
+  const nowDay = await zoneDay();
+  ck('the browser can be put on a different local date at all',
+    moved !== null && nowDay !== drawnFor,
+    `${drawnFor} -> ${nowDay} (${moved ?? 'neither zone moved it'})`);
+
+  // Nothing has told the page yet, and that is the point: this is the state a
+  // tab left open overnight is in, and the check below is that LOOKING at it
+  // is what fixes it.
+  const stale = { strip: await lastColumn(), cell: await lastEditableCell() };
+  ck('...and the page on screen is still drawn for the day before',
+    stale.strip === drawnFor && stale.cell === drawnFor,
+    `${JSON.stringify(stale)} (the clock now says ${nowDay})`);
+
+  await ev(`document.dispatchEvent(new Event('visibilitychange')); true`);
+  const caught = await settled(`(() => {
+    const cells = [...document.querySelectorAll('#view-detail .day-strip .check[data-date]')];
+    return cells.map(c => c.getAttribute('data-date')).sort().at(-1)
+      === ${JSON.stringify(nowDay)};})()`, 10_000);
+  const after = {
+    strip: await lastColumn(),
+    // The whole view and not the one card. Both grids resolve `todayISO()` in
+    // their own draw, and fixing one of them alone moves the page from "one
+    // card is stale" to "one card jumps differently", which is worse: two grids
+    // over one dataset disagreeing about which day is today is
+    // indistinguishable from one of them being broken.
+    cell: await lastEditableCell(),
+    calEnd: await calEndState(),
+    detailShowing: await ev(`!document.getElementById('view-detail').hidden`),
+  };
+  ck('coming back to the tab rebuilds the page for the new local day',
+    caught === true && after.strip === nowDay,
+    `${JSON.stringify(after)} expected the strip to end on ${nowDay}`);
+  // `calEnd` beside it, because a rebuild must not INVENT a paged position:
+  // that is #274, and this refresh goes through the same `open()` the zoom
+  // press above does.
+  ck('...the whole view, so the calendar moved with the strip',
+    after.cell === nowDay && after.calEnd === null,
+    `${JSON.stringify(after)} expected the last editable cell to be ${nowDay}`);
+  ck('...and it is still the habit that is showing', after.detailShowing === true,
+    JSON.stringify(after));
+
+  // **And the LABELS moved with the cells.** `Intl.DateTimeFormat` resolves its
+  // zone when it is constructed and `ui/dates.js` memoises one per shape, so
+  // every caption, every range readout and every popover on this page used to
+  // go on rendering for the zone the device had left while the cells beside
+  // them were right — measured here before the fix, a newest editable cell of
+  // 2026-09-10 under a readout ending `9 Sept 2026`, both ends of it a day
+  // behind. The two are compared against each other rather than against a
+  // literal: the readout is `Intl` prose in the runner's own locale and
+  // calendar, and what is being asserted is that one card does not describe
+  // two different days.
+  //
+  // The rebuild is not what fixes this and must not be read as doing so —
+  // `dates.js` drops the memo itself, on the device's UTC offset, so paging or
+  // tapping after a zone change is covered by the same rule with no trigger
+  // needed. This is the surface where it is cheapest to see.
+  const labelled = await ev(`(() => {
+    const cells = [...(${calCardSel}?.querySelectorAll('rect[role="gridcell"]') ?? [])];
+    const newest = cells.map(c => c.getAttribute('data-date')).sort().at(-1) ?? null;
+    return {
+      readout: ${calCardSel}?.querySelector('.cal-range')?.textContent ?? '',
+      newest,
+      // The same date the readout's right-hand end names, formatted by a
+      // formatter built NOW — which is what a page whose memo was dropped is
+      // showing, and what one holding a stale memo is not.
+      expected: newest === null ? null : new Intl.DateTimeFormat(undefined,
+        { year: 'numeric', month: 'short', day: 'numeric' })
+        .format(new Date(Number(newest.slice(0, 4)), Number(newest.slice(5, 7)) - 1,
+          Number(newest.slice(8, 10)))),
+    };})()`);
+  ck('...and the range readout names the same day the cells do, in a zone the '
+    + 'formatters were not built for',
+    labelled.newest === nowDay && labelled.readout.endsWith(labelled.expected),
+    JSON.stringify(labelled));
+
+  await send('Emulation.setTimezoneOverride', { timezoneId: '' }, sessionId);
+
+  /* ----- the OTHER trigger: the timer ----- */
+
+  /*
+   * The day watch is a timer AND a `visibilitychange` listener, and the block
+   * above drives only the second — so it passes with `armDayWatch()` deleted
+   * from `init()`. The timer is the half covering a tab left FOCUSED on a
+   * machine that never fires the other, which is the case with nothing else
+   * behind it, so the claim that neither trigger is enough alone needs the
+   * evidence for both.
+   *
+   * **Driven with no seam in the app.** `Emulation.setTimezoneOverride` moves
+   * the date but fires nothing and does not re-arm a `setTimeout` already
+   * pending, and there is no zone in which "a few seconds before midnight" can
+   * be asked for — the offsets available are quarter-hour steps, so the local
+   * SECONDS are whatever the real clock's are. So `window.setTimeout` is
+   * wrapped from a new-document script and every long timer recorded, exactly
+   * as `themesync.mjs` wraps `window.fetch`: the recorded callback is the same
+   * function the platform would have invoked, invoked at a moment this suite
+   * chooses. That is worth more than an exported hook — it adds no production
+   * surface, and an app that stopped arming a timer at all fails the first
+   * check below BY NAME rather than silently keeping a hook nobody calls.
+   *
+   * The wrapper is transparent (it always calls through), so nothing else in
+   * the page is changed by its being there.
+   */
+  const timerProbe = await send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(() => {
+      const real = window.setTimeout;
+      window.__armed = [];
+      window.setTimeout = function (fn, ms, ...rest) {
+        if (typeof fn === 'function' && Number(ms) >= 1000) {
+          window.__armed.push({ ms: Number(ms), at: Date.now(), fn });
+        }
+        return real.call(window, fn, ms, ...rest);
+      };
+    })();`,
+  }, sessionId);
+
+  await reloadAndWaitFor(ev, `!!document.querySelector('#view-detail .day-strip .check')`, {
+    reload: () => send('Page.navigate',
+      { url: `${APP}/?open=timer#/habit/${day.id}` }, sessionId),
+    what: 'the detail page with the timer probe installed',
+  });
+  await sleep(400);
+
+  /**
+   * Which recorded timer was armed for the next local midnight, if any.
+   *
+   * Compared as an ABSOLUTE instant (`at + ms` against `now + remaining`), so
+   * the seconds between the arming and this read cancel rather than having to
+   * be allowed for.
+   *
+   * The expectation is built from the local clock fields rather than by
+   * calling `setHours(24, 0, 0, 0)`, which is the implementation's own
+   * expression — the two agree on every day that is 24 hours long and this is
+   * deliberately the independent one. What it therefore pins is that the
+   * arming targets local MIDNIGHT rather than a fixed 24 hours: `+ 86400000`
+   * would answer ~86.4e6 whatever the time of day, and only a page loaded
+   * within the tolerance AFTER midnight could make the two agree. What it does
+   * NOT pin is a 23- or 25-hour day: that needs the DST transition to fall
+   * between now and the next midnight in some zone this suite can name, which
+   * is not a thing a run at an arbitrary moment can arrange.
+   */
+  const midnightTimer = () => ev(`(() => {
+    const now = new Date();
+    const mins = now.getHours() * 60 + now.getMinutes();
+    const remaining = ((24 * 60 - mins) * 60 - now.getSeconds()) * 1000
+      - now.getMilliseconds();
+    const wanted = Date.now() + remaining + 1000;
+    const armed = (window.__armed ?? []);
+    const index = armed.findIndex(t => Math.abs((t.at + t.ms) - wanted) <= 4000);
+    return {
+      index,
+      remaining,
+      delays: armed.map(t => t.ms),
+      off: index < 0 ? null : (armed[index].at + armed[index].ms) - wanted,
+    };})()`);
+
+  const armed = await midnightTimer();
+  ck('the detail view arms a timer for the next local midnight',
+    armed.index >= 0,
+    `${JSON.stringify(armed)} (wanted one firing in about ${armed.remaining}ms)`);
+
+  // Move the day WITHOUT telling the page: no `visibilitychange` is dispatched
+  // anywhere below, so the rebuild can only come from the timer.
+  let timerZone = null;
+  for (const zone of ['Pacific/Kiritimati', 'Etc/GMT+12']) {
+    await send('Emulation.setTimezoneOverride', { timezoneId: zone }, sessionId);
+    if (await zoneDay() !== await ev(`(() => document.querySelector(
+      '#view-detail .day-strip .check[data-date]') ? [...document.querySelectorAll(
+      '#view-detail .day-strip .check[data-date]')].map(c => c.getAttribute('data-date'))
+      .sort().at(-1) : null)()`)) { timerZone = zone; break; }
+  }
+  const timerDay = await zoneDay();
+  ck('the clock moved for the timer half too', timerZone !== null,
+    `${timerDay} (${timerZone ?? 'neither zone moved it'})`);
+
+  // The callback the platform would have run, run now. `armDayWatch`'s timer
+  // calls `refreshIfDayChanged()` and then re-arms, so both halves are
+  // observable from this one invocation.
+  //
+  // Guarded on there BEING one, for the reason `settled` above is bounded
+  // rather than a `waitUntil`: with no timer armed — which is precisely the
+  // mutation this block exists to fail on — `window.__armed[-1].fn()` throws
+  // out of the try block and costs every check below its own named failure,
+  // the `Emulation` override its reset, and the suite its exit line. A
+  // regression must be a named FAIL, never a harness error.
+  if (armed.index >= 0) await ev(`window.__armed[${armed.index}].fn(); true`);
+  const timerCaught = armed.index >= 0 && await settled(`(() => {
+    const cells = [...document.querySelectorAll('#view-detail .day-strip .check[data-date]')];
+    return cells.map(c => c.getAttribute('data-date')).sort().at(-1)
+      === ${JSON.stringify(timerDay)};})()`, 10_000);
+  const byTimer = {
+    strip: await lastColumn(),
+    cell: await lastEditableCell(),
+    detailShowing: await ev(`!document.getElementById('view-detail').hidden`),
+  };
+  ck('the timer alone rebuilds the page for the new local day, with no tab '
+    + 'switch behind it',
+    timerCaught === true && byTimer.strip === timerDay && byTimer.cell === timerDay,
+    `${JSON.stringify(byTimer)} expected ${timerDay}`
+    + (armed.index < 0 ? ' (no timer was armed to fire)' : ''));
+
+  // ...and it re-arms from the clock as it now stands. The new zone's next
+  // midnight is a different absolute instant from the old one's, so a re-arm
+  // that reused the first delay — or a fixed 24 hours — lands outside the
+  // tolerance and this fails.
+  const rearmed = await midnightTimer();
+  ck('...and re-arms for the NEXT local midnight, recomputed from the clock',
+    armed.index >= 0 && rearmed.index >= 0 && rearmed.index !== armed.index,
+    `${JSON.stringify(rearmed)} (the first was index ${armed.index})`);
+
+  await send('Emulation.setTimezoneOverride', { timezoneId: '' }, sessionId);
+  await send('Page.removeScriptToEvaluateOnNewDocument',
+    { identifier: timerProbe.identifier }, sessionId);
+
 } catch (err) {
   console.log('FAIL  harness error :: ' + err.message);
   fails++;

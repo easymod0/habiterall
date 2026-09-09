@@ -216,6 +216,113 @@ try {
   check('ArrowDown returns to the start', nav.back === nav.from, JSON.stringify(nav));
   check('ArrowLeft moves back one week', dayDiff(nav.left, nav.from) === 7, JSON.stringify(nav));
 
+  /* ---------- a rebuild keeps the roving tab stop ---------- */
+
+  // `calendarChart` puts `tabindex="0"` on the LAST editable cell of every
+  // build, and `setRovingFocus` moves it from there as the arrows walk the
+  // grid — on an attribute of nodes the next `draw` removes. So every rebuild
+  // used to send the tab stop back to the most recent day and cost a keyboard
+  // user their place, with nothing on screen to say why. Three ordinary acts
+  // reach that one `draw`: paging (#274), pressing Today, and an offline strip
+  // tap redrawing the card (#230).
+  //
+  // Pressing **Today** is the case that isolates it, because `state.calEnd` is
+  // still null here — the suite has not paged — so Today rebuilds the SAME
+  // window, and "the stop moved back to the last cell" and "the window
+  // changed" cannot be confused for one another.
+  //
+  // Checked in a real browser for the same reason the arrow keys above are:
+  // the stop is moved by a `focus` listener that only exists when the calendar
+  // is interactive, and the cells are read through `dataset`, which the offline
+  // fake DOM has not got.
+  const calCardSel = `[...document.querySelectorAll('#view-detail .card')]
+    .find(c => c.querySelector('.card-title')?.textContent === 'Calendar')`;
+  const calSvgSel = `document.querySelector('[aria-label="Completion calendar"]')`;
+
+  // Arrowed OFF the most recent day on purpose: that is where `calendarChart`
+  // parks the stop by default, so the default and the preserved answer would be
+  // the same date and the check could not fail.
+  //
+  // "The most recent day" is the NEWEST date, not the last cell in document
+  // order. `attachCellPopover`'s `raise` re-appends a hovered or focused cell to
+  // the end of its parent — SVG has no z-index — so by the time the arrow-key
+  // block above has run, DOM order says whatever the last focus happened to
+  // leave. `calendarChart` reads its own build-order array and is unaffected;
+  // a test reading the DOM has to sort.
+  const newest = () => ev(`(()=>[...document.querySelectorAll('rect[role="gridcell"]')]
+    .map(c=>c.getAttribute('data-date')).sort().at(-1) ?? null)()`);
+  const mostRecent = await newest();
+  const parked = await ev(`(()=>{
+    const cells=[...document.querySelectorAll('rect[role="gridcell"]')];
+    const start=cells.find(c=>c.getAttribute('tabindex')==='0');
+    start.focus();
+    const key=k=>document.activeElement.dispatchEvent(
+      new KeyboardEvent('keydown',{key:k,bubbles:true}));
+    key('ArrowUp'); key('ArrowLeft');
+    window.__calSvg = ${calSvgSel};
+    return {
+      at: document.activeElement.dataset.date,
+      stop: document.querySelector('rect[role="gridcell"][tabindex="0"]')
+        ?.getAttribute('data-date') ?? null,
+    };})()`);
+  check('the arrows leave the tab stop on the cell they walked to, not the '
+    + 'most recent day', parked.stop === parked.at && parked.at !== mostRecent,
+    `${JSON.stringify(parked)} (most recent ${mostRecent})`);
+
+  const pressedToday = await ev(`(()=>{
+    const b=[...(${calCardSel}?.querySelectorAll('.cal-nav button') ?? [])]
+      .find(x => x.textContent.trim() === 'Today');
+    if (!b) return false; b.click(); return true;})()`);
+  await sleep(400);
+  const afterRebuild = await ev(`(()=>{
+    const cells=[...document.querySelectorAll('rect[role="gridcell"]')];
+    const zero=cells.filter(c=>c.getAttribute('tabindex')==='0');
+    return {
+      // The guard: a press that redrew nothing would preserve the tab stop by
+      // doing nothing at all, and this whole block would be vacuous.
+      rebuilt: ${calSvgSel} !== window.__calSvg,
+      stops: zero.length,
+      at: zero[0]?.getAttribute('data-date') ?? null,
+      // Sorted rather than taken from the end of the list: see the note on
+      // the popover's raise, above this block.
+      newest: cells.map(c=>c.getAttribute('data-date')).sort().at(-1) ?? null,
+    };})()`);
+  check('pressing Today rebuilt the grid', pressedToday === true && afterRebuild.rebuilt === true,
+    JSON.stringify(afterRebuild));
+  check('...and the rebuilt grid keeps the tab stop where the arrows left it',
+    afterRebuild.at === parked.at, `${JSON.stringify(afterRebuild)} was ${parked.at}`);
+  check('...as the only one, so tabbing past the calendar is still one press',
+    afterRebuild.stops === 1, JSON.stringify(afterRebuild));
+
+  // The other half of the rule, and the reason the stop is remembered as a
+  // DATE rather than as an index into the cells: paging moves the whole window,
+  // so the day the user was on is not drawn any more and the most recent one is
+  // the honest entry point. What must not happen is no stop at all.
+  const pagedBack = await ev(`(()=>{
+    const b=[...(${calCardSel}?.querySelectorAll('.cal-nav button') ?? [])]
+      .find(x => x.textContent.includes('Earlier'));
+    if (!b || b.disabled) return false; b.click(); return true;})()`);
+  await sleep(400);
+  const afterPaging = await ev(`(()=>{
+    const cells=[...document.querySelectorAll('rect[role="gridcell"]')];
+    const zero=cells.filter(c=>c.getAttribute('tabindex')==='0');
+    return { stops: zero.length, at: zero[0]?.getAttribute('data-date') ?? null,
+      // Sorted rather than taken from the end of the list: see the note on
+      // the popover's raise, above this block.
+      newest: cells.map(c=>c.getAttribute('data-date')).sort().at(-1) ?? null,
+      held: cells.some(c => c.getAttribute('data-date') === ${JSON.stringify(parked.at)}) };})()`);
+  check('paging away from the parked day falls back to the most recent cell',
+    pagedBack === true && afterPaging.held === false
+      && afterPaging.stops === 1 && afterPaging.at === afterPaging.newest,
+    JSON.stringify(afterPaging));
+
+  // Back to today, so the blocks below start where they expect to.
+  await ev(`(()=>{
+    const b=[...(${calCardSel}?.querySelectorAll('.cal-nav button') ?? [])]
+      .find(x => x.textContent.trim() === 'Today');
+    if (b) b.click(); return true;})()`);
+  await sleep(400);
+
   // Home and End go to the ends of the WEEK AS DRAWN, which depends on the
   // account's `weekStart`. They read `getDay()` once — Sunday-based — so on a
   // Monday-start grid Home jumped to the Sunday in the PREVIOUS column, where

@@ -6,9 +6,14 @@ import { dirname, join } from 'node:path';
 
 const {
   addDaysISO, estimateTextWidth, formatDateLong, formatDateShort, formatStamp, fromISOLocal,
-  formatDayNumber, formatDayRange, formatMonthShort, formatYear, gutterFor, iso, weekdayLetters,
-  weekdayNames, WIDTH_SAFETY,
+  formatDayNumber, formatDayRange, formatMonthShort, formatYear, gutterFor, iso, targetLabel,
+  weekdayLetters, weekdayNames, WIDTH_SAFETY,
 } = await import('../public/ui/dates.js');
+// The app's own amount formatter, imported rather than restated: the property
+// under test is that a target is spelled the way every other amount is, and a
+// second copy of the rule here would pass while the two drifted. `ui/amount.js`
+// is import-free and DOM-free, which is what lets both modules load under Node.
+const { formatAmount } = await import('../public/ui/amount.js');
 
 /**
  * The presentation helpers, and the one way they can go wrong quietly.
@@ -148,6 +153,46 @@ test('a date is formatted from its LOCAL parts, not shifted through UTC', () => 
   // anyone west of Greenwich, so these two must not print the same.
   assert.notEqual(formatDateShort(fromISOLocal('2026-01-01')),
     formatDateShort(fromISOLocal('2025-12-31')));
+});
+
+test("a target is spelled the way the account spells every other amount", () => {
+  // A comma account was shown `≥ 8.5` on the dashboard row and in the detail
+  // head while the Edit dialog's Target box — filled through
+  // `formatAmount(storedTarget, convention())` — held `8,5`, three lines away
+  // in the same render. Two spellings of one number on one screen.
+  //
+  // The expectations are LITERALS rather than a second call to `formatAmount`:
+  // asserting `targetLabel(h, f) === '≥ ' + f(8.5) + ' pages'` is the label
+  // compared against itself and would hold for a function that ignored the
+  // convention entirely.
+  const pages = { type: 'numerical', target_type: 'at_least', target_value: 8.5, unit: 'pages' };
+  assert.equal(targetLabel(pages, (n) => formatAmount(n, 'point')), '≥ 8.5 pages');
+  assert.equal(targetLabel(pages, (n) => formatAmount(n, 'comma')), '≥ 8,5 pages');
+
+  // The direction and the unit are the label's own, and neither depends on the
+  // convention. An at-most habit with no unit is the shape the second
+  // `dialogClosed` call site in `countcheck.mjs` reaches (`≥ 0`), and it is
+  // where `endsWith` is the number's only right-hand boundary.
+  const limit = { type: 'numerical', target_type: 'at_most', target_value: 2.5, unit: '' };
+  assert.equal(targetLabel(limit, (n) => formatAmount(n, 'comma')), '≤ 2,5');
+  assert.equal(targetLabel({ ...limit, target_value: 0 }, (n) => formatAmount(n, 'comma')), '≤ 0');
+
+  // A boolean habit has no goal to state, whatever it is handed.
+  assert.equal(targetLabel({ type: 'boolean', target_value: 1 },
+    (n) => formatAmount(n, 'comma')), '');
+
+  // `formatAmount` is faithful at the extremes on purpose — a value too small
+  // for it to show renders as its raw self rather than as "0", which is what
+  // leaves `readTarget`'s untouched-box rule something true to preserve — so
+  // the label inherits that rather than rounding a stored target to a lapse.
+  assert.equal(targetLabel({ ...pages, target_value: 0.0000001 },
+    (n) => formatAmount(n, 'point')), '≥ 1e-7 pages');
+
+  // And the default is the pre-#156 spelling, deliberately: `shellFirst` can
+  // serve a client this module over a cached older `ui/detail.js`, and that
+  // boot has to be a label spelled the old way rather than a TypeError inside
+  // `render()`. Pinned so removing the default is a deliberate act.
+  assert.equal(targetLabel(pages), '≥ 8.5 pages');
 });
 
 test('a storage key is spelled with FOUR year digits, because it is compared as a string', () => {
@@ -834,5 +879,89 @@ test('no module writes a Gregorian date field out as TEXT', () => {
       `${file.slice(dir.length + 1)} writes a Gregorian date field out as text `
       + `(${hit?.[0].replace(/\s+/g, ' ').slice(0, 60)}) — `
       + 'use formatDayNumber / formatMonthShort / formatYear from ui/dates.js');
+  }
+});
+
+/*
+ * LAST in this file, deliberately: it moves `process.env.TZ`, which is
+ * process-wide state, and the defect it exists to catch is a memo that
+ * OUTLIVES that move — so against unfixed code the stale formatters leak into
+ * every test declared after it and three tests fail where one is the finding.
+ * Declared here, a failure names only itself.
+ */
+test('a formatter does not outlive the zone it was built for', () => {
+  // `Intl.DateTimeFormat` resolves its zone at CONSTRUCTION, and this module
+  // memoises one per shape — so a device that changes zone (a laptop carried
+  // across the date line, an OS clock corrected by hand) went on being drawn
+  // with formatters for the zone it had left, while everything derived from
+  // `new Date()` beside them was right. Measured in a browser: a calendar
+  // whose newest editable cell read `2026-09-10` under a range readout saying
+  // `→ 9 Sept 2026`.
+  //
+  // Node re-reads `process.env.TZ` on assignment, which is the only way to
+  // move a zone inside a unit test; the browser half of this is `calcheck.mjs`
+  // driving CDP `Emulation.setTimezoneOverride`. Restored in a `finally`,
+  // including the case where it was never set — assigning `undefined` to an
+  // env var stores the STRING "undefined", which would leave every later test
+  // in this file running in a zone that does not exist.
+  const had = Object.hasOwn(process.env, 'TZ') ? process.env.TZ : null;
+  try {
+    // 26 hours apart, so no real date can make them agree.
+    process.env.TZ = 'Etc/GMT+12';
+    // A fixed INSTANT, not a local date: the whole question is which day the
+    // formatter thinks it falls on, and a local date would move with the zone
+    // and hide the answer.
+    const instant = new Date(Date.UTC(2026, 0, 4, 12, 0));
+    const opts = { year: 'numeric', month: 'short', day: 'numeric' };
+    const west = formatDateShort(instant);
+    assert.equal(west, new Intl.DateTimeFormat(undefined, opts).format(instant),
+      'the memo should be built for the zone in force');
+    // Builds the weekday memos under THIS zone, so what the eastward move
+    // below invalidates is a sample and a cache with a known provenance
+    // rather than whatever the runner's own zone left behind.
+    weekdayLetters();
+
+    process.env.TZ = 'Pacific/Kiritimati';
+    const east = formatDateShort(instant);
+    // Against a formatter built fresh HERE rather than a literal, for the
+    // reason the rest of this file gives: the words are the platform's and the
+    // claim is about the zone.
+    assert.equal(east, new Intl.DateTimeFormat(undefined, opts).format(instant),
+      'the memo should have been dropped when the offset moved');
+    assert.notEqual(east, west, 'these two zones must disagree about this instant');
+
+    // **And the reference week moved with it.** The weekday labels are built
+    // by formatting seven LOCAL midnights, so rebuilding the formatter while
+    // keeping a sample fixed at load time renders each instant as the previous
+    // day and rotates every weekday caption in the app by one — the defect
+    // `weekcheck.mjs` exists for, which fixing the formatters alone would have
+    // introduced. Asserted as the same property the first test in this file
+    // asserts, re-checked here.
+    //
+    // In BOTH zones, and that is not belt and braces. A sample frozen at
+    // module load was built in whatever zone the RUNNER is in, and formatting
+    // it elsewhere only rotates when the offset delta crosses midnight — so a
+    // single zone leaves the mutation passing on some machines and failing on
+    // others. These seven instants are local midnights, so ANY smaller offset
+    // renders them as the previous day: the west check rotates for every
+    // runner zone but UTC-12 itself, and for that one the east check's +26h
+    // does. Measured: with the sample frozen, one zone alone let the
+    // reference-week half of this fix be reverted with the suite green.
+    const sundayFirst = (where) => {
+      const letters = weekdayLetters();
+      for (let i = 0; i < 7; i++) {
+        const day = new Date(2026, 0, 4 + i);
+        assert.equal(day.getDay(), i, 'the reference week itself must start on Sunday');
+        assert.equal(letters[day.getDay()],
+          new Intl.DateTimeFormat(undefined, { weekday: 'narrow' }).format(day),
+          `${where}: index ${i} does not name the day getDay() calls ${i}`);
+      }
+    };
+    sundayFirst('after moving east');
+    process.env.TZ = 'Etc/GMT+12';
+    sundayFirst('after moving back west');
+  } finally {
+    if (had === null) delete process.env.TZ;
+    else process.env.TZ = had;
   }
 });

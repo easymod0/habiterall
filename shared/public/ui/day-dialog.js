@@ -30,13 +30,50 @@ const clear = $('#day-clear');
 const save = $('#day-save');
 
 /**
+ * Which page's own model an answer here has to be applied to, while the dialog
+ * is open — `null` for a caller that has none.
+ *
+ * The same shape (and the same reason) as `counting.host` in
+ * `ui/day-strip.js`: two surfaces could open a day editor and only the one
+ * that opened it knows where the answer goes. It is a module-level binding
+ * rather than a key on `state.dayEdit`, because that object is view state a
+ * refetch may replace and this is a callback table belonging to the render
+ * that opened the dialog.
+ *
+ * Read by `saveDay` on ONE path — a write that could not be sent and is
+ * therefore sitting in the outbox. Everything else ends in `emit('change')`,
+ * which the page answers with a refetch that needs nothing from here.
+ *
+ * @type {import('/shared/ui/day-strip.js').StripHost | null}
+ */
+let dayHost = null;
+
+/**
+ * The same write, in the vocabulary `StripHost.edit` speaks.
+ *
+ * One expression rather than a branch at the call site: `'clear'|'skip'|number`
+ * is the union the method and body below already switch on, so there is nothing
+ * to keep in step — the same argument `writeDay` (`ui/day-strip.js`) makes for
+ * having one function for all three writes.
+ */
+const asEdit = (body) => {
+  if (body === null) return 'clear';
+  if (body.status === 'skip') return 'skip';
+  return body.value;
+};
+
+/**
  * @param habit    the habit whose day is being edited
  * @param date     ISO date being edited
  * @param value    what is recorded, if anything
  * @param isSkip   whether the day is flagged as a skip
  * @param noteText the note attached to the day, if any
+ * @param host     the opening page's own day model, for a queued write
  */
-export function openDayDialog(habit, date, value, isSkip, noteText = '') {
+export function openDayDialog(habit, date, value, isSkip, noteText = '', host = null) {
+  // Assigned unconditionally, so a caller with no host can never inherit the
+  // previous opener's.
+  dayHost = host;
   // The encoding fields travel with the edit rather than the habit object, for
   // the reason the grid's own dialog holds an id: a refetch replaces every
   // habit in `state.habits` and can do it while a modal is open.
@@ -131,9 +168,44 @@ export function openDayDialog(habit, date, value, isSkip, noteText = '') {
   if (numeric) dayCountField.focus();
 }
 
+/**
+ * Send what the dialog holds, and then say what happened — including when the
+ * answer is "it is in the outbox".
+ *
+ * **The queued path used to tell the user three untrue things at once.**
+ * `dialog.close()` and `emit('change')` were both after the `await`, and
+ * offline `api()` stages the write and THROWS (with `queued: true`) — so the
+ * only other branch was `toast(e.message)`. The toast said *Saved offline —
+ * will sync when you reconnect*, and behind it the dialog stayed OPEN on the
+ * old value while both grids went on painting the pre-edit day, for a write
+ * that really was going to land. The write was correct and durable throughout;
+ * the three contradictions of it were the bug.
+ *
+ * So a queued write closes the dialog and repaints, which is what the strip's
+ * own tap path has always done — `host.edit` then `host.repaint`, and after
+ * #230 that repaint redraws the calendar beside the cells. Unlike `writeDay`
+ * this edits AFTER the await rather than before it, and so never needs the undo
+ * it hands back: `writeDay` paints first because a TAP has to show the next
+ * state of the cycle immediately and roll back if the write turns out to have
+ * failed, while here the dialog is modal, nothing can read the maps in
+ * between, and by this point the answer is already known.
+ *
+ * `emit('change')` is deliberately NOT reached on that path. It is a refetch,
+ * which offline cannot answer — it would toast a second failure and, worse,
+ * could rebuild the page from the service worker's cached `/stats` and paint
+ * the queued write straight back out. The same reason `writeDay` never reaches
+ * `host.refresh()` for a queued tap.
+ *
+ * A GENUINE failure — anything ANSWERED, since only an unsent request carries
+ * `queued` — leaves the dialog open on the value the server still holds and
+ * says so, which is the one case the old code got right.
+ */
 async function saveDay(body) {
   const { habitId, date } = state.dayEdit ?? {};
   if (!habitId) return;
+  // Read before the await: the box is what the user typed, and this is the same
+  // string the request carries.
+  const noteText = notes.value.trim();
 
   try {
     if (body === null) {
@@ -142,14 +214,23 @@ async function saveDay(body) {
       // Notes ride along with whatever the day is being set to.
       await api(`/habits/${habitId}/entries/${date}`, {
         method: 'PUT',
-        body: JSON.stringify({ notes: notes.value.trim(), ...body }),
+        body: JSON.stringify({ notes: noteText, ...body }),
       });
     }
-    dialog.close();
-    emit('change');
   } catch (e) {
     toast(e.message);
+    if (!e.queued) return;
+    // The note goes with the value and the skip, which is what makes this
+    // different from #230's tap: that one had nothing to plumb because a tap
+    // states nothing about a note, and this dialog states all three.
+    dayHost?.edit(habitId, date, asEdit(body), noteText);
+    dayHost?.repaint();
+    dialog.close();
+    return;
   }
+
+  dialog.close();
+  emit('change');
 }
 
 export function init() {

@@ -200,6 +200,52 @@ string cannot be wrong that way: it is exactly true when the box holds what the
 habit holds. The next person to look at this will reach for the flag; this
 paragraph is why not.
 
+**A target is an AMOUNT wherever it is written down, and `targetLabel` was the
+surface left out.** `openDialog` fills the Target box through
+`formatAmount(storedTarget, convention())` — because a box that reads `8,5` and
+writes `8.5` back has told its owner they typed it wrong — and
+`count-field.js`'s goal hint already went through the same function
+(`Target at most 8,5 pages`). `targetLabel` (`ui/dates.js`) was a raw template
+literal, so on a comma account the dashboard row and the detail head read
+`≥ 8.5 pages` three lines from a box holding `8,5`: one number, two spellings,
+one screen.
+
+It takes the formatter as an argument rather than looking it up, which is
+`formatAmount`'s own arrangement one file over and is forced here: `ui/dates.js`
+has NO imports, because `shared/test/label-widths.mjs` reads its source, strips
+`export` and evaluates it in a page, and `dates.test.js` imports it under Node
+where the absolute `/shared/...` specifiers do not resolve. Moving the label
+into `ui/amount.js` instead would have been an export moved between two shell
+modules, which is the `CACHE_VERSION` bump the paragraph below is about; a
+parameter is neither a new file nor a new export.
+
+**Its default is `String`, and the default is insurance rather than
+convenience.** `shellFirst` can serve one boot the new `ui/dates.js` over a
+cached older `ui/detail.js`; without a default that boot is
+`showAmount is not a function` inside `render()`, and with it the label is
+merely spelled the way it was spelled before. The cost of a default is that a
+future caller can rely on it silently, so the two visible surfaces are pinned
+behaviourally on a comma account in `countcheck.mjs` — the dashboard row, and
+the detail head compared against the Edit box beside it — and the unit test in
+`dates.test.js` asserts the literals `≥ 8.5 pages` and `≥ 8,5 pages` rather
+than calling `formatAmount` on both sides of its own assertion.
+
+The third caller is the starter preset's subtitle (`ui/dashboard.js`), whose
+targets are whole numbers, so nothing observable turns on it. It passes the
+formatter anyway: the argument is about what a target IS, not about which
+targets happen to have a fractional part today.
+
+**`countcheck.mjs`'s `dialogClosed` had to move in the same change.** That wait
+builds the label it expects, and #307 had it as a literal `≥ ${value} ${unit}` —
+correct only while every call site sits above the suite's comma section, which
+is an ordering nobody maintains. It derives the separator from the ACCOUNT's own
+`numberFormat` plus the device now, an independent restatement of
+`resolveNumberFormat`'s three tiers, and deliberately not by importing
+`targetLabel` or `formatAmount`: a wait whose expectation is the implementation
+is the implementation compared against itself. A save was added INSIDE the comma
+section so the derivation is load bearing — with the literal restored, that wait
+times out by name on `≥ 9.5 pages` while the page correctly reads `≥ 9,5 pages`.
+
 **An empty Target box is still a stated 0, not a delete.** That is what
 `Number(f.target_value.value) || 0` meant before this — a habit with no
 target — and it is what `readTarget` maps `''` to as well. It is deliberately

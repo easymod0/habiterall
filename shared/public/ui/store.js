@@ -191,8 +191,12 @@ const listeners = new Map();
  * yet — the views live as long as the page does — but a listener you cannot
  * remove is the kind of thing that is painful to add later.
  *
+ * A listener may take one argument, `what` — see `emit`. Every listener that
+ * does must still be correct with `undefined`, because most emitters send
+ * nothing at all.
+ *
  * @param {'change'|'reload'} event
- * @param {() => void} fn
+ * @param {(what?: any) => void} fn
  */
 export function on(event, fn) {
   if (!listeners.has(event)) listeners.set(event, new Set());
@@ -205,12 +209,27 @@ export function on(event, fn) {
  * from one must not silence the rest: a failed repaint of one view is a bug,
  * but leaving the others stale on top of it is a worse one.
  *
+ * **`what` is the thing the mutator already HAS, never a description of what
+ * changed.** It stays a hand-off and does not become a second channel: an
+ * emitter may pass the object the server just accepted, and a listener may use
+ * it to paint before its own refetch answers. Nothing is stored here — a
+ * payload that outlived the emit would be a second source of truth for the
+ * state above, which is the drift this file exists to prevent — and every
+ * listener has to be right when it is absent, because most emitters send
+ * nothing.
+ *
+ * The one emitter today is `habit-dialog.js`'s `announce`, handing on the reply
+ * to `PUT /habits/:id`, so that a habit's own page can redraw its head from the
+ * habit that was actually stored instead of showing the pre-save one for the
+ * length of two round trips. Its listener is `ui/detail.js`'s.
+ *
  * @param {'change'|'reload'} event
+ * @param {any} [what] the mutator's own copy of what it just wrote
  */
-export function emit(event) {
+export function emit(event, what) {
   for (const fn of listeners.get(event) ?? []) {
     try {
-      fn();
+      fn(what);
     } catch (e) {
       console.error(`listener for "${event}" failed`, e);
     }
