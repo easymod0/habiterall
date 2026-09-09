@@ -7,7 +7,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { platform } from 'node:process';
 
 const CANDIDATES = {
@@ -308,6 +308,21 @@ export async function devtoolsUrl(port, chrome, timeoutMs = 45_000) {
  *          profile?: string}} suite
  */
 export async function closeChrome({ chrome, port, profile }) {
+  await shutDownBrowser({ pid: chrome?.pid, port, profile });
+  forgetBrowser(chrome?.pid);
+}
+
+/**
+ * The shutdown itself, over a PID rather than a `ChildProcess`.
+ *
+ * Split out for the runner, which reaps the browser of a suite it has just
+ * SIGKILLed (`reapBrowsers` below) and so has no `ChildProcess` to hand — only
+ * what that suite wrote down. The two mechanisms and their order are
+ * `closeChrome`'s, above; this is that function's body and nothing new.
+ *
+ * @param {{pid?: number, port: number, profile?: string}} browser
+ */
+async function shutDownBrowser({ pid, port, profile }) {
   await askBrowserToClose(port).catch(() => {});
 
   // Give it a moment to go on its own before insisting.
@@ -316,15 +331,13 @@ export async function closeChrome({ chrome, port, profile }) {
   try {
     // Negative pid = the whole process group. POSIX only; on Windows the
     // spawned process is the browser, so the ordinary kill is correct there.
-    if (process.platform !== 'win32' && chrome?.pid) process.kill(-chrome.pid, 'SIGKILL');
-    else chrome?.kill('SIGKILL');
+    if (pid) process.kill(process.platform !== 'win32' ? -pid : pid, 'SIGKILL');
   } catch {
     // Already gone, which is the outcome we wanted.
   }
 
   if (profile) {
     try {
-      const { rmSync } = await import('node:fs');
       rmSync(profile, { recursive: true, force: true });
     } catch { /* a leftover temp dir is not worth failing a suite over */ }
   }
@@ -352,11 +365,113 @@ async function askBrowserToClose(port) {
 }
 
 /**
+ * Where a suite writes down the browser it launched, so somebody OUTSIDE the
+ * suite can shut it down — set by the runner, absent for a suite run by hand.
+ *
+ * The hole this closes: `runSuite` (`run.mjs`) kills an overrunning suite with
+ * `process.kill(-child.pid, 'SIGKILL')`, which is the SUITE's process group,
+ * while `launchChrome` spawns the browser `detached: true`, which puts it in a
+ * group of its own — so the group kill cannot reach it, and the `exit` handler
+ * that would is the one thing SIGKILL never runs. Measured before this existed:
+ * forcing `categorycheck` past `SUITE_TIMEOUT_MS` left **13 live Chrome
+ * processes and its profile directory** behind after the runner had exited.
+ * That is not merely untidy — an orphan is a live client still pointed at that
+ * worker's instance, and it WRITES (see `fixtures.mjs`).
+ *
+ * Three shapes were weighed and this is why they lost.
+ *
+ *   - **A SIGTERM before the SIGKILL, so the `exit` handler gets a chance.**
+ *     It never gets one: node runs no `exit` handler for a process terminated
+ *     by SIGTERM's default disposition either (measured, both signals). Making
+ *     it work needs a `SIGTERM` LISTENER installed beside the spawn — real, but
+ *     it only helps a suite whose event loop can still run, it delays killing a
+ *     genuinely hung one by whatever grace it is given, and the SIGKILL that
+ *     must still follow orphans the browser exactly as before. The record below
+ *     is needed as the backstop regardless, and once it exists it is the whole
+ *     fix.
+ *   - **Sweeping `/tmp` for `hab*` profile directories.** These suites are run
+ *     from several checkouts against one `/tmp`, so a sweep cannot tell this
+ *     fleet's browsers from another run's — the failure it would cause is
+ *     killing somebody else's, which is worse than the leak.
+ *   - **Finding the browser by its `--remote-debugging-port` on the command
+ *     line.** Exact on the port, but it needs `pgrep`/`/proc` and it can only
+ *     find the PROFILE by parsing another process's argv.
+ *
+ * So the suite says what it launched, at the moment it launches it. One JSON
+ * object per line, appended, because a suite may in principle launch more than
+ * one browser; `closeChrome` removes its own line again, so what is left names
+ * only browsers nobody shut down — which is what keeps the runner from ever
+ * SIGKILLing a process group that has since been recycled onto a stale pid.
+ */
+const RECORD = () => process.env.CHROME_RECORD;
+
+/** Write down a browser this process launched, if the runner asked for one. */
+function recordBrowser({ pid, port, profile }) {
+  const path = RECORD();
+  if (!path || !pid) return;
+  try {
+    appendFileSync(path, `${JSON.stringify({ pid, port, profile })}\n`);
+  } catch { /* the runner is the only reader; a suite must not fail for want of it */ }
+}
+
+/** Strike a browser off again, once it has been shut down properly. */
+function forgetBrowser(pid) {
+  const path = RECORD();
+  if (!path || !pid) return;
+  try {
+    const kept = readFileSync(path, 'utf8')
+      .split('\n')
+      .filter((line) => {
+        if (!line) return false;
+        try { return JSON.parse(line).pid !== pid; } catch { return true; }
+      });
+    writeFileSync(path, kept.length ? `${kept.join('\n')}\n` : '');
+  } catch { /* nothing was recorded, or it is already gone */ }
+}
+
+/**
+ * Shut down every browser a killed suite left recorded, and remove the record.
+ *
+ * The runner's half of the mechanism above: called after the SIGKILL, and
+ * awaited BEFORE the next suite is handed out, since the whole point is that no
+ * orphan is still writing to the instance the next `fixtures.reset()` is about
+ * to assert on.
+ *
+ * @param {string} path  the suite's `CHROME_RECORD`
+ * @returns {Promise<{pid: number, port: number, profile?: string}[]>} what it reaped
+ */
+export async function reapBrowsers(path) {
+  let lines;
+  try {
+    lines = readFileSync(path, 'utf8').split('\n').filter(Boolean);
+  } catch {
+    return [];   // the suite launched no browser, or never got as far as one
+  }
+
+  const reaped = [];
+  for (const line of lines) {
+    let browser;
+    try { browser = JSON.parse(line); } catch { continue; }
+    await shutDownBrowser(browser);
+    reaped.push(browser);
+  }
+
+  try { rmSync(path, { force: true }); } catch { /* not worth failing a run over */ }
+  return reaped;
+}
+
+/**
  * The spawn options every suite needs.
  *
  * `detached: true` is the part that matters: it puts the browser and everything
  * it forks in their own process group, which is what makes the group kill in
  * `closeChrome` able to reach them.
+ *
+ * The same property is what puts the browser OUTSIDE the suite's own group, so
+ * the runner's kill of an overrunning suite cannot reach it. That is not an
+ * argument for dropping `detached` — without it `closeChrome`'s backstop
+ * reaches only the process node spawned, which on a wrapped install is not the
+ * browser at all — it is the argument for the record `CHROME_RECORD` keeps.
  */
 export const LAUNCH_OPTS = { stdio: 'ignore', detached: true };
 
@@ -375,11 +490,17 @@ export const LAUNCH_OPTS = { stdio: 'ignore', detached: true };
  * path, on an uncaught throw, and on `process.exit`. It must be synchronous,
  * which a group kill is.
  *
+ * It does NOT fire when this process is KILLED, which is the one case the
+ * runner's suite timeout produces — so the browser is written down as well, for
+ * the runner to reap on that path. See `CHROME_RECORD` above for why the
+ * record is what closes it and the three tidier-looking fixes are not.
+ *
  * @param {number} port  DevTools port
  * @param {string} profile  a throwaway --user-data-dir
  */
 export function launchChrome(port, profile) {
   const chrome = spawn(CHROME, LAUNCH_ARGS(port, profile), LAUNCH_OPTS);
+  recordBrowser({ pid: chrome.pid, port, profile });
 
   process.on('exit', () => {
     try {

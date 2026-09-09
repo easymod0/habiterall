@@ -110,33 +110,33 @@ export async function reset({ days = 60, base = BASE } = {}) {
   // fail is the same defect as a test that cannot fail.
   // **Two causes, and the message names both, because the likelier one is not
   // the route.** A worker owns its instance for the length of a suite — it does
-  // not own it against a browser an EARLIER suite left running, and one can be
-  // left running: `runSuite` kills an overrunning suite with
-  // `process.kill(-child.pid, 'SIGKILL')` (run.mjs), which is the suite's
-  // process GROUP, while `launchChrome` spawns the browser `detached: true`
-  // (chrome.mjs), which puts it in a group of its OWN. The group kill does not
-  // reach it, and the backstop that would — `process.on('exit', …)` beside that
-  // spawn — is the one thing SIGKILL never runs. Measured here: forcing
-  // `categorycheck` past `SUITE_TIMEOUT_MS` left 14 live Chrome processes still
-  // holding its profile after the runner had exited.
+  // not own it against a browser an EARLIER suite left running, and such an
+  // orphan is a live client pointed at this base that WRITES: its connectivity
+  // watcher polls, its outbox can flush, and `theme.js`'s `reconcile` pushes
+  // that device's stored theme into an account that has none — which is
+  // precisely the state the DELETE above has just created. The failure then
+  // lands on the NEXT suite's reset, saying "settings", about a route that did
+  // exactly what it was asked.
   //
-  // Such an orphan is a live client pointed at this base, and it WRITES: its
-  // connectivity watcher polls, its outbox can flush, and `theme.js`'s
-  // `reconcile` pushes this device's stored theme into an account that has
-  // none — which is precisely the state the DELETE above has just created. So
-  // the failure lands on the NEXT suite's reset, saying "settings", about a
-  // route that did exactly what it was asked. Fixing the orphan at its source
-  // is `chrome.mjs`, shared by all 33 suites, and is filed rather than done
-  // here.
+  // The way one was left running is CLOSED now, and the message says which
+  // cases are left rather than naming that one: `runSuite` kills an overrunning
+  // suite with `process.kill(-child.pid, 'SIGKILL')` (run.mjs), the suite's
+  // process GROUP, while `launchChrome` spawns the browser `detached: true`
+  // (chrome.mjs), which puts it in a group of its OWN — so the runner reaps the
+  // browser itself, from what the suite wrote to `CHROME_RECORD`, before it
+  // hands the next suite out. What that cannot cover is a suite the runner did
+  // not start: `node shared/test/browser/categorycheck.mjs` writes no record,
+  // and killing one by hand orphans its browser exactly as before, because no
+  // signal runs node's `exit` handlers.
   await at('/settings', { method: 'DELETE' });
   const leftover = Object.keys(await at('/settings') ?? {});
   if (leftover.length) {
     throw new Error(`${base}: DELETE /api/settings answered, but `
       + `${leftover.length} setting(s) are still stored (${leftover.join(', ')}). `
       + 'Either the route cleared nothing, or something else is writing to this '
-      + 'instance — a browser orphaned by an earlier suite that hit '
-      + 'SUITE_TIMEOUT_MS is the known case, since the runner\'s group kill does '
-      + 'not reach a detached Chrome. Look for a stray browser on this base '
+      + 'instance. The runner reaps the browser of a suite it kills, so a stray '
+      + 'one belongs to a suite it did not start — one run by hand, or a fleet '
+      + 'from another checkout pointed at this same base. Look for it '
       + '(pgrep -af remote-debugging-port) before suspecting the route.');
   }
 

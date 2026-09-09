@@ -36,7 +36,8 @@
  */
 
 import { spawn } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -54,10 +55,47 @@ const OFFLINE_SUITES = new Set(['rendercheck', 'daydialog', 'atmost', 'weekcheck
  * a suite that takes a third of the run and starts last adds most of itself to
  * the wall clock. A name that no longer exists here costs nothing; a new slow
  * suite missing from it costs a few seconds of packing, never a failure.
+ *
+ * **Derived from measured times, not edited by eye**, because the times move as
+ * suites are added and made faster and an order edited by eye goes stale
+ * silently: three full personal-fleet runs at j=16 (`npm run test:browser`, 33
+ * suites, 46.2s of wall clock each), taking the mean of the per-suite seconds
+ * the summary prints. That is the figure to order by — what a suite costs UNDER
+ * the contention this list schedules for, not what it costs run on its own,
+ * which is a run this hint has no job in. The means, longest first:
+ *
+ *     stripcheck    45.5    calcheck      18.3    notifycheck   12.6
+ *     themesync     35.3    responsive    17.9    feat4         12.5
+ *     settingscheck 34.1    searchcheck   14.6    routecheck    10.7
+ *     nudgecheck    25.2    categorycheck 13.9    countcheck     9.8
+ *     hangcheck     23.9    gridcheck     12.8    pwatest        8.9
+ *
+ * `pwatest` dropped off the list and `calcheck` and `categorycheck` joined it,
+ * and everything else moved — the drift an eye-edited order accumulates, which
+ * had `stripcheck` FIFTH while it was the longest suite in the run by ten
+ * seconds.
+ *
+ * **Eleven names, deliberately the same count as before, and the length is a
+ * measured choice rather than a leftover.** Fourteen — every suite over ten
+ * seconds — reads better and is worse: with 16 workers and 33 suites the first
+ * wave is the first sixteen off this queue, so three more heavy names in the
+ * list means three more heavy suites running at once. Measured back to back on
+ * this box: fourteen names ran 46.4 / 47.5 / 47.8 / 47.5s of wall against
+ * eleven's 46.7 / 46.8 / 46.4s and the previous order's 46.4 / 46.9s, with ~3s
+ * more suite time to match. Past the worker count the list stops buying packing
+ * and starts buying contention.
+ *
+ * What the re-derivation does NOT buy is a faster run HERE: the wall clock is
+ * already the longest SUITE (46.2s against `stripcheck`'s 45.5s), so no order
+ * can go below it and none of the three above is distinguishable from the
+ * others. It is packing insurance for a run with fewer workers than the box
+ * that measured it — a 4-core CI runner deals 8 at a time, where a 45s suite
+ * starting ninth is 45s added to the end, and where the first eight off this
+ * queue are the only ordering decision that exists.
  */
 const SLOW_FIRST = [
-  'settingscheck', 'hangcheck', 'themesync', 'nudgecheck', 'stripcheck',
-  'unknowncheck', 'responsive', 'searchcheck', 'notifycheck', 'pwatest',
+  'stripcheck', 'themesync', 'settingscheck', 'nudgecheck', 'hangcheck',
+  'unknowncheck', 'calcheck', 'responsive', 'searchcheck', 'categorycheck',
   'gridcheck',
 ];
 
@@ -175,11 +213,64 @@ let nextPort = 0;
 const parallel = BASES.length > 1;
 
 /**
+ * Where each suite writes down the browser it launched, for the reap below.
+ *
+ * Under `tmpdir()` rather than beside the suites, so `TMPDIR` isolates one
+ * checkout's run from another's — these are run from several worktrees against
+ * one `/tmp`, which is the same reason the reap is exact rather than a sweep.
+ */
+const RECORDS = mkdtempSync(join(tmpdir(), 'habrun-'));
+process.on('exit', () => {
+  try { rmSync(RECORDS, { recursive: true, force: true }); } catch { /* already gone */ }
+});
+
+/**
+ * Shut down the browser a killed suite left behind, and say what was reaped.
+ *
+ * **The runner has to do this, because nothing inside the suite can.** The kill
+ * below is `process.kill(-child.pid)` — the SUITE's process group — while
+ * `launchChrome` spawns Chrome `detached: true`, which puts it in a group of
+ * its own; and the `exit` handler beside that spawn, the only other backstop,
+ * is the one thing a SIGKILL never runs. Measured before this existed: forcing
+ * `categorycheck` past `SUITE_TIMEOUT_MS` left 13 live Chrome processes and its
+ * profile directory behind after the whole run had finished.
+ *
+ * A leaked browser is not only slow. It is a live client still pointed at this
+ * worker's instance — its connectivity watcher polls, its outbox can flush, and
+ * `theme.js`'s `reconcile` pushes a stored theme into an account that has none
+ * — so the failure lands on the NEXT suite's `fixtures.reset()`, naming a
+ * settings route that did exactly what it was asked. Which is why this is
+ * awaited before `runSuite` resolves, and not merely started: the point is that
+ * nothing is still writing when the next suite's reset asserts on that
+ * instance.
+ *
+ * `chrome.mjs` is imported lazily and only when there is something to reap: it
+ * resolves a Chrome binary at import time, and an OFFLINE suite that overran on
+ * a machine with no browser must not have its timeout turn into "No Chrome
+ * found".
+ */
+async function reapAfterTimeout(record) {
+  if (!existsSync(record)) return '  nothing to reap: the suite launched no browser\n';
+  try {
+    const { reapBrowsers } = await import('./chrome.mjs');
+    const reaped = await reapBrowsers(record);
+    if (!reaped.length) return '  nothing to reap: the suite closed its own browser\n';
+    return reaped
+      .map((b) => `  reaped the orphaned browser (pid ${b.pid}, port ${b.port})`
+        + ` and its profile ${b.profile}\n`)
+      .join('');
+  } catch (e) {
+    return `  could not reap the suite's browser: ${e.message}\n`;
+  }
+}
+
+/**
  * Run one suite, killing it — and the browser it launched — if it overruns.
  *
  * `detached: true` puts the suite in its own process group, so the kill below
- * reaches the browser it spawned as well. A suite that times out has no chance
- * to run its own teardown, and a leaked browser would slow every suite after it.
+ * reaches everything the SUITE forked. It does not reach the browser, which is
+ * in a group of its own by the time it exists — `reapAfterTimeout` above is
+ * that half, and it is awaited here rather than left to finish on its own.
  *
  * Output is piped and held when workers run in parallel, then printed as one
  * block: three suites interleaving line by line is unreadable, and the failure
@@ -188,13 +279,19 @@ const parallel = BASES.length > 1;
  */
 function runSuite(suite, base) {
   return new Promise((resolve) => {
+    const port = PORT_BASE + nextPort++;
+    // Named by the port as well as the suite, since a port never repeats within
+    // a run while a suite name could if one were ever passed twice.
+    const record = join(RECORDS, `${suite}-${port}.json`);
+
     const child = spawn(process.execPath, [join(here, `${suite}.mjs`)], {
       stdio: parallel ? ['ignore', 'pipe', 'pipe'] : 'inherit',
       env: {
         ...process.env,
         BASE: base,
         BASES: '',
-        DEVTOOLS_PORT: String(PORT_BASE + nextPort++),
+        DEVTOOLS_PORT: String(port),
+        CHROME_RECORD: record,
       },
       detached: process.platform !== 'win32',
     });
@@ -204,6 +301,7 @@ function runSuite(suite, base) {
     child.stderr?.on('data', (d) => { output += d; });
 
     const limit = timeoutFor(suite);
+    let reaping = null;
     const timer = setTimeout(() => {
       output += `  TIMEOUT after ${limit / 1000}s — killing ${suite}\n`;
       if (!parallel) console.error(`  TIMEOUT after ${limit / 1000}s — killing ${suite}`);
@@ -211,10 +309,20 @@ function runSuite(suite, base) {
         if (process.platform !== 'win32') process.kill(-child.pid, 'SIGKILL');
         else child.kill();
       } catch { /* already gone */ }
+      reaping = reapAfterTimeout(record);
     }, limit);
 
-    child.on('exit', (code) => {
+    child.on('exit', async (code) => {
       clearTimeout(timer);
+      if (reaping) {
+        const note = await reaping;
+        output += note;
+        if (!parallel) process.stderr.write(note);
+      } else {
+        // The suite shut its own browser down and struck it off the record;
+        // what is left is an empty file, and only this run's own temp dir.
+        try { rmSync(record, { force: true }); } catch { /* already gone */ }
+      }
       resolve({ code: code ?? 1, output });
     });
   });

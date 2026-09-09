@@ -9,18 +9,27 @@
  * second suite attaches to the first one's browser; measured, both hung to
  * the 120s suite timeout.
  *
- * The rest are about `reloadAndWaitForRow` (`./browser/chrome.mjs`): a unit
- * test of the helper itself, over a fake `ev` that models a window/document/
- * location well enough to reproduce the doomed-document window it exists to
- * close (see the harness's own comment for why a real browser cannot be the
- * witness here), and a source guard that keeps a bare `location.reload()` —
- * or a free-standing `Page.reload` / `Page.navigate` — from creeping back
- * into a suite.
+ * Then `reloadAndWaitForRow` (`./browser/chrome.mjs`): a unit test of the
+ * helper itself, over a fake `ev` that models a window/document/location well
+ * enough to reproduce the doomed-document window it exists to close (see the
+ * harness's own comment for why a real browser cannot be the witness here),
+ * and a source guard that keeps a bare `location.reload()` — or a
+ * free-standing `Page.reload` / `Page.navigate` — from creeping back into a
+ * suite.
+ *
+ * And last, the browser a KILLED suite leaves behind. Those tests use real
+ * processes and real directories rather than a fake, because what is being
+ * asserted is that a process group is gone and a profile directory with it —
+ * there is nothing in that to model.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdirSync, readFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import {
+  existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -542,4 +551,198 @@ test('no suite issues a free-standing reload or navigation outside reloadAndWait
     /window\.__doomed\s*=\s*1;\s*location\.reload\(\)/,
     "chrome.mjs no longer marks the document in the same evaluation as the reload",
   );
+});
+
+/**
+ * A suite that overruns is SIGKILLed, and until #317 its browser was not.
+ *
+ * The chain: `runSuite` (`browser/run.mjs`) kills the suite's process GROUP,
+ * `launchChrome` (`browser/chrome.mjs`) spawns Chrome `detached: true` — a
+ * group of its own — and the `exit` handler beside that spawn is the one thing
+ * a SIGKILL never runs. Measured against the unfixed tree: forcing
+ * `categorycheck` past `SUITE_TIMEOUT_MS` left 13 live Chrome processes and its
+ * profile directory behind after the runner had exited, and an orphan is a live
+ * client that WRITES to the instance the next suite's `fixtures.reset()` is
+ * about to assert on.
+ *
+ * So the suite writes down what it launched (`CHROME_RECORD`) and the runner
+ * reaps it. Three properties, and each is checked against real processes:
+ * the record round-trips through both halves, the reap kills the whole GROUP
+ * and takes the profile with it, and a browser shut down normally is struck
+ * off so its pid can never be reaped later.
+ *
+ * `CHROME` is node's own binary here (see the top of this file), so a browser
+ * `launchChrome` actually spawns refuses its Chrome flags and exits at once —
+ * which is fine for the two tests about the RECORD, and is why the test about
+ * the KILL supplies its own long-lived stand-in instead.
+ */
+
+/** A port nothing is listening on, so `Browser.close` is a no-op and the group kill is what is under test. */
+const DEAD_PORT = 9099;
+
+/** Does this pid still exist? Signal 0 tests for the process without touching it. */
+const alive = (pid) => {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+};
+
+const settle = async (predicate, what, timeoutMs = 5000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.fail(`timed out after ${timeoutMs / 1000}s waiting for ${what}`);
+};
+
+test('launchChrome writes the browser down, and reapBrowsers reads that same record back', async () => {
+  const { launchChrome, reapBrowsers } = await import('./browser/chrome.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'habrecord-'));
+  const profile = mkdtempSync(join(tmpdir(), 'habrecord-profile-'));
+  const record = join(dir, 'weekcheck-9099.json');
+  process.env.CHROME_RECORD = record;
+
+  try {
+    const chrome = launchChrome(DEAD_PORT, profile);
+
+    // Read back through `reapBrowsers` rather than by parsing the file here:
+    // the writer and the reader are the pair that has to agree, and a test that
+    // parsed the line itself would keep passing while they drifted apart.
+    assert.deepEqual(
+      await reapBrowsers(record),
+      [{ pid: chrome.pid, port: DEAD_PORT, profile }],
+      'the runner cannot find the browser the suite launched',
+    );
+    assert.equal(existsSync(record), false, 'the reap left its own record behind');
+  } finally {
+    delete process.env.CHROME_RECORD;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('reapBrowsers kills the recorded process GROUP, and takes the profile with it', async () => {
+  const { reapBrowsers } = await import('./browser/chrome.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'habrecord-'));
+  const profile = mkdtempSync(join(tmpdir(), 'habrecord-profile-'));
+  writeFileSync(join(profile, 'Preferences'), '{}');
+  const record = join(dir, 'weekcheck-9099.json');
+  const kidFile = join(dir, 'kid.pid');
+
+  // A stand-in browser that forks a child of its own, which is what makes this
+  // a test of the GROUP kill: a plain `kill(pid)` takes the parent and leaves
+  // the child reparented to init and running, exactly as `kill()` leaves a real
+  // Chrome's renderers (`closeChrome`'s own note measures that at 14 -> 14).
+  const standIn = spawn(process.execPath, ['-e', `
+    const { spawn } = require('node:child_process');
+    const kid = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    require('node:fs').writeFileSync(process.argv[1], String(kid.pid));
+    setInterval(() => {}, 1000);
+  `, kidFile], { detached: true, stdio: 'ignore' });
+
+  let standInExited = false;
+  standIn.on('exit', () => { standInExited = true; });
+
+  let kid = 0;
+  try {
+    await settle(() => existsSync(kidFile) && readFileSync(kidFile, 'utf8').length > 0,
+      'the stand-in browser to fork a child');
+    kid = Number(readFileSync(kidFile, 'utf8'));
+    assert.ok(alive(kid), 'the stand-in never got as far as forking');
+
+    writeFileSync(record, `${JSON.stringify({ pid: standIn.pid, port: DEAD_PORT, profile })}\n`);
+    await reapBrowsers(record);
+
+    // The stand-in is a child of THIS process, so a `kill(pid, 0)` on it
+    // succeeds for as long as it is a zombie — its own `exit` event is the only
+    // honest witness. The grandchild is nobody's child here, so it is reaped by
+    // init and `alive` answers for it.
+    await settle(() => standInExited, 'the stand-in browser to die');
+    await settle(() => !alive(kid), 'the browser\'s child to die with its group');
+    assert.equal(existsSync(profile), false, 'the reap left the profile directory behind');
+    assert.equal(existsSync(record), false, 'the reap left its own record behind');
+  } finally {
+    try { process.kill(-standIn.pid, 'SIGKILL'); } catch { /* the reap got it */ }
+    if (kid) { try { process.kill(kid, 'SIGKILL'); } catch { /* the reap got it */ } }
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+test('closeChrome strikes its browser off, so a later reap cannot kill a recycled pid', async () => {
+  const { closeChrome, launchChrome, reapBrowsers } = await import('./browser/chrome.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'habrecord-'));
+  const profile = mkdtempSync(join(tmpdir(), 'habrecord-profile-'));
+  const record = join(dir, 'weekcheck-9099.json');
+  process.env.CHROME_RECORD = record;
+
+  try {
+    const chrome = launchChrome(DEAD_PORT, profile);
+    await closeChrome({ chrome, port: DEAD_PORT, profile });
+
+    // The record now names a browser that is already gone, and a pid the OS is
+    // free to hand to somebody else. Left on the record, the runner's reap
+    // after a later timeout would SIGKILL whatever process group had inherited
+    // it — which is the reason a browser closed properly comes off again.
+    assert.deepEqual(await reapBrowsers(record), [],
+      'a browser closed by its own suite is still on the record');
+  } finally {
+    delete process.env.CHROME_RECORD;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(profile, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The WIRING, over the real runner in a child process.
+ *
+ * `weekcheck` is in `OFFLINE_SUITES`, so this needs neither a server nor a
+ * browser, and a `SUITE_TIMEOUT_MS` of 1ms kills it during node's own startup —
+ * the timeout path, reached without waiting two minutes for it.
+ *
+ * What it pins is that the timeout path REACHES the reap and AWAITS it before
+ * the suite's result is resolved: the note the reap returns is in the runner's
+ * own output, which it can only be if it was awaited (it is produced
+ * asynchronously, after the `exit` event that used to resolve immediately). It
+ * cannot pin that the path handed to the reap is the one the child was told to
+ * write to — nothing offline launches a browser — so the assertion below on
+ * `run.mjs`'s source covers that half, and the fleet measurement in the pull
+ * request covers both together.
+ */
+test('the runner reaps on the timeout path, and waits for the reap before moving on', () => {
+  // `BASES` is DELETED rather than blanked: the runner reads an empty one as
+  // "no bases given" and exits 2 before it starts anything.
+  const env = { ...process.env, SUITE_TIMEOUT_MS: '1', BASE: 'http://127.0.0.1:1' };
+  delete env.BASES;
+
+  const run = spawnSync(process.execPath, [join(browserDir, 'run.mjs'), 'weekcheck'], {
+    encoding: 'utf8', env,
+  });
+
+  const all = `${run.stdout}${run.stderr}`;
+  assert.match(all, /TIMEOUT after 0\.001s — killing weekcheck/,
+    `the suite was not killed at all:\n${all}`);
+  assert.match(all, /nothing to reap: the suite launched no browser/,
+    `the timeout path did not reach the reap:\n${all}`);
+  assert.match(run.stdout, /FAIL\s+weekcheck/, `a killed suite did not fail:\n${all}`);
+  assert.equal(run.status, 1);
+});
+
+/**
+ * The half the test above cannot see, and it is a SOURCE guard with all that
+ * implies — it cannot see a renamed binding or an inverted comparison. What it
+ * does catch is the thing that would make every test above pass while the fleet
+ * leaked exactly as before: a runner that reaps a path no suite was ever told
+ * to write to, or that starts the reap and does not wait for it. The reap
+ * having to complete FIRST is the whole point — the next suite's
+ * `fixtures.reset()` runs against that instance the moment this resolves.
+ */
+test('the runner tells each suite where to record its browser', () => {
+  const src = readFileSync(join(browserDir, 'run.mjs'), 'utf8');
+
+  assert.match(src, /CHROME_RECORD:\s*record/,
+    'run.mjs no longer tells the suite where to write its browser down');
+  assert.match(src, /reaping\s*=\s*reapAfterTimeout\(record\)/,
+    'the timeout path no longer reaps the record it handed that suite');
+  assert.match(src, /await reaping/,
+    'the reap is started and not awaited, so the next suite can race the orphan');
 });
