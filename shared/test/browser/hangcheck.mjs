@@ -295,11 +295,30 @@ try {
     ],
   }, sessionId);
 
-  await ev(`(()=>{
+  // Read and clicked in ONE evaluation, and the key is kept: block 1b's last
+  // check is keyed on WHICH write this tap is, so it has to be the day this
+  // cell actually wrote. The grid's visible window is not fixed for the length
+  // of this suite — observed in a fleet run from these very messages, this tap
+  // writing `habits/1/entries/2026-09-03` while the tap in 1b, thirteen
+  // seconds later, read `2026-08-31` off a dashboard that had redrawn wider.
+  // Two evaluations leave a window where the cell read and the cell clicked
+  // are different days, and 1b would then be keyed on a write nobody made.
+  // Same discipline `reloadAndWaitFor` applies to `window.__doomed`.
+  const firstKey = await ev(`(()=>{
     const cells = [...document.querySelectorAll('.habit-row:first-child .check')];
-    cells[cells.length - 1].click();
-    return true;
+    const cell = cells[cells.length - 1];
+    const key = cell.dataset.focusKey;
+    cell.click();
+    return key;
   })()`);
+  const [, firstHabitId, firstDate] = firstKey?.split(':') ?? [];
+  // Load-bearing, not tidiness: a changed `focusKey` format leaves `firstPath`
+  // in 1b spelling `undefined`, and the check there would then hold no held
+  // PUT to be the first tap's. It fails in the safe direction — loudly, here
+  // and again there — rather than passing having compared nothing.
+  check('the first tap\'s own habit and date were read from the cell it clicked',
+    /^\d+$/.test(firstHabitId ?? '') && /^\d{4}-\d{2}-\d{2}$/.test(firstDate ?? ''),
+    String(firstKey));
 
   // The write is durable WHILE the fetch is in flight, which is the whole of
   // the data-loss half. It used to be queued only in the `catch`, so for the
@@ -372,20 +391,50 @@ try {
   // was fed by a failed write this branch was unreachable — the app never came
   // to believe anything — so this is the half of the old issue that only became
   // real once the state did.
-  const t0 = Date.now();
-  await ev(`(()=>{
-    const cells = [...document.querySelectorAll('.habit-row:nth-child(2) .check')];
-    cells[cells.length - 1].click();
-    return true;
-  })()`);
 
-  // Generously under the bound: if the attempt were still being made this
-  // could not finish inside it.
+  // Read and clicked in one evaluation, same as the first tap and for the same
+  // reason — this one names the write in the message below rather than in the
+  // assertion, so the cell read has to be the cell clicked or the sentence
+  // reports a day nobody wrote. `t0` includes one CDP round trip, single-digit
+  // milliseconds against the ceiling below.
+  const t0 = Date.now();
+  const secondKey = await ev(`(()=>{
+    const cells = [...document.querySelectorAll('.habit-row:nth-child(2) .check')];
+    const cell = cells[cells.length - 1];
+    const key = cell.dataset.focusKey;
+    cell.click();
+    return key;
+  })()`);
+  const [, secondHabitId, secondDate] = secondKey?.split(':') ?? [];
+  check('the second tap\'s own habit and date were read from the cell it clicked',
+    /^\d+$/.test(secondHabitId ?? '') && /^\d{4}-\d{2}-\d{2}$/.test(secondDate ?? ''),
+    String(secondKey));
+
+  // Poll PAST the bound, and that arithmetic is the whole reason the `took`
+  // check below can say anything at all.
+  //
+  // This loop was `for (let i = 0; i < 30; i++)` with a 100ms sleep — a 3s
+  // ceiling — against a threshold of `BOUND_MS / 2`, which is 5s. `took` could
+  // not reach 5s by any route, so that check could not fail: the only value it
+  // ever reported was the loop's own ceiling or less. It read as the check that
+  // catches a second tap paying the bound again, and it was arithmetic that
+  // could only pass. Nor is the outbox any help on its own — `api()` STAGES the
+  // write before it attempts, so the queue fills in ~100ms whether or not a
+  // socket was opened, which is exactly why the held-request check below has to
+  // exist too.
+  //
+  // The ceiling must EXCEED `BOUND_MS`, or the two builds are indistinguishable
+  // here: a second tap that pays the bound queues at ~10s, and a loop that
+  // gives up at 3s reports 3s and passes. `BOUND_MS + SLACK_MS` is the same
+  // allowance block 1 above gives the bound plus a slow machine, and it costs
+  // nothing on a healthy run — the loop breaks the instant the outbox holds
+  // both writes, ~100ms in — because it is only the FAILING run that spends it.
   let second = null;
-  for (let i = 0; i < 30; i++) {
+  const queuedBy = Date.now() + BOUND_MS + SLACK_MS;
+  for (;;) {
     await sleep(100);
     second = await look();
-    if (second.outbox.length >= 2) break;
+    if (second.outbox.length >= 2 || Date.now() >= queuedBy) break;
   }
   const took = Date.now() - t0;
 
@@ -393,9 +442,52 @@ try {
     second.outbox.length === 2, JSON.stringify(second.outbox));
   check('and it took a fraction of the bound, not the whole of it',
     took < BOUND_MS / 2, `${took}ms against a ${BOUND_MS}ms bound`);
+  // Every held PUT must be the FIRST tap's write, keyed on its habit and date.
+  //
+  // Three versions of this, and the differences are the whole point. Counting
+  // (`held.filter(PUT).length === 1`) said "exactly the first tap's write and
+  // nothing else", which is the right claim and the wrong measure: the first
+  // tap's write is STAGED in the outbox before its attempt (`api()` says so in
+  // as many words — "a staged write can be picked up by a concurrent `flush()`
+  // and sent while the live attempt is still out — two identical upserts, keyed
+  // on habit and date"), and `offline.js`'s connectivity watcher is what goes
+  // looking: `reportUnreachable` arms it, it probes `/healthz` — held here like
+  // everything else — and a flush can put the first tap's PUT back on the wire,
+  // where this suite's `Fetch` domain holds that one too. Measured on a 16-core
+  // box: twice in 63 executions of this suite, once in a 16-worker fleet run
+  // and once at 32 — and never in the 48 of those executions that were
+  // hangcheck ALONE, 16 and 32 at a time, which is what makes it the mixed load
+  // rather than the concurrency. Both sightings reported `2 PUT(s) held`, with
+  // the block above printing them as `PUT /api/habits/1/entries/2026-08-31, GET
+  // /healthz, PUT /api/habits/1/entries/2026-08-31` — the same habit and date
+  // twice, the second tap's own habit nowhere in the list. A healthy build
+  // failing a check that names the wrong thing is worse than no check.
+  //
+  // Asking that the second tap's own write is ABSENT fixes that and gives up
+  // half the claim: it stops noticing a PUT nobody accounts for. So ask instead
+  // that every held PUT IS the first tap's — which suppresses the duplicate,
+  // because the duplicate is that same write, while still failing on any other
+  // request reaching the wire. Keyed rather than positional either way, so it
+  // survives the taps being reordered or a third being added, where an
+  // exclusion list of the first write's URL would encode the shape this block
+  // happens to have today.
+  //
+  // `every` over an empty list is vacuously true, and that IS reachable —
+  // `check` records a failure and carries on, so a run where the block above
+  // has already failed `the request really was held` arrives here with nothing
+  // held and passes having examined nothing. It costs no coverage: the empty
+  // list means that earlier check went red, so the suite fails there and names
+  // the same condition. What it means is that this check is not evidence on its
+  // own, and the one above is not redundant with it — do not delete either
+  // because the other looks like it covers the case.
+  const firstPath = `/api/habits/${firstHabitId}/entries/${firstDate}`;
+  const secondPath = `/api/habits/${secondHabitId}/entries/${secondDate}`;
+  const heldPaths = held.filter((r) => r.method === 'PUT')
+    .map((r) => new URL(r.url).pathname);
   check('nothing was sent for it — the socket was never opened',
-    held.filter((r) => r.method === 'PUT').length === 1,
-    `${held.filter((r) => r.method === 'PUT').length} PUT(s) held`);
+    heldPaths.every((p) => p === firstPath),
+    `held PUTs: ${heldPaths.join(', ') || 'none'} — all of which must be the`
+    + ` first tap's ${firstPath}, and none the second tap's ${secondPath}`);
 
   /* ---- 2. creating a habit fails honestly rather than hanging ---- */
   console.log('--- POST /habits is bounded but never queued ---');

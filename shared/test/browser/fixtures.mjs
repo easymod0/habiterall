@@ -54,8 +54,12 @@ const api = async (path, options = {}, base = BASE) => {
     credentials: 'same-origin',
     ...options,
   });
+  // The INSTANCE is part of the message, not just the path. A worker owns the
+  // base it points at, so `/settings -> 500` says nothing about which of
+  // sixteen servers answered it — and the runner prints this sentence and
+  // nothing else (`could not reset fixtures: ${e.message}`, run.mjs).
   if (!res.ok && res.status !== 204) {
-    throw new Error(`${path} -> ${res.status} ${await res.text()}`);
+    throw new Error(`${base}/api${path} -> ${res.status} ${await res.text()}`);
   }
   return res.status === 204 ? null : res.json();
 };
@@ -86,7 +90,55 @@ export async function reset({ days = 60, base = BASE } = {}) {
   // Preferences are server-side now, so a suite that changed one would leak
   // into every suite after it — the dashboard would render in the wrong day
   // order and alignment assertions would fail for no visible reason.
-  await at('/settings', { method: 'DELETE' }).catch(() => {});
+  //
+  // **Not swallowed, and the state is what is asserted rather than the status
+  // code.** This line ended `.catch(() => {})` for as long as it existed,
+  // which made a reset that did NOT happen indistinguishable from one that
+  // did: the suite ran against the previous suite's settings, and what
+  // reaches CI is `countcheck`'s `numberFormat: 'comma'` arriving in a suite
+  // waiting for "8.5" against a box holding "8,5" — a 20-second timeout
+  // naming neither the setting nor the suite that left it (the shape of #305,
+  // for a different cause). Nothing legitimate needed the swallow: both
+  // editions serve `DELETE /settings` (`habiterall-{personal,cloud}/src/api.js`),
+  // and every other call below throws already, so a 401, a 429 from the read
+  // limiter, or a base pointed at nothing fails this reset one request later
+  // whatever this line does.
+  //
+  // `GET /settings` answers only the keys that are STORED, in both editions,
+  // so an empty object is the known shape — and asking for it is what a 200
+  // from a route that cleared nothing cannot satisfy. A reset that cannot
+  // fail is the same defect as a test that cannot fail.
+  // **Two causes, and the message names both, because the likelier one is not
+  // the route.** A worker owns its instance for the length of a suite — it does
+  // not own it against a browser an EARLIER suite left running, and one can be
+  // left running: `runSuite` kills an overrunning suite with
+  // `process.kill(-child.pid, 'SIGKILL')` (run.mjs), which is the suite's
+  // process GROUP, while `launchChrome` spawns the browser `detached: true`
+  // (chrome.mjs), which puts it in a group of its OWN. The group kill does not
+  // reach it, and the backstop that would — `process.on('exit', …)` beside that
+  // spawn — is the one thing SIGKILL never runs. Measured here: forcing
+  // `categorycheck` past `SUITE_TIMEOUT_MS` left 14 live Chrome processes still
+  // holding its profile after the runner had exited.
+  //
+  // Such an orphan is a live client pointed at this base, and it WRITES: its
+  // connectivity watcher polls, its outbox can flush, and `theme.js`'s
+  // `reconcile` pushes this device's stored theme into an account that has
+  // none — which is precisely the state the DELETE above has just created. So
+  // the failure lands on the NEXT suite's reset, saying "settings", about a
+  // route that did exactly what it was asked. Fixing the orphan at its source
+  // is `chrome.mjs`, shared by all 33 suites, and is filed rather than done
+  // here.
+  await at('/settings', { method: 'DELETE' });
+  const leftover = Object.keys(await at('/settings') ?? {});
+  if (leftover.length) {
+    throw new Error(`${base}: DELETE /api/settings answered, but `
+      + `${leftover.length} setting(s) are still stored (${leftover.join(', ')}). `
+      + 'Either the route cleared nothing, or something else is writing to this '
+      + 'instance — a browser orphaned by an earlier suite that hit '
+      + 'SUITE_TIMEOUT_MS is the known case, since the runner\'s group kill does '
+      + 'not reach a detached Chrome. Look for a stray browser on this base '
+      + '(pgrep -af remote-debugging-port) before suspecting the route.');
+  }
 
   // Categories are their own table and outlive a habit delete on purpose
   // (ON DELETE SET NULL, never CASCADE) — so without this they otherwise

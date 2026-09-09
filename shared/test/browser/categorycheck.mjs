@@ -177,12 +177,56 @@ try {
   // A category mutation used to be one of those emitters and is no longer —
   // see the "adding a category while editing a habit stays on that habit"
   // block below, which is what that costs and what it is worth.
-  const openHabitByName = async (name) => {
-    await ev(`(()=>{
+  /**
+   * `afterSave` is for the one call that follows a real SAVE, and it is #305's
+   * fix made for a VIEW rather than for a document.
+   *
+   * The mark itself is set on EVERY call, so the two paths differ in the WAIT
+   * and in nothing else — nothing in the app reads `data-doomed`, and the
+   * render this click starts drops the node carrying it either way.
+   *
+   * The name predicate below is not enough there. `saveHabit` closes the
+   * dialog and then `announce()`s, which from a habit's own page is a
+   * `'change'` — `detail.js` answers it with a fresh `/habits/:id/stats` +
+   * `/entries` round trip and rebuilds the whole page from the reply, Edit
+   * button included, and that button CAPTURES the habit object it was drawn
+   * from (`edit.addEventListener('click', () => openDialog(habit))`). So a
+   * reopen landing before that render presses an Edit holding the PRE-SAVE
+   * habit, and the dialog fills from it. The click here starts a render of
+   * its own, but it too returns before that render lands, so a poll in
+   * between reads the page that was already standing.
+   *
+   * The category is painted NOWHERE on a habit's own page — no chip, no
+   * subtitle field, `detail.js` never mentions it — so unlike `countcheck`'s
+   * target subtitle there is no value on screen to wait for. What there is,
+   * is the render itself: the standing `.detail-head` is marked in the SAME
+   * evaluation as the click that will replace it (`host.replaceChildren()`,
+   * detail.js), exactly as `reloadAndWaitFor` marks `window.__doomed`, and
+   * the wait then requires a head that is not the marked one. Every render
+   * from here on is post-save, because `detail.open()`'s fetches are issued
+   * at click time and the save's PUT had already answered before
+   * `dialog.close()` ran.
+   *
+   * It fails CLOSED: with no standing head to mark, the marker would be a
+   * no-op and the predicate trivially true — the guard failing open into the
+   * weak wait it replaces — so that case throws by name instead.
+   *
+   * @param {string} name  the habit whose row is clicked, and whose page is waited for
+   * @param {{afterSave?: boolean}} [opts]  `afterSave` when a save has just closed the dialog
+   */
+  const openHabitByName = async (name, { afterSave = false } = {}) => {
+    const marked = await ev(`(()=>{
+      const head = document.querySelector('#view-detail .detail-head');
+      if (head) head.dataset.doomed = '1';
       const row = [...document.querySelectorAll('#grid .habit-row')]
         .find(r => r.querySelector('.habit-name').textContent.trim() === ${JSON.stringify(name)});
       row.querySelector('.habit-meta').click();
+      return !!head;
     })()`);
+    if (afterSave && !marked) {
+      throw new Error(`openHabitByName('${name}', {afterSave}) found no standing`
+        + ' `.detail-head` to mark, so the join below would be the weak wait');
+    }
     // The habit's own NAME, not merely "a detail view with an Edit button on
     // it" — this helper is called from a detail view as well as from the
     // dashboard, and that weaker predicate was already satisfied by the page
@@ -193,8 +237,9 @@ try {
     await waitUntil(ev,
       `!document.getElementById('view-detail').hidden`
       + ` && document.querySelector('#view-detail h2')?.textContent.includes(${JSON.stringify(name)})`
+      + (afterSave ? ` && !document.querySelector('#view-detail .detail-head[data-doomed]')` : '')
       + ` && !!${byText('#view-detail button', 'Edit')}`,
-      { what: `${name}'s own page` });
+      { what: `${name}'s own page${afterSave ? ', REDRAWN since the save rather than the one left standing before it' : ''}` });
     await ev(`${byText('#view-detail button', 'Edit')}.click()`);
     await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
       { what: 'the habit dialog to open' });
@@ -609,7 +654,16 @@ try {
 
   /* ---------- deleting the category leaves the habit uncategorised ---------- */
 
-  await openHabitByName(HABIT_NAME);
+  // `afterSave`, and it is INERT today — say so, or the next reader finds no
+  // failing assertion behind it and takes it out. The save above changed
+  // `color` and nothing below reads `color`, so a stale capture here is a
+  // dialog holding the right category and the wrong colour: the same race as
+  // the one two blocks down, one field away from mattering. Joined anyway
+  // because "which field this block happens to read" is not a property worth
+  // resting on — add a colour assertion after a reopen, or make the save
+  // touch a second field, and it becomes live with nothing here to say it had
+  // been safe by accident.
+  await openHabitByName(HABIT_NAME, { afterSave: true });
   await ev(`(()=>{
     const row = [...document.querySelectorAll('#category-manage .category-manage-row')]
       .find(r => r.querySelector('.category-manage-name')?.textContent === 'Zzz Renamed Category');
@@ -627,6 +681,47 @@ try {
     afterCategoryDelete && afterCategoryDelete.category_id === null,
     JSON.stringify(afterCategoryDelete));
 
+  // A CANCEL, and that is why `dialog.open === false` is the whole wait here
+  // while the identical line after a SAVE is not. `dialog-cancel`'s handler is
+  // `() => dialog.close()` (habit-dialog.js) — no write, no `announce()` — so
+  // nothing behind the dialog is rebuilding and the reopen below cannot land
+  // on a page that is mid-refetch.
+  //
+  // The map of this file, and **the question to ask of a new site is not a
+  // count** — read this as a list of reasons, not as a partition. Twenty-six
+  // waits on `habit-dialog').open === false`: seventeen follow a Cancel and
+  // are safe for the reason above, this one included; nine follow a
+  // `requestSubmit()`. Sites are named by their `what:` string rather than by
+  // line, because a line-numbered version of this map was already wrong once.
+  //
+  // Exactly TWO of the nine are the shape #305 was — a reopen of the SAME
+  // habit with the dialog closing as the only join — and both now carry
+  // `openHabitByName(..., {afterSave: true})`: 'the colour-only edit to save'
+  // above, and 'assigning "Work" to save' below.
+  //
+  // What makes each of the other seven safe, and three of them are safe twice
+  // over, which is exactly why adding up buckets gets this wrong:
+  //
+  //   - the reopen names a DIFFERENT habit, so `openHabitByName`'s own name
+  //     predicate cannot be satisfied by the page standing behind the dialog
+  //     and it genuinely waits — 'the no-op edit on the uncategorised habit
+  //     to save' (Gym saved, this habit reopened) and 'the edit to save'
+  //     (Meditate saved, this habit reopened ~70 lines later, past that
+  //     block's own paragraph on why it does NOT return to the dashboard —
+  //     which is what a short reading of the file misses).
+  //   - a `reloadAndWaitFor` comes first, so the pre-save document is gone:
+  //     'the no-op edit on B to save', 'assigning "Fitness" to Meditate to
+  //     save', and 'the create to finish', which also waits for the new
+  //     habit's row to appear on the list before it.
+  //   - the only dialog reopened is `#btn-new`'s CREATE, which captures no
+  //     habit at all: 'the no-op edit on the second habit to save'.
+  //   - nothing is reopened: 'the no-op edit to save', on the cold deep-link
+  //     target, reads the server and then the select still in the DOM behind
+  //     the closed dialog.
+  //
+  // So the test for a tenth save is one question, not a bucket: does a reopen
+  // follow it that names the SAME habit, with no reload in between? Then it is
+  // an `afterSave`.
   await ev(`document.getElementById('dialog-cancel').click()`);
   await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
     { what: 'the dialog to close' });
@@ -649,8 +744,23 @@ try {
 
   // Re-navigate rather than wait on whichever view the chip's own `reload`
   // and this save's `change` happen to leave standing — see the comment on
-  // `openHabitByName` above.
-  await openHabitByName(HABIT_NAME);
+  // `openHabitByName` above. `afterSave`, because this is the ONE reopen in
+  // this file that follows a real save: the dialog closing says the PUT
+  // landed and says nothing about the page behind it having refetched, and
+  // the Edit button this presses captures whichever habit that page last
+  // drew.
+  await openHabitByName(HABIT_NAME, { afterSave: true });
+
+  // Read from the PAGE, not from the server — `fetchHabit` would report the
+  // new category while the dialog in front of it held the old one, which is
+  // the whole of what the join above is for and the reason this block did not
+  // flake before it existed: everything after this point asks the API. The
+  // pre-save habit is uncategorised (its category was deleted two blocks up),
+  // so "(none)" versus Work is a real difference and not a near-miss.
+  const reopenedCategory = await selectedCategoryOption();
+  ck('the reopened dialog is drawn from the habit as SAVED, not from the page as it was before',
+    reopenedCategory.value === workId,
+    JSON.stringify({ reopened: reopenedCategory, workId }));
 
   // The confirm is a preference (confirmDelete, on by default), not the claim
   // this block is making, and a real modal one would hang this evaluation.
