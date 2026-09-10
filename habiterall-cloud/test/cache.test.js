@@ -867,10 +867,32 @@ test('no mutating route in api.js writes through bare withUser', () => {
   //
   // The negative half is therefore stricter than the correctness property: a
   // read-only `withUser` inline in a mutating handler would be perfectly
-  // sound and would still fail here. No handler does one today, and making
-  // the first one a reviewed act is the point — the alternative is a positive
-  // assertion alone, which passes on a handler that writes twice and bumps
-  // once.
+  // sound and would still fail here. Making the first one a reviewed act was
+  // the point — the alternative is a positive assertion alone, which passes on
+  // a handler that writes twice and bumps once.
+  //
+  // **#200 is that first one, and it is exempted BY NAME rather than by
+  // weakening the rule.** A map and not a set, so each entry carries its
+  // reason — the shape `notMirrored` uses for the same job — and the exemption
+  // is not a pass: an exempted handler still has to reach `withUserWrite`
+  // (asserted for every handler below, exempt or not), every entry still has
+  // to name a handler that EXISTS (or a route rename leaves a permanent hole
+  // nothing reports), and the bare `withUser` region itself is checked to
+  // contain no write verb. What that last check cannot see is a write issued
+  // through a helper the region merely calls, which is the same blindness the
+  // `getHabit(req)` note above already records.
+  const BARE_WITHUSER_READS = new Map([
+    ['POST /habits/reorder',
+      'Reads `users.settings ->> habitSort` to refuse a reorder while the list '
+      + 'is not manually ordered (#200), and it is a READ — nothing it does '
+      + 'needs a bump. It sits OUTSIDE the `withUserWrite` below on purpose: '
+      + 'every mutating path in this edition reaches `habits` before `users`, '
+      + 'and while a lock-free SELECT could not close a cycle by itself, a '
+      + '`users` statement inside the one write whose job is to rewrite '
+      + '`habits` rows leaves the next reader to re-derive that. Asking before '
+      + 'the write transaction opens means the question does not arise.'],
+  ]);
+
   const text = src('api.js');
 
   const handlers = [...text.matchAll(
@@ -900,9 +922,35 @@ test('no mutating route in api.js writes through bare withUser', () => {
       `${name} reaches no withUserWrite: whatever it changes, nothing bumps `
       + 'data_version and every replica keeps serving its pre-write dashboard');
     // `withUserWrite(` does not match this — the paren is what separates them.
+    if (BARE_WITHUSER_READS.has(name)) {
+      // Exempted, but only as a READ. Each bare `withUser(` region is taken up
+      // to the end of its call and checked for a write verb, so the exemption
+      // covers the lookup it was granted for and not a write that arrives in
+      // the same handler later.
+      const regions = body.split(/withUser\(/).slice(1)
+        .map((tail) => tail.slice(0, tail.indexOf('));') + 3 || tail.length));
+      assert.ok(regions.length >= 1,
+        `${name} is exempted as a bare-withUser READ but has no bare withUser `
+        + 'call — the exemption is stale and must be removed');
+      for (const region of regions) {
+        assert.ok(!/\b(INSERT|UPDATE|DELETE)\b/i.test(region),
+          `${name} is exempted as a READ, but its bare withUser region writes: `
+          + region.trim());
+      }
+      continue;
+    }
     assert.ok(!/withUser\(/.test(body),
       `${name} calls bare withUser: that transaction does not bump `
       + 'data_version, so anything it writes is invisible to the /overview key');
+  }
+
+  // An exemption naming a route that no longer exists is a hole nothing else
+  // reports — the route could come back written differently and inherit the
+  // pass. The inventory is part of the assertion, per the root `CLAUDE.md`.
+  for (const name of BARE_WITHUSER_READS.keys()) {
+    assert.ok(found.includes(name),
+      `${name} is exempted but is not among the mutating handlers `
+      + `(${found.join(', ')}) — remove the stale exemption`);
   }
 });
 

@@ -2952,6 +2952,123 @@ await putSettings({ habitSort: 'manual' });
 // the import-isolation check further down counts EVERY entry this account
 // has and expects exactly one, so a fixture left behind here fails a test
 // about tenancy with a number about this block.
+/* ---------- POST /habits/reorder is gated on the SERVER ----------
+ *
+ * issue #200 review, HIGH. The same block as
+ * `habiterall-personal/test/overview.integration.mjs`, in both editions
+ * because the two ship a byte-identical route surface from two
+ * implementations and have already drifted on both correctness and cost
+ * (#195) — a gate in one edition and not the other is the same defect wearing
+ * a deployment.
+ *
+ * The drag handle is gated in `paint()` and Android hides its own affordance,
+ * but a client gate is advisory: the APK ships separately from the server, so
+ * an OLD build against a NEW one is the ordinary state after a release, and
+ * that build has never heard of `habitSort`. It offers the drag, sends the
+ * permutation, and rewrites every `position` the account has — silently,
+ * because the sorted list it is looking at does not read `position`.
+ */
+const gateHabits = [];
+for (const name of ['Zzz Gate Charlie', 'Zzz Gate Alpha', 'Zzz Gate Bravo']) {
+  gateHabits.push(await postHabit({ name, type: 'boolean' }));
+}
+const gateIds = gateHabits.map((h) => h.id);
+const gateNameOf = new Map(gateHabits.map((h) => [h.id, h.name]));
+
+const rawGateReorder = (order) => fetch(`${overviewBase}/api/habits/reorder`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ order }),
+});
+
+/**
+ * The manual order of just these three, read by switching the sort OFF rather
+ * than by trusting it — and filtered to this block's own ids, because the
+ * account carries every habit the file created before it.
+ */
+const gateOrderNow = async () => {
+  await putSettings({ habitSort: 'manual' });
+  const body = await getOverview({ days: 7 });
+  return body.habits.filter((h) => gateNameOf.has(h.id)).map((h) => gateNameOf.get(h.id));
+};
+
+await putSettings({ habitSort: 'manual' });
+await rawGateReorder(gateIds);
+const gateBefore = await gateOrderNow();
+ck('cloud: the gate fixture starts in a known manual order',
+  JSON.stringify(gateBefore) === JSON.stringify(gateHabits.map((h) => h.name)),
+  JSON.stringify(gateBefore));
+
+// A real permutation — the exact reverse — so a guard that let it through is
+// caught by the order assertion rather than by luck.
+const gateReversal = [...gateIds].reverse();
+
+// The STATUS is what is asserted here and not the message, which is the
+// convention the categories/reorder block above already follows: this harness
+// mounts `api` on a bare Express app with no JSON error handler, so a thrown
+// `httpError` reaches Express's own and comes back as an HTML page. The
+// message is asserted in `habiterall-personal/test/overview.integration.mjs`,
+// which boots that edition's real `server.js` and therefore its handler.
+for (const sort of ['name', 'strength', 'streak', 'recently missed']) {
+  await putSettings({ habitSort: sort });
+  const refused = await rawGateReorder(gateReversal);
+  ck(`cloud: POST /habits/reorder is 409 while habitSort is '${sort}'`,
+    refused.status === 409, `got ${refused.status}`);
+  const after = await gateOrderNow();
+  ck(`cloud: ...and NOTHING was written under '${sort}'`,
+    JSON.stringify(after) === JSON.stringify(gateBefore),
+    `${JSON.stringify(after)} vs ${JSON.stringify(gateBefore)}`);
+}
+
+// The other half, or the gate could refuse everything and pass above.
+await putSettings({ habitSort: 'manual' });
+const gateAllowed = await rawGateReorder(gateReversal);
+ck('cloud: POST /habits/reorder still succeeds under manual',
+  gateAllowed.status === 200, `got ${gateAllowed.status}`);
+const gateAfter = await gateOrderNow();
+ck('cloud: ...and the permutation actually took effect',
+  JSON.stringify(gateAfter) === JSON.stringify(gateBefore.slice().reverse()),
+  `${JSON.stringify(gateAfter)} vs ${JSON.stringify(gateBefore.slice().reverse())}`);
+
+// A refusal must not bump `data_version` — it wrote nothing, and a bump makes
+// every replica's memoised dashboard for this account unreachable for a request
+// that changed no data. `withUserWrite` is what bumps and the gate throws
+// before reaching it, which this asserts rather than trusting the ordering of
+// two lines.
+//
+// The sort is set BEFORE the first reading, because `PUT /settings` is itself a
+// write and bumps: straddling it would compare across two writes and the check
+// would pass for the wrong reason. Read as `::text` for the same reason
+// `data-version.integration.mjs` does — the column is a bigint, which `pg`
+// hands back as a string on some paths and a number on others.
+await putSettings({ habitSort: 'name' });
+const readVersion = () => admin.query(
+  `SELECT data_version::text AS v FROM users WHERE id = $1`, [alice]
+).then((r) => r.rows[0]?.v);
+
+const versionBefore = await readVersion();
+const refusedAgain = await rawGateReorder(gateReversal);
+const versionAfterRefusal = await readVersion();
+ck('cloud: the control refusal is still a 409', refusedAgain.status === 409,
+  `got ${refusedAgain.status}`);
+ck('cloud: a refused reorder does not bump data_version',
+  versionAfterRefusal === versionBefore,
+  `${versionBefore} -> ${versionAfterRefusal}`);
+
+// And the companion, or "did not bump" is also what a broken reader would say
+// about a write that DID: an accepted reorder must move it.
+await putSettings({ habitSort: 'manual' });
+const versionBeforeAccept = await readVersion();
+await rawGateReorder(gateIds);
+const versionAfterAccept = await readVersion();
+ck('cloud: an ACCEPTED reorder does bump it, so the reader above works',
+  versionAfterAccept !== versionBeforeAccept,
+  `${versionBeforeAccept} -> ${versionAfterAccept}`);
+
+for (const id of gateIds) {
+  await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
+}
+
 for (const id of [
   sortCharlie.id, sortAlpha.id, sortBravo.id, tieZzz.id, tieAaa.id,
   rmNever.id, rmWeekAgo.id, rmYesterday.id,

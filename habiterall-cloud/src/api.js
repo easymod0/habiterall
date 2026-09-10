@@ -375,6 +375,55 @@ api.delete('/habits/:id', route(async (req, res) => {
 }));
 
 api.post('/habits/reorder', route(async (req, res) => {
+  // The account's own order has to be MANUAL for a permutation of it to mean
+  // anything, and that has to be asked HERE rather than left to the clients.
+  // `paint()` gates the drag handle on the sort (`shared/public/ui/dashboard.js`)
+  // and Android hides its own reorder affordance, but a client gate is only ever
+  // advisory: the APK ships separately from the server, so an OLD build against
+  // a NEW one is the ordinary state after a release rather than a contrived
+  // case, and that build has never heard of `habitSort`. It would offer the
+  // drag, send the permutation, and rewrite every `position` the account has —
+  // silently, because the sorted list it is looking at does not read `position`
+  // and so shows nothing at all happening.
+  //
+  // 409 rather than 400: the body is well-formed and the ids are real, and what
+  // is wrong is the account's state at the moment it arrived. It is also the
+  // answer the outbox wants — `shared/public/offline.js` drops every 4xx but
+  // 401 and 403 as permanently inapplicable, which is exactly right for a
+  // reorder issued against a list that is not manually ordered. Replaying it
+  // later cannot make it apply.
+  //
+  // **Read in its own `withUser` BEFORE `withUserWrite`, and that placement is
+  // a lock-order decision rather than a style one.** Every mutating path in
+  // this edition reaches `habits` before `users` — `withUserWrite` pre-clears
+  // the summary stamp for exactly that reason, `ORDER BY id` in an explicit
+  // `LockRows` pass — and `PUT /settings` going `users -> habits` alone once
+  // deadlocked five pairs of ordinary routes into 500s on somebody's tap, which
+  // nothing in either edition handles. A `SELECT` of `users.settings` inside
+  // `fn` would take no ROW lock and so could not close a cycle by itself, but
+  // it would put a `users` statement in the middle of a `habits` write on the
+  // one route whose whole job is to rewrite `habits` rows, and the next reader
+  // would have to re-derive that argument to know it was safe. Asking before
+  // the write transaction opens means the question does not arise: the read
+  // commits first, and a refusal opens no write transaction at all.
+  //
+  // The cost is one extra checkout on a route a human reaches by dragging a row,
+  // not on a dashboard load — and the refusal path is now the cheaper of the
+  // two. What it buys instead of a consistent snapshot is a window: the setting
+  // can change between the read and the write, so a reorder can be accepted as
+  // the account switches to a sort, or refused as it switches back. Both are
+  // self-correcting on the client's next `/overview`, and neither writes an
+  // order anybody is looking at — which is why this is stated rather than
+  // closed with a `FOR SHARE` that would put a `users` row lock ahead of
+  // `habits` and reintroduce precisely the inversion above.
+  const sort = resolveHabitSort(await withUser(uid(req), (db) =>
+    db.query(`SELECT settings ->> 'habitSort' AS habit_sort FROM users WHERE id = $1`, [uid(req)])
+      .then((r) => r.rows[0]?.habit_sort)
+  ));
+  if (sort !== 'manual') {
+    throw httpError(409, `habits are ordered by ${sort}; set habitSort to manual to reorder`);
+  }
+
   const order = req.body.order;
   if (!Array.isArray(order) || order.some((n) => !Number.isInteger(Number(n)))) {
     throw httpError(400, 'order must be an array of habit ids');

@@ -535,6 +535,71 @@ ck('categorySummaries is byte-identical under manual and under name',
 
 await put('/settings', { habitSort: 'manual' });
 
+/* ---------- POST /habits/reorder is gated on the SERVER ----------
+ *
+ * issue #200 review, HIGH: the drag handle is gated in `paint()` and Android
+ * hides its own affordance, but a client gate is advisory. The APK ships
+ * separately from the server, so an OLD build against a NEW one is the
+ * ordinary state after a release — and that build has never heard of
+ * `habitSort`, so it offers the drag, sends the permutation, and rewrites
+ * every `position` the account has. Silently: the sorted list it is looking at
+ * does not read `position`, so nothing appears to happen.
+ *
+ * The status is read here, which `post` above cannot do (it returns parsed
+ * JSON and throws the response away), and the STORED ORDER is asserted
+ * afterwards rather than only the status — a 409 that had already written the
+ * positions would pass a status-only check, which is the whole defect.
+ */
+const rawReorder = (order) => fetch(`${base}/api/habits/reorder`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ order }),
+});
+
+/** The manual order, read by switching the sort off rather than by trusting it. */
+const manualOrderNow = async () => {
+  await put('/settings', { habitSort: 'manual' });
+  return sortOrderOf(await overview({ days: 7 }));
+};
+
+const orderBefore = await manualOrderNow();
+ck('the fixture starts in a known manual order, so a rewrite of it is visible',
+  JSON.stringify(orderBefore) === JSON.stringify(['Charlie', 'Alpha', 'Bravo']),
+  JSON.stringify(orderBefore));
+
+// The permutation is a REAL one — the exact reverse — so a guard that let it
+// through would be caught by the order assertion below rather than by luck.
+const reversal = [sortBravo.id, sortAlpha.id, sortCharlie.id];
+
+for (const sort of ['name', 'strength', 'streak', 'recently missed']) {
+  await put('/settings', { habitSort: sort });
+  const refused = await rawReorder(reversal);
+  const body = await refused.json();
+  ck(`POST /habits/reorder is 409 while habitSort is '${sort}'`,
+    refused.status === 409, `got ${refused.status} ${JSON.stringify(body)}`);
+  ck(`...and the refusal names the sort in force, not a generic message`,
+    typeof body.error === 'string' && body.error.includes(sort),
+    JSON.stringify(body.error));
+  const after = await manualOrderNow();
+  ck(`...and NOTHING was written: the manual order is untouched under '${sort}'`,
+    JSON.stringify(after) === JSON.stringify(orderBefore),
+    `${JSON.stringify(after)} vs ${JSON.stringify(orderBefore)}`);
+}
+
+// The other half, or the gate could simply refuse everything and pass above.
+await put('/settings', { habitSort: 'manual' });
+const allowed = await rawReorder(reversal);
+ck('POST /habits/reorder still succeeds under manual', allowed.status === 200,
+  `got ${allowed.status}`);
+const reordered = await manualOrderNow();
+ck('...and the permutation actually took effect',
+  JSON.stringify(reordered) === JSON.stringify(['Bravo', 'Alpha', 'Charlie']),
+  JSON.stringify(reordered));
+
+// Put it back, so anything appended after this block starts where it expects.
+await rawReorder([sortCharlie.id, sortAlpha.id, sortBravo.id]);
+await put('/settings', { habitSort: 'manual' });
+
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }
 try { rmSync(workdir, { recursive: true, force: true }); } catch { /* best effort */ }

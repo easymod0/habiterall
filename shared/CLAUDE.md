@@ -685,6 +685,40 @@ so `habitSort` rides on the same read.
 no second one.** A value stored by a newer version, or a hand-edited settings
 row, falls back to `'manual'` rather than 500ing the dashboard.
 
+**`POST /habits/reorder` refuses with 409 unless the sort is `manual`, in BOTH
+editions, and the client gates are advisory.** A permutation of the list only
+means something when the list is the thing being permuted: under a sort,
+`position` is written and then never read, so a reorder that went through would
+rewrite every one of them and show nothing happening. `paint()` gates the drag
+handle on the sort and Android hides its own affordance, and neither is the
+guard — **the APK ships separately from the server, so an old build against a
+new one is the ordinary state after a release rather than a contrived case**,
+and that build has never heard of `habitSort`. 409 rather than 400 because the
+body is well-formed and the ids are real; what is wrong is the account's state
+when it arrived. It is also the answer the outbox wants, since `offline.js`
+drops every 4xx but 401 and 403 as permanently inapplicable — replaying this
+one later cannot make it apply.
+
+The setting is read **before** the write transaction opens rather than inside
+it, and in cloud that is a lock-order decision. Every mutating path there
+reaches `habits` before `users` — `withUserWrite` pre-clears the summary stamp
+for exactly that reason — and `PUT /settings` going `users -> habits` alone
+once deadlocked five pairs of ordinary routes into 500s nothing handles. A
+`SELECT` of `users.settings` takes no row lock and so could not close a cycle
+by itself, but putting a `users` statement inside the one write whose job is to
+rewrite `habits` rows leaves the next reader to re-derive that. Asking first
+means the question does not arise, and a refusal opens no write transaction at
+all. What it costs is a window — the setting can change between the read and
+the write — which is self-correcting on the next `/overview` and is why this is
+not closed with a `FOR SHARE` that would put a `users` row lock ahead of
+`habits` and reintroduce the inversion.
+
+Both editions' suites assert the STATUS, that the stored order did not move,
+and that a refusal does not bump `data_version`, with an accepted reorder
+beside it proving the reader works. Personal's also asserts the message names
+the sort; cloud's cannot, because that harness mounts the router on a bare
+Express app with no JSON error handler.
+
 **`sortHabitPayloads` returns a NEW array and never mutates its input**, because
 both editions build `categorySummaries` from the same, unsorted `habitPayloads`
 — an aggregate must not depend on the account's display preference, which is

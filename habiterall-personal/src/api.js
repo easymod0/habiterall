@@ -389,6 +389,28 @@ api.delete('/habits/:id', (req, res) => {
 const MAX_REORDER_IDS = 1000;
 
 api.post('/habits/reorder', (req, res) => {
+  // The account's own order has to be MANUAL for a permutation of it to mean
+  // anything, and that has to be asked HERE rather than left to the clients.
+  // `paint()` gates the drag handle on the sort (`shared/public/ui/dashboard.js`)
+  // and Android hides its own reorder affordance, but a client gate is only ever
+  // advisory: the APK ships separately from the server, so an OLD build against
+  // a NEW one is the ordinary state after a release rather than a contrived
+  // case, and that build has never heard of `habitSort`. It would offer the
+  // drag, send the permutation, and rewrite every `position` the account
+  // has — silently, because the sorted list it is looking at does not read
+  // `position` and so shows nothing at all happening.
+  //
+  // 409 rather than 400: the body is well-formed and the ids are real, and what
+  // is wrong is the account's state at the moment it arrived. It is also the
+  // answer the outbox wants — `shared/public/offline.js` drops every 4xx but
+  // 401 and 403 as permanently inapplicable, which is exactly right for a
+  // reorder issued against a list that is not manually ordered. Replaying it
+  // later cannot make it apply.
+  const sort = storedHabitSort();
+  if (sort !== 'manual') {
+    throw httpError(409, `habits are ordered by ${sort}; set habitSort to manual to reorder`);
+  }
+
   const order = req.body.order;
   if (!Array.isArray(order)) throw httpError(400, 'order must be an array of habit ids');
   if (order.length > MAX_REORDER_IDS) {
