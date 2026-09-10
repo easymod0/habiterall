@@ -3544,6 +3544,118 @@ try {
   ck('…leaving the category deleted on the server, which is what the picker was right about',
     !serverN.includes(victimN), JSON.stringify(serverN));
 
+  /* ---------- o: a background reload reaches the OPEN dialog's list ----------
+   *
+   * Found while diagnosing `2c`'s flake, which reached this by racing its own
+   * queued reorder. This block reaches it deliberately, and by the route a
+   * USER takes rather than by a race: leave the habit dialog open across
+   * anything that emits `'reload'` — a reconnect, an outbox flush, a save made
+   * on another surface — and `load()` (`ui/dashboard.js`) installs a new
+   * `state.categories` and then `paint()`s the DASHBOARD. `#category-manage`
+   * is not on that page.
+   *
+   * `moveCategory` decides from `state.categories` while the user pressed a
+   * row in the LIST, so at the disagreement a press either returns at
+   * `to < 0` having moved nothing, repainted nothing and fetched nothing — the
+   * silent no-op — or moves the right category from a slot the user was not
+   * looking at, which reads as the arrows moving the wrong row.
+   *
+   * Two checks, and the second is the one that matters: the first says the
+   * list AGREES with the store, the second says a press aimed at what is
+   * on screen does what the screen promised. Deleting `emit('categories')`
+   * from `load()`, or the listener that answers it in `init()`, must fail
+   * BOTH — the first naming the two orders, the second naming the row that
+   * did not move.
+   *
+   * The reorder is made through the API rather than through the arrows, and
+   * that is the whole point: it stands in for the other device, the phone, or
+   * this device's own replayed outbox. Going through `moveCategory` would
+   * repaint the list itself and assert nothing.
+   */
+  console.log('\n--- o: a background reload reaches the open dialog\'s list ---');
+
+  // Named on a fixture row rather than on `#btn-new`, which is static markup
+  // and so answers true before the app has booted at all — and the blocks
+  // above leave the page on a fragment route, so this navigates rather than
+  // reloads.
+  await reloadAndWaitFor(ev,
+    `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Meditate')`,
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'a fresh dashboard to open the dialog from',
+    });
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev,
+    `document.getElementById('habit-dialog').open === true
+      && document.querySelectorAll('#category-manage .category-manage-row').length > 1`,
+    { what: 'the habit dialog, with more than one category to reorder' });
+
+  /** The list as DRAWN, and the store the press will actually be judged by. */
+  const manageVsStore = () => ev(`(async()=>{
+    const store = (await import('/shared/ui/store.js')).state;
+    const rows = [...document.getElementById('category-manage').children];
+    const name = (li) => li.querySelector('.category-manage-name')?.textContent.trim() ?? null;
+    return {
+      dom: rows.map((li) => li.dataset.categoryId),
+      domNames: rows.map(name),
+      store: store.categories.map((c) => String(c.id)),
+      storeNames: store.categories.map((c) => c.name),
+    };})()`);
+
+  const beforeO = await manageVsStore();
+  ck('o sanity: the open dialog starts out agreeing with the store',
+    JSON.stringify(beforeO.dom) === JSON.stringify(beforeO.store),
+    JSON.stringify(beforeO));
+
+  // Rotate the order by one on the SERVER, then fire the `'reload'` a
+  // reconnect fires. The rotation moves EVERY row rather than swapping two, so
+  // a check that happened to pass on a coincidence of two adjacent ids cannot.
+  const rotated = [...beforeO.store.slice(1), beforeO.store[0]];
+  const reloadedO = await ev(`(async()=>{
+    const r = await fetch('/api/categories/reorder', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ order: ${JSON.stringify(rotated)}.map(Number) }),
+    });
+    if (!r.ok) return { status: r.status };
+    (await import('/shared/ui/store.js')).emit('reload');
+    return { status: r.status };})()`);
+  ck('o sanity: the out-of-band reorder was accepted',
+    reloadedO.status === 200, JSON.stringify(reloadedO));
+
+  // The store moving is what this block is downstream of, so it is the
+  // predicate — not a duration, and not the DOM, which is the thing under
+  // test and would make the wait pass only in the fixed world.
+  await waitUntil(ev, `(async()=>{
+    const s = (await import('/shared/ui/store.js')).state;
+    return JSON.stringify(s.categories.map(c => String(c.id)))
+      === JSON.stringify(${JSON.stringify(rotated)});})()`,
+    { what: "the background reload's own new category order to reach the store" });
+
+  const afterO = await manageVsStore();
+  ck('o: the open dialog\'s list follows a reload it did not make',
+    JSON.stringify(afterO.dom) === JSON.stringify(afterO.store),
+    `list ${JSON.stringify(afterO.domNames)} over store `
+    + `${JSON.stringify(afterO.storeNames)}`);
+
+  // The press, aimed positionally at what is on screen. Row 1 rather than row
+  // 0, because row 0's ↑ is disabled — a press there would be refused by the
+  // button and prove nothing about the store.
+  const pressedO = await ev(`(()=>{
+    const list = document.getElementById('category-manage');
+    const row = list.children[1];
+    const id = row.dataset.categoryId;
+    const name = row.querySelector('.category-manage-name').textContent.trim();
+    row.querySelector('.category-move-up').click();
+    return { id, name,
+      landedAt: [...list.children].findIndex(li => li.dataset.categoryId === id),
+      order: [...list.children].map(
+        li => li.querySelector('.category-manage-name')?.textContent.trim() ?? null),
+    };})()`);
+  ck('o: THE assertion: a press on the second row moves THAT row to the top',
+    pressedO.landedAt === 0 && pressedO.order[0] === pressedO.name,
+    `pressed ${JSON.stringify(pressedO.name)}, `
+    + `landed at ${pressedO.landedAt} in ${JSON.stringify(pressedO.order)}`);
+
   console.log(fails ? `\n${fails} CHECK(S) FAILED` : '\nALL CATEGORY CHECKS PASSED');
 } catch (e) {
   console.log('ERROR:', e.message);

@@ -168,6 +168,8 @@ each fails differently — a version with any four of them still ships the bug:
   and the Add's own `'reload'` is in flight for exactly that press. `habits`
   and `categorySummaries` are deliberately NOT ticketed: neither has a writer
   that can be newer, and summaries are read by id rather than by position.
+  (`loadSeq`, added later, tickets those two and the rest of what a load
+  installs, for a second `load()` rather than for a category writer.)
 - `moveCategory`'s catch keeps its ticket and reverts only while it holds it.
   `previous` is captured before the splice, so the revert is as stale a writer
   as any reply — two presses overlapping with the EARLIER one failing last put
@@ -185,6 +187,34 @@ each fails differently — a version with any four of them still ships the bug:
   picker and re-arms exactly that. It needs no prior outage: `api()` queues a
   `replayable()` write on any network error, the 10s timeout included, while a
   GET is never pre-empted.
+
+**And the ticket is only half of what `load()` owed this field: the OTHER half
+is telling the dialog when its assignment DID land.** The five above are about
+a stale writer losing; this is about the newest writer being invisible to a
+view of the same field that is not on the page it repaints. `paint()` is the
+dashboard's, and `#category-manage` is a modal's — so a background reload
+(an outbox flush's `syncNow()`, a reconnect, a save made elsewhere; anything
+reaching `emit('reload')`) left the list showing the pre-reload order over a
+store holding the post-reload one. That is not cosmetic, because `moveCategory`
+decides from the STORE while the user pressed a row in the LIST: at the
+disagreement a press either returns at `to < 0` having moved nothing,
+repainted nothing and fetched nothing — the silent no-op the arrow-disable
+rules above exist to avoid — or moves the right category from a slot the user
+was not looking at.
+
+`load()` therefore emits **`'categories'`** where it assigns, and
+`habit-dialog.js`'s `init()` answers it with `repaintCategoriesKeepingPlace`.
+Three things about that event are load bearing. It is emitted inside the
+assignment's own guard, so it means "this field just moved" rather than "a load
+finished". It is **not** `'reload'`, which fires BEFORE anything has been
+fetched — a repaint there redraws the stale order it exists to replace and
+looks like a fix. And the listener declines while the dialog is CLOSED, because
+`restoreArrowFocus` focuses the list itself for a key it cannot find, so a
+repaint from the dashboard would move focus into a panel the user is not in;
+nothing is lost by declining, since `openDialog` repaints on the way in. Block
+`o` in `categorycheck.mjs` pins both halves — the list agreeing with the store,
+and a press aimed at what is on screen doing what the screen promised — and
+each fails with either the emit or the listener removed.
 
 A superseded read still repaints (from current state, which can only
 re-confirm what is there); the ASSIGNMENT is the half that can be stale.

@@ -7,7 +7,8 @@
  * Split into modules that becomes a circular import; kept as one file it
  * becomes 2,000 lines. The store is the seam: mutators announce, views listen.
  *
- * Two events, because there are only two things a mutator ever wants:
+ * Three events. The first two are what a mutator wants; the third is what a
+ * WRITER of one shared field owes the views of it that are not on screen:
  *
  *   'change'  the data behind the *currently visible* view moved — repaint it.
  *             Each view decides whether it is the one showing, and whether
@@ -15,6 +16,19 @@
  *   'reload'  go to the dashboard and load it from the server. This is what
  *             saving, deleting, importing and syncing all want: the list, as
  *             the server now has it.
+ *   'categories'
+ *             `state.categories` has just been assigned. Emitted by `load()`
+ *             (`ui/dashboard.js`) alone, because that is the field's one
+ *             writer outside `ui/habit-dialog.js` — the four in there repaint
+ *             both controls themselves, having the list in front of them.
+ *
+ * The third is deliberately not `'change'`. `'change'` means the VISIBLE view
+ * moved and every listener asks whether it is the one showing; the habit
+ * dialog is a modal that can be open over any of them, and what it needs told
+ * is that one FIELD moved. It is not `'reload'` either, which is emitted
+ * BEFORE anything has been fetched — a repaint there would redraw the stale
+ * order it exists to replace, and look like a fix. See the listener in
+ * `ui/habit-dialog.js`'s `init()` for what the disagreement costs a press.
  *
  * Nothing here touches the DOM, so it is importable from anywhere.
  */
@@ -213,7 +227,7 @@ const listeners = new Map();
  * does must still be correct with `undefined`, because most emitters send
  * nothing at all.
  *
- * @param {'change'|'reload'} event
+ * @param {'change'|'reload'|'categories'} event
  * @param {(what?: any) => void} fn
  */
 export function on(event, fn) {
@@ -241,7 +255,7 @@ export function on(event, fn) {
  * habit that was actually stored instead of showing the pre-save one for the
  * length of two round trips. Its listener is `ui/detail.js`'s.
  *
- * @param {'change'|'reload'} event
+ * @param {'change'|'reload'|'categories'} event
  * @param {any} [what] the mutator's own copy of what it just wrote
  */
 export function emit(event, what) {
