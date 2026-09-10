@@ -142,18 +142,23 @@ test('reset() FAILS when DELETE /settings answers 200 and clears nothing', async
         assert.match(err.message, /1 setting\(s\) are still stored \(numberFormat\)/, err.message);
         assert.ok(err.message.includes(instance.base),
           `the failure does not name the instance: ${err.message}`);
-        // **The likelier cause has to be IN the sentence.** The stub here is a
-        // route that ignores its DELETE, but the reachable version of this
-        // failure is a browser an earlier suite orphaned — `runSuite`'s
-        // `SUITE_TIMEOUT_MS` kill is a process-GROUP kill and `launchChrome`
-        // spawns Chrome `detached: true`, so the browser survives it and keeps
-        // writing to the base the next suite is about to reset (`theme.js`'s
-        // `reconcile` pushes a stored theme into an account that has none,
-        // which is what this DELETE has just made the account). Reproduced:
-        // forcing a suite past the timeout left 14 live Chrome processes.
-        // Without this the message sends the reader to the route, and the
-        // route is fine — so the sentence is asserted, not just its numbers.
-        assert.match(err.message, /orphaned by an earlier suite/, err.message);
+        // **The other cause has to be IN the sentence.** The stub here is a
+        // route that ignores its DELETE, but this failure is also what a stray
+        // browser produces: one still pointed at this base keeps writing to it
+        // (`theme.js`'s `reconcile` pushes a stored theme into an account that
+        // has none, which is what this DELETE has just made the account), so
+        // the reader is sent to a route that is fine.
+        //
+        // What the sentence names CHANGED with #317 and this assertion changed
+        // with it. The reachable case used to be a browser the runner itself
+        // orphaned — its `SUITE_TIMEOUT_MS` kill is a process-GROUP kill while
+        // `launchChrome` spawns Chrome `detached: true`, measured at 13 live
+        // processes after one forced timeout — and the runner reaps that one
+        // now. What is left is a browser it never started: a suite run by hand
+        // and killed, or another checkout's fleet on the same base. Pinning the
+        // wording is the point; a message that still blamed the runner's own
+        // kill would send the reader somewhere nothing can be wrong any more.
+        assert.match(err.message, /a suite it did not start/, err.message);
         assert.match(err.message, /remote-debugging-port/, err.message);
         return true;
       }
