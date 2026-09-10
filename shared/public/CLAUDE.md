@@ -201,10 +201,41 @@ each fails differently — a version with any four of them still ships the bug:
   only signal that tells them apart is "this handler just deleted this
   category itself", which is not something a repaint can know on its own.
   `clearCategoryIfChosen` is that signal, called by the ✕ delete handler in
-  both of its branches, before either one's repaint. It is the ONE place this
-  needs saying: there is exactly one `DELETE /categories/:id` call site in the
-  whole web UI (`ui/habit-dialog.js`), so one explicit clear is complete
-  coverage of "deliberately removed" rather than a first case of several.
+  both of its branches, before either one's repaint. There is exactly one
+  `DELETE /categories/:id` call site in the whole web UI
+  (`ui/habit-dialog.js`), so one call is all the WRITE needs.
+
+  **But one call site is not one path, and what the clear covers is the
+  CONTROL AS IT STANDS when that DELETE settles — not every dialog that will
+  later be opened.** Two orderings still reach `saveHabit` with a doomed id,
+  and both are worth knowing before adding a second clear that would answer
+  neither.
+
+  The first is PRE-EXISTING and #323 did not move it: offline, press ✕ on a
+  category, cancel, then open a DIFFERENT habit that was also in it. The
+  queued branch calls `categoryHint` rather than `announce()`, so no reload
+  has run and `state.habits` still carries the old `category_id` — so
+  `openDialog` renders it PINNED, which preserved an unknown id before #323
+  exactly as it does now, and the habit's own edit is dropped on replay. The
+  clear cannot help: it ran, correctly, against a control that was showing
+  something else at the time.
+
+  The second is #323's own accepted cost, and it is the deleted-ELSEWHERE half
+  of the same failure. An authoritative read lands (another device deleted the
+  category; `load()` installs the list without it), the picker PRESERVES it —
+  which is the whole point — and then this device's next write goes to the
+  outbox, needing no prior outage. That queued `PUT /habits/:id` carries the
+  doomed id, answers 400 on replay, and the whole edit is dropped behind the
+  same toast naming neither the habit nor the field. Before #323 that ordering
+  queued `category_id: null` and replayed 200, losing only a category the
+  server had already cleared. So the trade is stated plainly: a silent
+  uncategorisation on every Save became a loud refusal ONLINE and a lost edit
+  OFFLINE, and the online path is the ordinary one. It is a chosen cost, not
+  an oversight — `resolveCategoryId` is the authority on whether an id
+  resolves, and a pre-queue guard in `saveHabit` would be a second answer to
+  that question, in the browser, where the cold-deep-link case
+  (`state.categories === []`) has to stay allowed. Do not add one without
+  deciding that separately.
 
 **And the ticket is only half of what `load()` owed this field: the OTHER half
 is telling the dialog when its assignment DID land.** The five above are about

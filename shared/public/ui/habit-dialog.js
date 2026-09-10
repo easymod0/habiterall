@@ -677,7 +677,22 @@ function renderCategoryManage() {
  * at RENDER time, which is whatever dialog is genuinely open, and a late
  * answer can only ever re-confirm it. Nothing is lost by it: a rename changes
  * a name, an add does not assign, and a delete's own "fall back to (none)" is
- * answered by the refetched list not holding the deleted id.
+ * `clearCategoryIfChosen`'s job, called by the ✕ handler itself.
+ *
+ * **That last leg used to read "answered by the refetched list not holding the
+ * deleted id", and issue #323 made it false** — say so here rather than let a
+ * reader rebuild the argument out of a clause that no longer holds.
+ * `renderCategorySelect` now PRESERVES an id the refetched list does not hold,
+ * behind `(current category)`, because a list that has not caught up and an
+ * authoritative read from a device where the category was genuinely deleted
+ * are indistinguishable to it and only the second may clear a habit's
+ * category. So the delete case is no longer self-answering: a repaint through
+ * this function clears nothing at all, and the compensation is the explicit
+ * call the ✕ handler makes before it. **It is not redundant with anything
+ * here** — that is the conclusion the old clause invites, and taking the
+ * explicit clear out on the strength of it re-ships #323's other half, the
+ * whole-habit-edit drop the queued branch's own comment describes.
+ *
  * `renderCategorySelect`'s explicit-id path now has exactly ONE caller —
  * `openDialog`'s synchronous first render, the only place a wanted id is known
  * to belong to the dialog being drawn, because no `await` separates them.
