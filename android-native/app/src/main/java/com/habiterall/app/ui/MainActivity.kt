@@ -868,6 +868,13 @@ class MainActivity : ComponentActivity() {
         // is nothing here that has to work offline. Read from the fetch and
         // used to draw, and no more.
         var grouped by remember { mutableStateOf(false) }
+        // Same shape as `grouped`, and the same reason: nothing about sorting
+        // runs from an alarm, so this is read from the fetch and used only to
+        // gate the reorder hand-off below, never to decide how to sort — the
+        // phone still draws whatever order `/overview` returns. Defaults to
+        // `true` (manual order enabled) to match the server's own default
+        // before a settings fetch has landed, same as `AppSettings().manualOrderEnabled`.
+        var manualOrder by remember { mutableStateOf(true) }
         // Seeded from the mirror the notification already reads, so the grid and
         // the shade agree during the first paint — before any fetch lands, and for
         // as long as one cannot (the mirror is what works offline).
@@ -949,6 +956,7 @@ class MainActivity : ComponentActivity() {
                 skipDays = fetched.skipDaysEnabled
                 questionMarks = fetched.questionMarksEnabled
                 grouped = fetched.groupByCategoryEnabled
+                manualOrder = fetched.manualOrderEnabled
                 // The same fetch answers whether this phone is still a
                 // destination, and the alarms read that from the local mirror —
                 // so this is where a choice made in a browser reaches them.
@@ -1224,6 +1232,7 @@ class MainActivity : ComponentActivity() {
             rows = shown,
             categories = categories,
             grouped = grouped,
+            manualOrder = manualOrder,
             loading = loading,
             loaded = loaded,
             error = error,

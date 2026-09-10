@@ -44,6 +44,7 @@ import {
   STREAK_HISTORY_DAYS, recomputeBestStreak, stripSummaryCache, summaryCacheHit,
 } from '@habiterall/shared/summary-cache.js';
 import { computeAwards } from '@habiterall/shared/awards.js';
+import { resolveHabitSort, needsLastMiss, sortHabitPayloads } from '@habiterall/shared/habit-order.js';
 
 export const api = express.Router();
 
@@ -1085,6 +1086,16 @@ api.get('/overview', route(async (req, res) => {
   // window; `summaryEnd` IS, even though it equals `end` on an unpaged
   // dashboard, because paging back separates them.
   //
+  // `habitSort` is a new input, read out of `users.settings` inside
+  // `buildOverview` itself — it is NOT spelled into `windowKey` below. That is
+  // deliberate rather than an omission: `PUT /settings` is a write through
+  // `withUserWrite`, which bumps `data_version` in the same transaction as the
+  // setting change, so every memo entry built under the OLD sort is keyed at a
+  // version no reader will ever ask for again. This sentence is load-bearing —
+  // without that bump, changing the sort would go on serving the memoised old
+  // order, and the dashboard would look simply broken. `test:dataversion` is
+  // what guards it.
+  //
   // The account's `data_version` goes in FRONT of all of it (#192), and it is
   // second rather than first: `<account id>:` has to stay the whole of what
   // `forgetAccount` and `capAccount` match on — that prefix is
@@ -1233,12 +1244,24 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
   const ids = habits.map((h) => h.id);
 
   // One answer for the account, read once for the whole payload — the map
-  // below runs per habit and this is not a per-habit question.
+  // below runs per habit and this is not a per-habit question. `habitSort`
+  // rides on the same query rather than a second one — see the KDoc on
+  // `windowKey` above for why it is not in the memo key, and
+  // shared/src/habit-order.js for why it is read from the stored setting
+  // rather than a `?sort=` parameter at all.
   const { rows: [prefs] } = await db.query(
-    `SELECT settings ->> 'atMostUnlogged' AS unlogged FROM users WHERE id = $1`,
+    `SELECT settings ->> 'atMostUnlogged' AS unlogged,
+            settings ->> 'habitSort'      AS habit_sort
+       FROM users WHERE id = $1`,
     [user]
   );
   const unlogged = unloggedFrom(prefs);
+  const habitSort = resolveHabitSort(prefs?.habit_sort);
+  // `manual`, almost every request, needs no extra pass at all — see
+  // `needsLastMiss`.
+  const wantsLastMiss = needsLastMiss(habitSort);
+  /** @type {Map<number, string|null>} */
+  const lastMissById = new Map();
 
   // The grouped lifetime read `/categories/stats` also runs (same shape, line
   // 453 there), reused here for two things the bounded windows below cannot
@@ -1424,7 +1447,14 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
     // shared, so the three figures cannot disagree by construction.
     const creditFrom = creditAnchor(firstAnswer.get(h.id) ?? null, summaryEnd);
 
-    const stats = summaryStats(h, recent, { end: summaryEnd, unlogged, creditFrom });
+    const stats = summaryStats(h, recent, {
+      end: summaryEnd, unlogged, creditFrom, lastMiss: wantsLastMiss,
+    });
+    // Collected while each row is built rather than in a second pass over
+    // `habitPayloads`: `stats.lastMiss` is absent unless `wantsLastMiss` asked
+    // for it (see `summaryStats`), and `?? null` is what keeps an absent key
+    // from becoming `undefined` in the map `sortHabitPayloads` reads below.
+    if (wantsLastMiss) lastMissById.set(h.id, stats.lastMiss ?? null);
 
     // The cached pair, or the derivation it was cached from — off the same
     // `fresh` the slice above was chosen by, so a habit cannot be served a
@@ -1477,12 +1507,30 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
   // on the row beneath each header — never a second scoring pass. See
   // `summariseByCategory` (`@habiterall/shared/stats.js`) for the partition
   // rule.
+  //
+  // `categorySummaries` is built from `habitPayloads` in its UNSORTED,
+  // `position, id` order, and the display sort is applied only to the
+  // `habits` array returned below — never fed back into this call. That
+  // ordering is what `sortHabitPayloads` returning a new array (rather than
+  // sorting in place) exists to make safe: the mean and member counts must
+  // not move depending on what the account's `habitSort` happens to be.
+  //
+  // The sort also comes AFTER `writeBackSummaries` above, and that ordering
+  // is safe rather than merely convenient: `writeBackSummaries`' `candidates`
+  // CTE takes its row locks `ORDER BY id`, precisely so that the order this
+  // function hands rows over in cannot influence its lock order (see the KDoc
+  // above `writeBackSummaries`). Reordering the payload here adds no
+  // statement to that write and touches no lock.
+  const categorySummaries = archived
+    ? undefined
+    : summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd);
+
   return {
     start,
     end,
     categories,
-    habits: habitPayloads,
-    ...(archived ? {} : { categorySummaries: summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd) }),
+    habits: sortHabitPayloads(habitPayloads, habitSort, lastMissById),
+    ...(categorySummaries ? { categorySummaries } : {}),
   };
 }
 

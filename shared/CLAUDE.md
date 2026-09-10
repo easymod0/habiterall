@@ -21,6 +21,7 @@ Postgres one.
 | `src/unzip.js` | minimal ZIP reader (Loop's CSV export) |
 | `src/zip.js` | minimal ZIP writer, for the CSV archive |
 | `src/constants.js` | `UNSET` / `YES` / `SKIP` wire values |
+| `src/habit-order.js` | the `habitSort` enumeration, its normaliser, and the comparator both editions' `/overview` sort the habit list with |
 | `src/security.js` | the CSP, the session cookie shape, `STATIC_CACHE`, the four rate limits, the `TRUST_PROXY` rule and `sameOriginOnly` — **data, not middleware**, so this package keeps its no-dependencies property |
 | `src/password.js` | hashing, verification, and the one answer to "is auth on?". Personal's half of the shared sign-in flow; cloud uses none of it |
 | `src/log.js` | structured logging: one event per line, one stream, and the redaction that keeps personal data out |
@@ -600,6 +601,72 @@ worst case the route can be asked for — the shape `/overview` already has, whe
 `SCORE_WARMUP_DAYS` and are imported by both editions: a ceiling that drifted
 would have one edition refuse a URL the other served, and a default that drifted
 would have them answer one `start`-less URL with different bucket counts.
+
+## Habit order (`habitSort`)
+
+**The list gets a sort order, and it is the SERVER's answer, never `paint()`'s.**
+Both editions' `/overview` call `sortHabitPayloads` (`src/habit-order.js`) over
+the account's stored preference, so the web app and the Android app agree about
+the order of the same account's list BY CONSTRUCTION — a client-side sort would
+make two views of one account disagree the moment they load at different times.
+
+**It is read from the STORED SETTING, not from a `?sort=` query parameter, for
+five reasons that all have to survive together:** three of the five sorts
+(`strength`, `streak`, `recently missed`) order by a DERIVED figure that is not
+a column, so no `ORDER BY` could express them — it is a post-assembly reorder
+either way, and reading the setting costs nothing extra over reading a query
+parameter would. Reading the stored setting makes the two clients agree by
+construction, where a query parameter makes agreement depend on both clients
+remembering to send it — the exact disagreement `habitSort` exists to prevent.
+`/overview`'s URL stays stable, so the service worker's `shellFirst` cache and
+cloud's `overviewMemo` keep one entry per window rather than one per sort. It
+adds no new attacker-controlled input to a read route. And it costs zero extra
+queries: cloud already reads `settings ->> 'atMostUnlogged'` in `buildOverview`
+and personal already has `storedSetting(key)` reading a table it reads anyway,
+so `habitSort` rides on the same read.
+
+**`resolveHabitSort` is the one normaliser, and both editions call it — there is
+no second one.** A value stored by a newer version, or a hand-edited settings
+row, falls back to `'manual'` rather than 500ing the dashboard.
+
+**`sortHabitPayloads` returns a NEW array and never mutates its input**, because
+both editions build `categorySummaries` from the same, unsorted `habitPayloads`
+— an aggregate must not depend on the account's display preference, which is
+exactly what a caller sorting in place would risk. `manual` is identity, and
+every other arm is a PARTIAL comparator returning `0` on a tie, relying on
+`Array.prototype.sort` being stable (ES2019): do not "fix" a tie into an `id`
+tiebreak, since the incoming order is already `ORDER BY position, id`, a better
+fallback than `id` alone.
+
+**`recently missed` sorts by the end of the habit's last miss run
+(`computeMissRuns`), most recent first, and "never missed" and "missed longer
+ago than the window reaches" are the SAME answer** — the window is
+`SCORE_WARMUP_DAYS` (400 days), so a habit that last missed 500 days ago sorts
+as never-missed. That is a real, accepted limitation, not an oversight: a wider
+window would cost every ordinary request to serve the rare account with a
+years-old habit.
+
+**A habit with NO entries at all is not "never missed" under this sort — it
+sorts as missed TODAY, and that puts a brand-new, never-logged habit at the
+TOP under `recently missed`.** This falls straight out of `unlogged: 'miss'`
+being the account default (see "Day states and habit shape" above): a habit
+with no rows has a one-day window (today), unanswered, and an unanswered day is
+a miss. It is defensible — a habit needing attention sorting first is arguably
+the point — but it is surprising enough that both editions' integration
+fixtures had to be built around it deliberately (a genuinely never-missed habit
+needs a continuous, gap-free run of entries, not merely zero rows) rather than
+discovered by whoever adds the next fixture.
+
+**The `categorySummaries`-does-not-move assertion (both editions'
+`/overview` integration suites) bites only because its fixture holds a
+deliberately engineered TIE.** `summariseByCategory`'s `best`/`worst`
+(`extremeMember`) is genuinely order-independent except at a tie, where it
+keeps whichever member it meets FIRST — so without two members holding an
+identical `score`, the "categorySummaries is byte-identical under `manual` and
+under `name`" assertion would pass VACUOUSLY against a build that fed the
+sorted array into the aggregate instead of the unsorted one. Do not "simplify"
+that fixture down to distinct scores; the tie is the only thing making the
+assertion mean anything.
 
 ## Awards
 

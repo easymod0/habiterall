@@ -643,6 +643,12 @@ await withUser(alice, (db) => db.query(
     numberFormat: 'comma',
     gridDays: '7',
     detailCards: nonCanonicalDetailCards,
+    // #200's key, and `'strength'` rather than `'manual'` for the reason
+    // `theme` is `'dark'`: `manual` IS the registry default, so a fixture
+    // holding it compares equal to itself and passes with `habitSort` dropped
+    // from PORTABLE_SETTINGS entirely — which is the one decision that issue
+    // had to make about this key.
+    habitSort: 'strength',
     discordWebhook: 'https://discord.com/api/webhooks/1/secret',
   }), alice]
 ));
@@ -662,7 +668,7 @@ ck('a backup carries the tracking settings',
   // which is exactly why they are asserted: "portable" is a decision made once
   // in a list, and a key that quietly stopped travelling would show up only as
   // a page that came back longer than it was left.
-  exported.gridDays === '7' &&
+  exported.gridDays === '7' && exported.habitSort === 'strength' &&
   JSON.stringify(exported.detailCards) === JSON.stringify(nonCanonicalDetailCards),
   JSON.stringify(exported));
 ck('and no notification destination',

@@ -1991,6 +1991,24 @@ cards were on, so a card added since arrives **off**. Open ⚙ and press **Done*
 even with nothing else changed, to rewrite it; after that a new card arrives on,
 in its usual place. Nothing does this for you in the background.
 
+And one decides what order they come in:
+
+| Setting | Default | What it does |
+|---|---|---|
+| **Habit order** (Dashboard) | Manual — drag to reorder | Draws the dashboard list by name (A-Z), by strength (strongest first), by current streak (longest first), by how recently each habit was last missed (most recent first), or leave it manual and drag habits into place yourself |
+
+It is the server that puts the list in order rather than the browser, on purpose: the
+order comes back from the server on every load, so the web app and the
+Android app show the same account's list in the same order, and it survives
+signing in on a different device. Only **Manual** can be dragged — choosing
+any other order turns dragging off, because a drop would otherwise rewrite
+every habit's stored position into that order, and the same reason gates the
+Android app's own **Reorder habits** menu item. **Recently missed** treats a
+habit you have never logged at all as missed *today*, so a brand-new habit
+sorts to the top under it, and a miss further back than 400 days reads the same
+as never having missed at all — that being the window the dashboard already
+computes each row's strength and current streak over.
+
 Two of them are Loop's, with Loop's names and Loop's defaults (both **off**):
 
 | Setting | What it does |

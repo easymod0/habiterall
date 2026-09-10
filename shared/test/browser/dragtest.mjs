@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil } from './chrome.mjs';
 const BASE = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9230);
 const profile=mkdtempSync(join(tmpdir(),'habdrag-'));
 const chrome=launchChrome(PORT, profile);
@@ -81,6 +81,65 @@ try{
   check('and it is the moved habit\'s own handle',
     await ev(`document.activeElement?.closest('.habit-row')
       ?.querySelector('.habit-name')?.textContent?.trim()`)===firstName);
+
+  // --- habitSort (#200) gates the drag handle, the fifth clause ---
+  //
+  // Through the REAL settings dialog, not a raw `PUT /settings`: the sort is
+  // decided server-side, so the browser only sees the new order once
+  // `applyDraft` decides to refetch it (`SERVER_COMPUTED`, `ui/settings-dialog.js`),
+  // and that decision is exactly what this block is checking. A bare fetch
+  // would update the stored setting and leave the on-screen order and the
+  // gate both stale until something else repainted, which would make this
+  // pass for reasons that have nothing to do with the wiring under test.
+  console.log('\n--- habitSort gates the drag handle ---');
+
+  const handleCount = () => ev(`document.querySelectorAll('.drag-handle').length`);
+  const openSettings = async () => {
+    await ev(`document.getElementById('btn-settings').click(); true`);
+    await waitUntil(ev, `document.getElementById('settings-dialog').open === true`,
+      { what: 'the settings dialog to open' });
+  };
+  const pickHabitSort = (value) => ev(`(() => {
+    const s = document.getElementById('setting-habitSort');
+    s.value = ${JSON.stringify(value)};
+    s.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  const pressDone = () => ev(`document.getElementById('settings-close').click(); true`);
+
+  const manualOrder = await names();
+  check('under the default (no habitSort stored) the drag handle is present',
+    await handleCount() === manualOrder.length, String(await handleCount()));
+
+  await openSettings();
+  await pickHabitSort('name');
+  await pressDone();
+
+  // Named order, not "some row exists" — waitUntil on a weak predicate would
+  // return the instant the (unchanged) grid repaints for any other reason.
+  const nameOrder = [...manualOrder].sort((a, b) =>
+    a.localeCompare(b, 'en', { sensitivity: 'base', numeric: true }));
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-name')]
+      .map(n=>n.textContent.trim()).join('|') === ${JSON.stringify(nameOrder.join('|'))}`,
+    { what: 'the dashboard to redraw in name order' });
+
+  check('the list order actually changed under the sort',
+    JSON.stringify(await names()) !== JSON.stringify(manualOrder),
+    `${JSON.stringify(manualOrder)} -> ${JSON.stringify(await names())}`);
+  check('the drag handle is gone once a sort other than manual is stored',
+    await handleCount() === 0, String(await handleCount()));
+
+  await openSettings();
+  await pickHabitSort('manual');
+  await pressDone();
+
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-name')]
+      .map(n=>n.textContent.trim()).join('|') === ${JSON.stringify(manualOrder.join('|'))}`,
+    { what: 'the dashboard to redraw back in manual (position) order' });
+
+  check('the drag handle is back once the sort is set back to manual',
+    await handleCount() === manualOrder.length, String(await handleCount()));
 
   console.log(fails===0?'\nALL DRAG CHECKS PASSED':`\n${fails} FAILED`);
 }catch(e){console.error('ERROR:',e.message);fails++;}

@@ -864,6 +864,20 @@ export const SETTING_VALUES = {
   // display preference — it decides whether `10.000` is ten or a refused
   // thousands group — which is why it is portable.
   numberFormat: ['auto', 'point', 'comma'],
+  // How the dashboard list is ORDERED — the values are written as literals
+  // rather than imported from `habit-order.js`, the same reason every other
+  // enumerated setting here is a literal array: this file is the one thing
+  // `parseSettings` has to trust. `shared/test/habit-order.test.js` pins this
+  // list against `HABIT_SORTS` in both directions — a value here the
+  // comparator treats as identity is a setting that saves and then does
+  // nothing — and the registry-symmetry test in
+  // `shared/test/settings.test.js` pins it against
+  // `shared/public/ui/settings.js`. Note `'recently missed'` has a
+  // SPACE — it is not `'recentlyMissed'`. The comparator and the enumeration
+  // both live in `habit-order.js`; this list is only what may be stored, the
+  // same split `historyGranularity` and `atMostUnlogged` already have with
+  // their own rule elsewhere in `stats.js`.
+  habitSort: ['manual', 'name', 'strength', 'streak', 'recently missed'],
 
   /* --- notifications: see notify.js for what each of these means --- */
 
@@ -942,6 +956,11 @@ export const PORTABLE_SETTINGS = Object.freeze([
   'detailCards',
   'historyGranularity',
   'historyMode',
+  // A display preference carrying no capability, exactly like `theme` and
+  // `groupByCategory` above — it decides how the SAME rows are ARRANGED, not
+  // what any row MEANS. Restoring it moves no figure, only the order the
+  // list paints in.
+  'habitSort',
   'scoreGranularity',
   'skipDays',
   'questionMarks',

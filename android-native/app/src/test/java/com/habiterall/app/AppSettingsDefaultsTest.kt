@@ -120,6 +120,23 @@ class AppSettingsDefaultsTest {
     }
 
     @Test
+    fun `the habit-sort default matches the registry`() {
+        // Named on its own, the same reason `atMostUnlogged` is: this is not a
+        // sixth logic mirror (nothing about HOW to sort is copied here — the
+        // phone renders whatever `/overview` returns, in that order, as it
+        // always has), but the DEFAULT is a mirror, because `GET /settings`
+        // answers only the keys that have been stored and this is what the
+        // reorder-menu gate reads to decide whether a drag would mean
+        // anything right now. `default("habitSort")` reads the web registry,
+        // which is what pins the two together rather than hard-coding
+        // `"manual"` on both sides of this assertion.
+        assertEquals(default("habitSort"), AppSettings.DEFAULT_HABIT_SORT)
+        assertEquals("manual", AppSettings().habitSortOrDefault)
+        assertEquals("name", AppSettings(habitSort = "name").habitSortOrDefault)
+        assertFalse(AppSettings(habitSort = "name").manualOrderEnabled)
+    }
+
+    @Test
     fun `an untouched account is a phone that reminds`() {
         // `notifyChannels` defaults to the on-device alarm alone — the one
         // destination that needs no setup and the only one that fires with no
@@ -147,7 +164,7 @@ class AppSettingsDefaultsTest {
     private val mirrored = setOf(
         "dayOrder", "weekStart", "calendarZoom", "skipDays", "questionMarks",
         "atMostUnlogged", "scoreGranularity", "historyGranularity", "historyMode",
-        "notifyChannels", "confirmDelete", "groupByCategory",
+        "notifyChannels", "confirmDelete", "groupByCategory", "habitSort",
     )
 
     private val notMirrored = mapOf(
@@ -298,6 +315,10 @@ class AppSettingsDefaultsTest {
             historyGranularity = "day",
             historyMode = "count",
             scoreGranularity = "year",
+            // Non-default on purpose — a fixture holding a field's default
+            // compares equal to itself and would pass with the field dropped
+            // from AppSettings entirely. "name" is not "manual".
+            habitSort = "name",
         )
         assertFalse(set.androidRemindersEnabled)
         assertFalse(set.newestLeft)
@@ -311,6 +332,8 @@ class AppSettingsDefaultsTest {
         assertEquals("day", set.historyGranularityOrDefault)
         assertEquals("count", set.historyModeOrDefault)
         assertEquals("year", set.scoreGranularityOrDefault)
+        assertEquals("name", set.habitSortOrDefault)
+        assertFalse(set.manualOrderEnabled)
     }
 
     /**

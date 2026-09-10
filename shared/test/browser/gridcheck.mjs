@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor } from './chrome.mjs';
+import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil } from './chrome.mjs';
 const APP=process.env.BASE??'http://localhost:3000', PORT = devtoolsPort(9290);
 const profile=mkdtempSync(join(tmpdir(),'habgrid-'));
 const chrome=launchChrome(PORT, profile);
@@ -586,6 +586,93 @@ try{
   await send('Emulation.setTimezoneOverride', { timezoneId: '' }, sessionId);
   await send('Page.removeScriptToEvaluateOnNewDocument',
     { identifier: timerProbe.identifier }, sessionId);
+
+  /* ---------- issue #200: a re-sort must not lose the roving focus ---------- */
+  //
+  // `paint()` restores focus by `data-focus-key`, which names WHAT a control
+  // is rather than where it sat — see the module comment above `habitRow` in
+  // ui/dashboard.js. `habitSort` is the first setting able to move a habit's
+  // ROW to a different index without any row being added, removed or dragged,
+  // so it is the case that actually exercises "identified by the habit, not
+  // the index" rather than merely asserting a mechanism that happens to be
+  // shared with drag-and-drop.
+  console.log('\n--- habitSort keeps focus on the HABIT through a re-sort ---');
+
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate',{url:APP},sessionId),
+    what: 'the dashboard',
+  });
+  await sleep(600);
+
+  const rowNames = () => ev(`[...document.querySelectorAll('#grid .habit-row .habit-name')]
+    .map(n=>n.textContent.trim())`);
+  const manualNames = await rowNames();
+
+  // A control INSIDE the row, not the row itself — `data-focus-key` names the
+  // checkbox (`check:<habit>:<date>`), not the `.habit-row`.
+  const focused = await ev(`(() => {
+    const row = document.querySelector('.habit-row:first-child');
+    const box = row.querySelector('.check[data-focus-key]');
+    box.focus();
+    return { key: box.dataset.focusKey,
+      name: row.querySelector('.habit-name').textContent.trim() };
+  })()`);
+  ck('a habit\'s own checkbox took focus ahead of the re-sort',
+    !!focused.key, JSON.stringify(focused));
+
+  const nameOrder = [...manualNames].sort((a,b) =>
+    a.localeCompare(b, 'en', { sensitivity: 'base', numeric: true }));
+
+  // NOT the settings dialog here — dragtest.mjs already drives that end to
+  // end, and `<dialog>.showModal()` moves focus into the dialog the instant
+  // it opens (to the pressed button, or the dialog itself), which would
+  // steal focus from the checkbox before the re-sort this block is about
+  // ever happens. `settings.save` is the same server round trip the dialog's
+  // Done button makes, and `emit('reload')` is the exact call
+  // `applyDraft` makes for a `SERVER_COMPUTED` key — both real app
+  // machinery, invoked directly so nothing here touches the DOM outside the
+  // grid before the assertion.
+  await ev(`(async () => {
+    const settings = await import('/shared/ui/settings.js');
+    await settings.save('habitSort', 'name');
+    const { emit } = await import('/shared/ui/store.js');
+    emit('reload');
+  })()`);
+
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-name')].map(n=>n.textContent.trim())
+      .join('|') === ${JSON.stringify(nameOrder.join('|'))}`,
+    { what: 'the dashboard to redraw in name order' });
+
+  const afterNames = await rowNames();
+  const wasAt = manualNames.indexOf(focused.name);
+  const nowAt = afterNames.indexOf(focused.name);
+  ck('the focused habit\'s index really moved — or this proves nothing',
+    wasAt !== -1 && nowAt !== -1 && wasAt !== nowAt,
+    `${focused.name}: index ${wasAt} -> ${nowAt} (${JSON.stringify(manualNames)} -> ${JSON.stringify(afterNames)})`);
+
+  const stillFocused = await ev(`({
+    key: document.activeElement?.dataset?.focusKey ?? null,
+    name: document.activeElement?.closest('.habit-row')
+      ?.querySelector('.habit-name')?.textContent?.trim() ?? null,
+  })`);
+  ck('focus stayed on the same HABIT\'s control, identified by the habit and not by the index',
+    stillFocused.key === focused.key && stillFocused.name === focused.name,
+    `${JSON.stringify(focused)} -> ${JSON.stringify(stillFocused)}`);
+
+  // Leave the account back on manual order — the next suite's own
+  // `fixtures.reset()` would clear this anyway, but a suite run standalone
+  // twice in a row should not depend on that.
+  await ev(`(async () => {
+    const settings = await import('/shared/ui/settings.js');
+    await settings.save('habitSort', 'manual');
+    const { emit } = await import('/shared/ui/store.js');
+    emit('reload');
+  })()`);
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-name')].map(n=>n.textContent.trim())
+      .join('|') === ${JSON.stringify(manualNames.join('|'))}`,
+    { what: 'the dashboard to redraw back in manual order' });
 
   console.log(fails===0?'\nALL GRID CHECKS PASSED':`\n${fails} FAILED`);
 }catch(e){console.error('ERR',e.message);fails++;}

@@ -2743,6 +2743,175 @@ const habitOverridesMiss = await postHabit({
 await ckFlag('account success, habit miss, numerical at-most -> false',
   habitOverridesMiss.id, false);
 
+/* ---------- issue #200: /overview orders the habit list by habitSort ---------- */
+
+console.log('\n--- habitSort ---');
+// Reset first: every habit and setting created above (including
+// `atMostUnlogged`, still 'success') is still live on this account, and
+// `unansweredCounts` on the earlier at-most habits would otherwise pollute
+// the scores this section reasons about.
+await putSettings({ atMostUnlogged: 'miss' });
+
+const putEntry = (id, date, body) => fetch(`${overviewBase}/api/habits/${id}/entries/${date}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+});
+
+// Position order (creation order) is deliberately NOT name order and NOT
+// score order: Charlie is created first and scores HIGHEST, Alpha second and
+// scores LOWEST (no entries at all), Bravo third and scores in between — so
+// manual (`Charlie, Alpha, Bravo`), name (`Alpha, Bravo, Charlie`) and
+// strength/streak (`Charlie, Bravo, Alpha`) are three different orders.
+const sortCharlie = await postHabit({ name: 'SortCharlie', type: 'boolean' });
+const sortAlpha = await postHabit({ name: 'SortAlpha', type: 'boolean' });
+const sortBravo = await postHabit({ name: 'SortBravo', type: 'boolean' });
+const SORT_IDS = new Set([sortCharlie.id, sortAlpha.id, sortBravo.id]);
+const sortNameOf = (id) => ({
+  [sortCharlie.id]: 'SortCharlie', [sortAlpha.id]: 'SortAlpha', [sortBravo.id]: 'SortBravo',
+}[id]);
+const sortOrderOf = (data) =>
+  data.habits.filter((h) => SORT_IDS.has(h.id)).map((h) => sortNameOf(h.id));
+
+for (let i = 19; i >= 0; i--) await putEntry(sortCharlie.id, isoDaysAgo(i), { value: 2 });
+for (let i = 4; i >= 0; i--) await putEntry(sortBravo.id, isoDaysAgo(i), { value: 2 });
+
+// A deliberate tie: two habits in one category with IDENTICAL entries, so
+// their `score` is the exact same number. `summariseByCategory`'s `best`/
+// `worst` (`extremeMember`) keeps whichever member it meets FIRST on a tie,
+// so this is what lets "categorySummaries must not move" below actually
+// fail if the aggregate were ever fed the SORTED array: TieZzz is created
+// first (and so sorts first in POSITION order) but sorts LAST by name.
+const tieCategory = await fetch(`${overviewBase}/api/categories`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'TieCat', color: '#a3a3a3' }),
+}).then((r) => r.json());
+const tieZzz = await postHabit(
+  { name: 'TieZzz', type: 'boolean', category_id: tieCategory.id });
+const tieAaa = await postHabit(
+  { name: 'TieAaa', type: 'boolean', category_id: tieCategory.id });
+for (let i = 4; i >= 0; i--) {
+  await putEntry(tieZzz.id, isoDaysAgo(i), { value: 2 });
+  await putEntry(tieAaa.id, isoDaysAgo(i), { value: 2 });
+}
+
+// No habitSort stored at all — this account has never set the key — is the
+// case this asserts, not one that stores 'manual' explicitly.
+const sortManual = await getOverview({ days: 7 });
+ck('with no habitSort stored, /overview returns manual (position, id) order',
+  JSON.stringify(sortOrderOf(sortManual)) === JSON.stringify(['SortCharlie', 'SortAlpha', 'SortBravo']),
+  JSON.stringify(sortOrderOf(sortManual)));
+ck('...and the tied pair reads TieZzz first, in POSITION order',
+  sortManual.categorySummaries.find((s) => s.id === tieCategory.id)?.best?.name === 'TieZzz',
+  JSON.stringify(sortManual.categorySummaries.find((s) => s.id === tieCategory.id)));
+
+await putSettings({ habitSort: 'name' });
+const sortByName = await getOverview({ days: 7 });
+ck("habitSort: 'name' sorts A-Z, case-insensitively",
+  JSON.stringify(sortOrderOf(sortByName)) === JSON.stringify(['SortAlpha', 'SortBravo', 'SortCharlie']),
+  JSON.stringify(sortOrderOf(sortByName)));
+
+// The memo-invalidation claim: the NEXT request after the PUT above must
+// already reflect the new order, over the same URL the memo keys on. If
+// `habitSort` were spelled into `windowKey` rather than covered by the
+// `data_version` bump `PUT /settings` triggers, this would still pass on a
+// COLD memo and only fail once a hit was warmed — asserted here precisely
+// because the PUT above already primed the memo at the OLD order via
+// `sortManual`'s identical query string.
+ck('the memo serves the new order on the very next request after the PUT',
+  JSON.stringify(sortOrderOf(sortByName)) !== JSON.stringify(sortOrderOf(sortManual)),
+  JSON.stringify(sortOrderOf(sortByName)));
+
+await putSettings({ habitSort: 'strength' });
+const sortByStrength = await getOverview({ days: 7 });
+const strengthScores = sortByStrength.habits
+  .filter((h) => SORT_IDS.has(h.id)).map((h) => h.score);
+ck("habitSort: 'strength' sorts strongest first",
+  JSON.stringify(sortOrderOf(sortByStrength)) === JSON.stringify(['SortCharlie', 'SortBravo', 'SortAlpha']),
+  JSON.stringify(sortOrderOf(sortByStrength)));
+ck('...and the scores sorted by are genuinely different, or this proves nothing',
+  new Set(strengthScores).size === 3, JSON.stringify(strengthScores));
+
+await putSettings({ habitSort: 'streak' });
+const sortByStreak = await getOverview({ days: 7 });
+ck("habitSort: 'streak' sorts the longest current streak first",
+  JSON.stringify(sortOrderOf(sortByStreak)) === JSON.stringify(['SortCharlie', 'SortBravo', 'SortAlpha']),
+  JSON.stringify(sortOrderOf(sortByStreak)));
+
+/* 'recently missed' needs its own fixture: a habit with NO entries at all is
+ * not "never missed" under `computeMissRuns` — its window is a single day
+ * (today), unanswered, which reads as missed TODAY. "Never missed" here means
+ * a continuous, gap-free run instead. */
+const rmNever = await postHabit({ name: 'RmNeverMissed', type: 'boolean' });
+const rmWeekAgo = await postHabit({ name: 'RmMissedWeekAgo', type: 'boolean' });
+const rmYesterday = await postHabit({ name: 'RmMissedYesterday', type: 'boolean' });
+for (let i = 9; i >= 0; i--) await putEntry(rmNever.id, isoDaysAgo(i), { value: 2 });
+for (let i = 9; i >= 0; i--) {
+  await putEntry(rmWeekAgo.id, isoDaysAgo(i), { value: i === 7 ? 0 : 2 });
+}
+for (let i = 9; i >= 0; i--) {
+  await putEntry(rmYesterday.id, isoDaysAgo(i), { value: i === 1 ? 0 : 2 });
+}
+const RM_IDS = new Set([rmNever.id, rmWeekAgo.id, rmYesterday.id]);
+const rmNameOf = (id) => ({
+  [rmNever.id]: 'RmNeverMissed', [rmWeekAgo.id]: 'RmMissedWeekAgo', [rmYesterday.id]: 'RmMissedYesterday',
+}[id]);
+
+await putSettings({ habitSort: 'recently missed' });
+const sortByRecentMiss = await getOverview({ days: 7 });
+const recentMissOrder = sortByRecentMiss.habits
+  .filter((h) => RM_IDS.has(h.id)).map((h) => rmNameOf(h.id));
+ck("habitSort: 'recently missed' sorts the most recent miss first, never-missed last",
+  JSON.stringify(recentMissOrder)
+    === JSON.stringify(['RmMissedYesterday', 'RmMissedWeekAgo', 'RmNeverMissed']),
+  JSON.stringify(recentMissOrder));
+
+// An unrecognised value is rejected outright, and the stored setting is left
+// exactly as it was — back to 'manual' here, deliberately, rather than
+// whatever the last of the sorts above happened to leave it as.
+await putSettings({ habitSort: 'manual' });
+const rejectedSort = await (await putSettings({ habitSort: 'nope' })).json();
+ck("PUT /settings {habitSort: 'nope'} is rejected",
+  Array.isArray(rejectedSort.ignored) && rejectedSort.ignored.includes('habitSort'),
+  JSON.stringify(rejectedSort));
+const afterRejectedSort = await getOverview({ days: 7 });
+ck('...and /overview still returns manual order',
+  JSON.stringify(sortOrderOf(afterRejectedSort)) === JSON.stringify(['SortCharlie', 'SortAlpha', 'SortBravo']),
+  JSON.stringify(sortOrderOf(afterRejectedSort)));
+
+// A sort reorders the list; it must change nothing else on any row.
+const charlieManual = sortManual.habits.find((h) => h.id === sortCharlie.id);
+const charlieByName = sortByName.habits.find((h) => h.id === sortCharlie.id);
+ck('a sort moves the row and changes none of the figures on it',
+  charlieManual.score === charlieByName.score
+  && charlieManual.currentStreak === charlieByName.currentStreak
+  && charlieManual.bestStreak === charlieByName.bestStreak
+  && charlieManual.totalCompleted === charlieByName.totalCompleted,
+  `manual ${charlieManual.score}/${charlieManual.currentStreak}/${charlieManual.bestStreak}/`
+  + `${charlieManual.totalCompleted} vs name ${charlieByName.score}/${charlieByName.currentStreak}/`
+  + `${charlieByName.bestStreak}/${charlieByName.totalCompleted}`);
+
+// categorySummaries is the aggregate the unsorted-payloads rule protects —
+// built from `habitPayloads` before the display sort is ever applied — and it
+// must not move with the list beneath it, tie included.
+ck('categorySummaries is byte-identical under manual and under name',
+  JSON.stringify(sortManual.categorySummaries) === JSON.stringify(sortByName.categorySummaries),
+  `${JSON.stringify(sortManual.categorySummaries)} vs ${JSON.stringify(sortByName.categorySummaries)}`);
+
+await putSettings({ habitSort: 'manual' });
+
+// Every habit this section created, gone — same reason as the block above:
+// the import-isolation check further down counts EVERY entry this account
+// has and expects exactly one, so a fixture left behind here fails a test
+// about tenancy with a number about this block.
+for (const id of [
+  sortCharlie.id, sortAlpha.id, sortBravo.id, tieZzz.id, tieAaa.id,
+  rmNever.id, rmWeekAgo.id, rmYesterday.id,
+]) {
+  await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
+}
+await fetch(`${overviewBase}/api/categories/${tieCategory.id}`, { method: 'DELETE' });
+
 overviewServer.close();
 // The rows above would otherwise be counted by the checks that follow.
 await withUser(alice, (db) =>

@@ -464,6 +464,42 @@ function visibleHabits() {
   return state.habits.filter((h) => matchesQuery(h));
 }
 
+/**
+ * Whether dragging is allowed at all.
+ *
+ * This used to be a four-term `&&` inline at `reorderable`'s own assignment;
+ * pulled out and named because `habitSort` (issue #200) is the FIFTH gate and
+ * #65 phase 2's grouping work is expected to want a sixth — a growing chain
+ * on one line is not where either of those belongs. One clause per line, each
+ * with its own one-line reason, so adding a sixth is a line here and nothing
+ * at the call site.
+ */
+function canReorder({ showArchived, filtering, grouped, sort, count }) {
+  return (
+    // A drop against the archive would compute a `position` from a list this
+    // habit is not really a member of.
+    !showArchived
+    // Same reasoning against a filtered subset: the neighbours a drop
+    // computes from are not the habit's actual neighbours, so the write
+    // lands somewhere nobody asked for.
+    && !filtering
+    // `position` is one flat order and `persistOrder` sends a flat id list,
+    // so dragging while grouped would clump habits by category permanently —
+    // an action that never said it would.
+    && !grouped
+    // Nothing to drop a lone habit onto.
+    && count > 1
+    // A drop computes a new `position` from the habit's ON-SCREEN
+    // neighbours, and `persistOrder` sends the whole `state.habits.map(h =>
+    // h.id)` — which under a sort is the SORTED order, so a single drag
+    // would rewrite every habit's stored `position` into the sort's order
+    // and destroy the manual order the user is one setting away from
+    // returning to. Stored-data corruption, not merely a handle that
+    // appears to do nothing — the same hazard the other gates guard.
+    && sort === 'manual'
+  );
+}
+
 export function paint() {
   state.openHabitId = null;
   // ...and neither is the comparison, which this paint is about to cover. Set
@@ -557,17 +593,16 @@ export function paint() {
   // one real order, and grouping is a VIEW of that order, not a second one.
   const grouped = settings.get('groupByCategory');
 
-  // Drag handle. Reordering only makes sense in the active list, only when
-  // there is more than one habit to move, only ungrouped (see above), and not
-  // while a filter is on. Dragging only means something in the list's real
-  // order: a drop against a filtered list computes a `position` from
-  // neighbours that are not the habit's actual neighbours, so the write lands
-  // somewhere nobody asked for and the rows appear to jump when the query is
-  // cleared. The order that goes to the server is the FULL list —
-  // `state.habits.map(h => h.id)` — so nothing is dropped from it; what a drop
-  // against a subset gets wrong is where in that list the habit lands.
-  const reorderable =
-    !state.showArchived && !filtering && !grouped && state.habits.length > 1;
+  // Drag handle. See `canReorder` for the gates and their reasons — pulled
+  // into its own predicate rather than a growing `&&` chain here, because
+  // #65 phase 2 wants a sixth.
+  const reorderable = canReorder({
+    showArchived: state.showArchived,
+    filtering,
+    grouped,
+    sort: settings.get('habitSort'),
+    count: state.habits.length,
+  });
 
   // Same reasoning as `reorderable` just above, and the same two guards:
   // showing archived habits or a filtered subset would draw a mean over a

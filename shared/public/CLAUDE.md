@@ -112,6 +112,23 @@ different things by width: above 640px `.check` is a fixed 44px so the gain is
 room for the NAME; under 640px the row shares evenly and the gain is thumb
 targets.
 
+**The drag gate is five clauses now, named in `canReorder` rather than an
+inline `&&` chain, because #65 phase 2's grouping work already wants a
+sixth.** `habitSort !== 'manual'` is the fifth: a drop computes a new
+`position` from the habit's ON-SCREEN neighbours and `persistOrder` sends the
+whole `state.habits.map(h => h.id)`, which under any other sort IS the sorted
+order — so a single drag under `strength` or `recently missed` would rewrite
+every habit's stored `position` into that sort's order and destroy the manual
+order the user is one setting away from returning to. That is stored-data
+corruption, the same class the other four clauses guard against, not merely a
+handle that would look wrong. `SERVER_COMPUTED` (`ui/settings-dialog.js`) is
+what makes the handle disappear on the same press that changed the setting,
+rather than on the next reload — see `shared/CLAUDE.md`'s "Habit order" section
+for why the sort itself is a server decision. Compare against `'manual'`
+specifically, not against `!== undefined`: an untouched account has no stored
+`habitSort` key at all, `settings.get` falls through to the registry default,
+and dragging must go on working there exactly as it always has.
+
 **A grouped section header's mean and spread hide under the same two guards
 `reorderable` already answers to, and for the same reason.** `reorderable`
 (`dashboard.js:299`) is false while a search filter is on and while archived
