@@ -139,6 +139,30 @@ try {
    * and the read is a bare `?? null` (never `undefined`: a key holding it is
    * dropped crossing CDP's `returnByValue`, so the assertion would compare
    * against a missing property rather than against a marker that is gone).
+   *
+   * **`shouldBe` used to be a value nothing could equal, and now it is the
+   * assertion.** It read `getComputedStyle(documentElement)
+   * .getPropertyValue('--grid-empty')`, which is the custom property's RAW
+   * text (`#e6e9ef`, `#232830`), against a `painted` that is
+   * `getComputedStyle(cell).fill` — an `rgb(230, 233, 239)`. Those can never
+   * be equal in either theme, in either direction, which is the shape this
+   * repo's own CLAUDE.md calls out as unable to fail. Nothing compared them,
+   * so nothing passed that should not have; what it cost was a failure
+   * message printing two values that will never match, and a reader chasing
+   * it. `paging.mjs`'s `filled()` was the same comparison a step further
+   * along, where something DID rest on it.
+   *
+   * The `#182` block ~230 lines below already resolves the property through a
+   * scratch element for exactly this reason (`panelLook`'s own probe). This is
+   * that, at the block the file is named for, and the same probe SHAPE rather
+   * than a second one: an element in the ordinary document flow, so it
+   * inherits `--grid-empty` from `:root` the way the palette defines it. Not a
+   * sibling inside the same `<svg>`, which would inherit any override scoped
+   * to the chart and so agree with the cell about a value neither should hold.
+   *
+   * `backgroundColor` on the probe against `fill` on the cell: two different
+   * properties, one serialisation — Chrome spells both `rgb(r, g, b)` — which
+   * is the whole point of resolving rather than reading the literal.
    */
   const look = () => ev(`(() => {
     const cells = [...document.querySelectorAll('.cal-cell')];
@@ -146,12 +170,16 @@ try {
     for (const c of cells) { const f = c.getAttribute('fill'); counts[f] = (counts[f] || 0) + 1; }
     const [attr] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
     const one = cells.find((c) => c.getAttribute('fill') === attr);
+    const probe = document.createElement('span');
+    probe.style.background = 'var(--grid-empty)';
+    document.body.append(probe);
+    const shouldBe = getComputedStyle(probe).backgroundColor;
+    probe.remove();
     return {
       theme: document.documentElement.dataset.theme,
       attr,
       painted: getComputedStyle(one).fill,
-      shouldBe: getComputedStyle(document.documentElement)
-        .getPropertyValue('--grid-empty').trim(),
+      shouldBe,
       marked: one.dataset.marker ?? null,
       cells: cells.length,
     };
@@ -209,6 +237,16 @@ try {
   ck('an unrecorded day defers to the theme rather than naming a colour',
     before.attr === 'var(--grid-empty)', `fill=${before.attr}`);
   ck('and it paints as something', /rgb|color\(/.test(before.painted), before.painted);
+  // The claim the block is FOR, and the one `shouldBe` could not make until it
+  // was resolved rather than read: not merely that the cell paints a colour,
+  // but that it paints THIS theme's `--grid-empty`. Everything above is
+  // satisfied by a cell resolving the name against the wrong value — a rule
+  // scoping the property to the chart, a palette entry that moved under one
+  // theme and not the other — and so is the repaint check below, which only
+  // asks that the colour CHANGED.
+  ck('...and what it paints is this theme\'s own --grid-empty',
+    before.painted === before.shouldBe,
+    `painted ${before.painted}, --grid-empty resolves to ${before.shouldBe}`);
 
   // Nothing the detail view could ask for is available from here on. A redraw
   // is a refetch, so this makes one impossible rather than merely unlikely.
@@ -224,6 +262,14 @@ try {
     after.marked === 'stamped', `marker=${after.marked}`);
   ck('and the unrecorded days repainted anyway',
     after.painted !== before.painted, `${before.painted} -> ${after.painted}`);
+  // ...to the value the OTHER theme's palette names, which is the half
+  // "it changed" cannot make on its own. Asserted in both themes rather than
+  // only after the press, because a cell frozen at the light colour and a
+  // cell resolving the wrong name are different defects and each passes the
+  // other's check.
+  ck('...and to the new theme\'s own --grid-empty, not merely to something else',
+    after.painted === after.shouldBe,
+    `painted ${after.painted}, --grid-empty resolves to ${after.shouldBe}`);
   ck('to the new theme\'s own colour, with no request made',
     after.attr === 'var(--grid-empty)', `fill=${after.attr}`);
 

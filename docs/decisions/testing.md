@@ -490,3 +490,65 @@ issued, or the mutation releases a request nobody knew was held.
 Measured: 48 consecutive instances at eight `countcheck`s pinned to two cores,
 against 1 failure in 24 before, and the block's own dead six seconds went with
 it — the suite runs ~22.5s under that contention against ~29.5s.
+
+## A resolved colour and a custom property's TEXT can never be equal
+
+Found twice, a week apart, in two suites, and the two occurrences sat at
+opposite ends of how much it cost.
+
+`getComputedStyle(el).backgroundColor` and `getComputedStyle(el).fill` are
+**resolved** values: Chrome serialises both as `rgb(r, g, b)`.
+`getComputedStyle(root).getPropertyValue('--grid-empty')` is the custom
+property's **declared text**, which in this palette is `#e6e9ef`-shaped. A
+`===` between the two is false in every theme, in both directions, for every
+value the stylesheet can hold.
+
+**In `paging.mjs` something rested on it.** `filled()` counted a cell as marked
+if it was "tinted or shows a glyph", and the tinted half was that comparison —
+so `tinted` was true for every non-transparent cell and `marked` was always
+`total`. Measured against the unfixed `load()` the same PR was adding a test
+for: a row painting four ticks and six blanks reported `marked: 40` of 40.
+Three checks had rested on it since they were written, and each was
+`marked > 0`, so repairing the comparison alone would not have helped — they
+would still have been unable to fail. The whole measure was replaced with one
+that derives its expectation per cell from `/habits/:id/entries` (#319).
+
+**In `themecheck.mjs` nothing did, and that is the more interesting half.**
+`look()`'s `shouldBe` was the same comparison's right-hand side, printed beside
+a `painted` it could never equal — and nothing compared them. So no check
+passed that should not have; what it cost was a failure message carrying a
+phantom, and, more to the point, an assertion that was never made. The block
+`themecheck` exists for asserted that an unrecorded calendar cell **defers** to
+the theme (`fill="var(--grid-empty)"`), that it paints as *something*, and that
+it *changed* after the press — never that it paints THIS theme's own
+`--grid-empty`. Resolving the property through a scratch element, as the `#182`
+block ~230 lines below already did for `--surface-2`, made the field honest and
+then made it the assertion.
+
+Mutation, and it is worth recording because the first one proved too much: a
+blanket `svg.chart { --grid-empty: #123456 }` fails the new checks AND the
+pre-existing "the unrecorded days repainted anyway", since a theme-independent
+override does not change between themes. The mutation that isolates them keeps
+the value theme-dependent and merely wrong —
+
+    svg.chart { --grid-empty: #111111; }
+    [data-theme="dark"] svg.chart { --grid-empty: #eeeeee; }
+
+— under which every pre-existing check passes and only the two new ones fail.
+That is a CSS-scoping regression the block could not previously see.
+
+**The inventory, swept on merged master rather than inherited.** #319's own
+"found and not done" section named `gridcheck.mjs` (two instances) and
+`stripcheck.mjs` (several). Neither is true: `gridcheck.mjs` has no
+`getPropertyValue` at all, and `stripcheck.mjs` already resolves through a
+scratch element (its `resolved('var(--grid-empty)')`) with a comment saying
+why, while its other site compares `getAttribute('fill')` against the literal
+`'var(--grid-empty)'` — raw text against raw text, which is correct. The one
+file the inventory should have named was `themecheck.mjs`. `grep -rn
+"getPropertyValue('--" shared/test/browser` is the sweep; run it rather than
+quoting this paragraph, which is a snapshot.
+
+The general shape, which is why this is here and not only in a comment: **a
+diagnostic field printed beside an assertion, in a form that could never
+satisfy it, is an assertion somebody meant to write.** Ask what it was reaching
+for before deleting it.
