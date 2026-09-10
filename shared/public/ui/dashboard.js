@@ -304,6 +304,12 @@ export async function load() {
   // redraws from state a newer load has already moved.
   if (ticket === loadSeq) {
     state.habits = data.habits;
+    // The sort that actually produced `habits` above, from the SAME reply —
+    // an absent key means a server with no sort feature at all, whose list
+    // is already in `position` order, so `'manual'` is the right answer for
+    // it rather than a hedge. See `canReorder`'s `sort` clause and the
+    // `habitSort` field's own comment in `ui/store.js`.
+    state.habitSort = data.habitSort ?? 'manual';
     // The habit dialog's category picker reads this rather than fetching its
     // own copy — every load already carries it. Installed only while this is
     // still the newest read: `announce()` (ui/habit-dialog.js) sends every OTHER
@@ -600,7 +606,12 @@ export function paint() {
     showArchived: state.showArchived,
     filtering,
     grouped,
-    sort: settings.get('habitSort'),
+    // From the STORE, not `settings.get('habitSort')` — the gate and the
+    // order it guards must come from the same `/overview` reply, or a second
+    // tab whose settings cache is stale can still see every handle while the
+    // list underneath it is sorted (issue #200 review). See the field's own
+    // comment in `ui/store.js`.
+    sort: state.habitSort,
     count: state.habits.length,
   });
 

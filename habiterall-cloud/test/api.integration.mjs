@@ -2489,6 +2489,9 @@ const archivedOverviewCloud = await getOverview({ days: 7, archived: 'true' });
 ck('?archived=true carries no categorySummaries, same as the personal edition',
   !('categorySummaries' in archivedOverviewCloud),
   JSON.stringify(Object.keys(archivedOverviewCloud)));
+ck('...but ?archived=true still carries habitSort (issue #200 review)',
+  'habitSort' in archivedOverviewCloud,
+  JSON.stringify(Object.keys(archivedOverviewCloud)));
 
 // The WIRING, not just the rule: `summariseByCategory` must be handed
 // `summaryEnd` — the same day `score` beside it was computed against —
@@ -2752,6 +2755,26 @@ console.log('\n--- habitSort ---');
 // the scores this section reasons about.
 await putSettings({ atMostUnlogged: 'miss' });
 
+// issue #200 review: `habitSort` must be on EVERY `/overview` return path,
+// including cloud's early return for the NO-HABITS case
+// (`if (!habits.length)` in `buildOverview`) — that path has its own key
+// shape and is exactly the one a review found had been left out. `bob` has
+// no habits anywhere in this file, which is what makes him the account to
+// ask. A dedicated app scoped to him, the same shape as `overviewApp` above.
+const bobApp = express();
+bobApp.use(express.json());
+bobApp.use((req, _res, next) => { req.session = { user: { id: bob } }; next(); });
+bobApp.use('/api', api);
+const bobServer = await new Promise((resolve) => {
+  const s = bobApp.listen(0, '127.0.0.1', () => resolve(s));
+});
+const bobBase = `http://127.0.0.1:${bobServer.address().port}`;
+const bobOverview = await fetch(`${bobBase}/api/overview?days=7`).then((r) => r.json());
+ck("with no habits at all, /overview still carries habitSort: 'manual'",
+  bobOverview.habitSort === 'manual' && bobOverview.habits.length === 0,
+  JSON.stringify({ habitSort: bobOverview.habitSort, habits: bobOverview.habits.length }));
+bobServer.close();
+
 const putEntry = (id, date, body) => fetch(`${overviewBase}/api/habits/${id}/entries/${date}`, {
   method: 'PUT',
   headers: { 'Content-Type': 'application/json' },
@@ -2810,6 +2833,8 @@ const sortByName = await getOverview({ days: 7 });
 ck("habitSort: 'name' sorts A-Z, case-insensitively",
   JSON.stringify(sortOrderOf(sortByName)) === JSON.stringify(['SortAlpha', 'SortBravo', 'SortCharlie']),
   JSON.stringify(sortOrderOf(sortByName)));
+ck("...and the payload's own habitSort says 'name', in the SAME response that carries the order",
+  sortByName.habitSort === 'name', JSON.stringify(sortByName.habitSort));
 
 // The memo-invalidation claim: the NEXT request after the PUT above must
 // already reflect the new order, over the same URL the memo keys on. If
@@ -2878,6 +2903,29 @@ const afterRejectedSort = await getOverview({ days: 7 });
 ck('...and /overview still returns manual order',
   JSON.stringify(sortOrderOf(afterRejectedSort)) === JSON.stringify(['SortCharlie', 'SortAlpha', 'SortBravo']),
   JSON.stringify(sortOrderOf(afterRejectedSort)));
+
+// issue #200 review: `habitSort` on the payload must be the RESOLVED value,
+// never the raw stored string. The rejection above only pins the WRITE-time
+// validator (`PUT /settings`) — it says nothing about a row already holding a
+// bad value, the way a hand-edited row or one written by an older server
+// would. So this bypasses the route and writes the raw string directly, the
+// same way such a row would arrive — and bumps `data_version` in the same
+// statement, or the memo would serve the PRECEDING request's already-cached
+// 'manual' entry and this could pass without `resolveHabitSort` running at
+// all on the read path.
+await withUser(alice, (db) => db.query(
+  `UPDATE users SET settings = jsonb_set(settings, '{habitSort}', '"nope"'::jsonb),
+                     data_version = data_version + 1
+   WHERE id = $1`,
+  [alice]
+));
+const withRawBadSort = await getOverview({ days: 7 });
+ck("a raw stored habitSort of 'nope' is resolved to 'manual' on the payload, never echoed raw",
+  withRawBadSort.habitSort === 'manual', JSON.stringify(withRawBadSort.habitSort));
+ck('...and the list is in manual (position, id) order to match',
+  JSON.stringify(sortOrderOf(withRawBadSort)) === JSON.stringify(['SortCharlie', 'SortAlpha', 'SortBravo']),
+  JSON.stringify(sortOrderOf(withRawBadSort)));
+await putSettings({ habitSort: 'manual' });
 
 // A sort reorders the list; it must change nothing else on any row.
 const charlieManual = sortManual.habits.find((h) => h.id === sortCharlie.id);

@@ -646,16 +646,29 @@ as never-missed. That is a real, accepted limitation, not an oversight: a wider
 window would cost every ordinary request to serve the rare account with a
 years-old habit.
 
-**A habit with NO entries at all is not "never missed" under this sort — it
-sorts as missed TODAY, and that puts a brand-new, never-logged habit at the
-TOP under `recently missed`.** This falls straight out of `unlogged: 'miss'`
-being the account default (see "Day states and habit shape" above): a habit
-with no rows has a one-day window (today), unanswered, and an unanswered day is
-a miss. It is defensible — a habit needing attention sorting first is arguably
-the point — but it is surprising enough that both editions' integration
-fixtures had to be built around it deliberately (a genuinely never-missed habit
-needs a continuous, gap-free run of entries, not merely zero rows) rather than
-discovered by whoever adds the next fixture.
+**A habit with NO entries at all is not "never missed" under this sort — under
+the account's default `unlogged: 'miss'`, it sorts as missed TODAY, and that
+puts a brand-new, never-logged habit at the TOP under `recently missed`.**
+This falls straight out of `unlogged: 'miss'` being the account default (see
+"Day states and habit shape" above): a habit with no rows has a one-day window
+(today), unanswered, and an unanswered day is a miss under that setting. It is
+defensible — a habit needing attention sorting first is arguably the point —
+but it is surprising enough that both editions' integration fixtures had to be
+built around it deliberately, for that habit shape, rather than discovered by
+whoever adds the next fixture.
+
+**The condition is load-bearing, and the opposite habit shape sorts the
+opposite way.** An at-most habit resolved to `atMostUnlogged: 'success'` —
+either the account's own setting or the habit's own override — reads a zero-row
+day as compliance rather than a miss, so `lastMiss` for a habit with NO entries
+at all comes back `null` there instead of today, and the habit sorts LAST under
+`recently missed`, beside every habit that has genuinely never missed.
+Measured, for a habit with zero rows: boolean under `unlogged: 'miss'` →
+`lastMiss` = today (sorts first); at-most under `atMostUnlogged: 'success'` →
+`lastMiss` = `null` (sorts last). So "a genuinely never-missed habit needs a
+continuous, gap-free run of entries, not merely zero rows" is false for that
+second shape, and a fixture author relying on it for an at-most habit resolved
+to `success` gets the opposite of what they expect.
 
 **The `categorySummaries`-does-not-move assertion (both editions'
 `/overview` integration suites) bites only because its fixture holds a

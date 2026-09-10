@@ -141,6 +141,71 @@ try{
   check('the drag handle is back once the sort is set back to manual',
     await handleCount() === manualOrder.length, String(await handleCount()));
 
+  // --- issue #200 review: the TWO-TAB regression, the reason the gate moved ---
+  //
+  // The dialog-driven block above proves the ordinary path and
+  // `SERVER_COMPUTED`'s refetch, and it cannot prove the fix: going through
+  // the dialog changes the settings CACHE and the habit ORDER together, on
+  // the same press, so a gate reading either one passes it. This is tab B
+  // from the issue instead — the setting changes on the SERVER without this
+  // page's settings dialog ever touching it (`settings.init()` runs once per
+  // boot and nothing re-reads `/api/settings` afterwards) — a direct
+  // `PUT /api/settings`, then the `emit('reload')` a reconnect or another
+  // save already drives `load()` with.
+  console.log('\n--- habitSort: two tabs, one stale settings cache ---');
+
+  const twoTabBefore = await names();
+  const twoTabNameOrder = [...twoTabBefore].sort((a, b) =>
+    a.localeCompare(b, 'en', { sensitivity: 'base', numeric: true }));
+
+  const twoTabPut = await ev(`(async () => {
+    const r = await fetch('/api/settings', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ habitSort: 'name' }),
+    });
+    if (!r.ok) return { status: r.status };
+    (await import('/shared/ui/store.js')).emit('reload');
+    return { status: r.status };
+  })()`);
+  check('the direct PUT /api/settings (not the dialog) was accepted',
+    twoTabPut.status === 200, JSON.stringify(twoTabPut));
+
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-name')]
+      .map(n=>n.textContent.trim()).join('|') === ${JSON.stringify(twoTabNameOrder.join('|'))}`,
+    { what: "tab B's own load() to reach name order" });
+
+  check('the list came back in the new order',
+    JSON.stringify(await names()) === JSON.stringify(twoTabNameOrder),
+    JSON.stringify(await names()));
+  check('the drag handle is gone, even though this page\'s dialog never ran',
+    await handleCount() === 0, String(await handleCount()));
+
+  // The assertion that actually distinguishes "the gate reads the payload"
+  // from "the settings cache happened to update anyway": this page's
+  // settings cache was never touched by the write above (no dialog, no
+  // `settings.save`), so it must still answer the OLD value at the exact
+  // moment the handle is gone. Without this half, mutating `canReorder` back
+  // to `settings.get('habitSort')` would still pass every check above it —
+  // the cache and the payload agree everywhere except this one window.
+  const staleCacheValue = await ev(
+    `(async () => (await import('/shared/ui/settings.js')).get('habitSort'))()`);
+  check("settings.get('habitSort') on this page still answers 'manual'",
+    staleCacheValue === 'manual', String(staleCacheValue));
+
+  await ev(`(async () => {
+    const r = await fetch('/api/settings', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ habitSort: 'manual' }),
+    });
+    (await import('/shared/ui/store.js')).emit('reload');
+    return r.status;
+  })()`);
+  await waitUntil(ev,
+    `[...document.querySelectorAll('#grid .habit-name')]
+      .map(n=>n.textContent.trim()).join('|') === ${JSON.stringify(manualOrder.join('|'))}`,
+    { what: 'the dashboard to settle back in manual order after the two-tab check' });
+
   console.log(fails===0?'\nALL DRAG CHECKS PASSED':`\n${fails} FAILED`);
 }catch(e){console.error('ERROR:',e.message);fails++;}
 finally{await closeChrome({ chrome, port: PORT, profile });process.exit(fails?1:0);}

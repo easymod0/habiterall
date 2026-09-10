@@ -2003,11 +2003,16 @@ Android app show the same account's list in the same order, and it survives
 signing in on a different device. Only **Manual** can be dragged — choosing
 any other order turns dragging off, because a drop would otherwise rewrite
 every habit's stored position into that order, and the same reason gates the
-Android app's own **Reorder habits** menu item. **Recently missed** treats a
-habit you have never logged at all as missed *today*, so a brand-new habit
-sorts to the top under it, and a miss further back than 400 days reads the same
-as never having missed at all — that being the window the dashboard already
-computes each row's strength and current streak over.
+Android app's own **Reorder habits** menu item. **Recently missed**, under the
+default "unlogged counts as a miss" setting, treats a habit you have never
+logged at all as missed *today*, so a brand-new habit sorts to the top under
+it, and a miss further back than 400 days reads the same as never having
+missed at all — that being the window the dashboard already computes each
+row's strength and current streak over. A habit with an "unlogged counts as
+kept" override — an At most habit set that way, or an account with that as its
+default — reads the opposite: a never-logged one has nothing to call a miss and
+sorts to the *bottom* instead, alongside every habit that has genuinely never
+missed.
 
 Two of them are Loop's, with Loop's names and Loop's defaults (both **off**):
 

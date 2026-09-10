@@ -114,20 +114,41 @@ targets.
 
 **The drag gate is five clauses now, named in `canReorder` rather than an
 inline `&&` chain, because #65 phase 2's grouping work already wants a
-sixth.** `habitSort !== 'manual'` is the fifth: a drop computes a new
-`position` from the habit's ON-SCREEN neighbours and `persistOrder` sends the
-whole `state.habits.map(h => h.id)`, which under any other sort IS the sorted
+sixth.** `sort !== 'manual'` is the fifth: a drop computes a new `position`
+from the habit's ON-SCREEN neighbours and `persistOrder` sends the whole
+`state.habits.map(h => h.id)`, which under any other sort IS the sorted
 order — so a single drag under `strength` or `recently missed` would rewrite
 every habit's stored `position` into that sort's order and destroy the manual
 order the user is one setting away from returning to. That is stored-data
 corruption, the same class the other four clauses guard against, not merely a
-handle that would look wrong. `SERVER_COMPUTED` (`ui/settings-dialog.js`) is
-what makes the handle disappear on the same press that changed the setting,
-rather than on the next reload — see `shared/CLAUDE.md`'s "Habit order" section
-for why the sort itself is a server decision. Compare against `'manual'`
-specifically, not against `!== undefined`: an untouched account has no stored
-`habitSort` key at all, `settings.get` falls through to the registry default,
-and dragging must go on working there exactly as it always has.
+handle that would look wrong.
+
+**This is the first gate whose SUBJECT the server decides, and that is why it
+is read from `state.habitSort` — the `/overview` payload — rather than from
+`settings.get('habitSort')`, unlike every other clause here.** The other four
+clauses are local view state (`showArchived`, `filtering`, `grouped`) or the
+web's OWN rendering decision, so gate and render cannot disagree about them by
+construction. `habitSort` is different: `settings.init()` runs once per page
+load and nothing re-reads `/api/settings` afterwards, while `state.habits` is
+refetched by every `load()` — so a tab open since before a SECOND tab changed
+the account's sort setting could see its cached `settings.get('habitSort')`
+still say `'manual'` while its next `load()` came back in `strength` order,
+drawing a handle on every row and letting one drag rewrite every habit's
+`position` into that order (issue #200, review round). `/overview` now echoes
+the RESOLVED sort it actually applied, `load()` installs it on `state.habitSort`
+under the same `loadSeq` guard as `habits` itself, and `canReorder` reads it
+from there — so the gate and the order it guards come from one response and
+cannot disagree, including offline, where the cached payload carries both.
+`SERVER_COMPUTED` (`ui/settings-dialog.js`) is unaffected by this — the
+refetch it triggers on a settings-dialog save is still needed and still right,
+only where the gate reads the ANSWER moved — and it is what makes the handle
+disappear on the same press that changed the setting, rather than on the next
+reload. See `shared/CLAUDE.md`'s "Habit order" section for why the sort itself
+is a server decision. Compare against `'manual'` specifically, not against
+`!== undefined`: an untouched account's `/overview` reply has no `habitSort`
+key at all — a server that predates this field never sends one, and its list
+is already in `position` order — so `load()` treats an absent key as
+`'manual'` and dragging must go on working there exactly as it always has.
 
 **A grouped section header's mean and spread hide under the same two guards
 `reorderable` already answers to, and for the same reason.** `reorderable`

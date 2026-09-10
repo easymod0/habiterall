@@ -1,6 +1,8 @@
 package com.habiterall.app
 
 import com.habiterall.app.data.AppSettings
+import com.habiterall.app.data.Overview
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -120,23 +122,6 @@ class AppSettingsDefaultsTest {
     }
 
     @Test
-    fun `the habit-sort default matches the registry`() {
-        // Named on its own, the same reason `atMostUnlogged` is: this is not a
-        // sixth logic mirror (nothing about HOW to sort is copied here — the
-        // phone renders whatever `/overview` returns, in that order, as it
-        // always has), but the DEFAULT is a mirror, because `GET /settings`
-        // answers only the keys that have been stored and this is what the
-        // reorder-menu gate reads to decide whether a drag would mean
-        // anything right now. `default("habitSort")` reads the web registry,
-        // which is what pins the two together rather than hard-coding
-        // `"manual"` on both sides of this assertion.
-        assertEquals(default("habitSort"), AppSettings.DEFAULT_HABIT_SORT)
-        assertEquals("manual", AppSettings().habitSortOrDefault)
-        assertEquals("name", AppSettings(habitSort = "name").habitSortOrDefault)
-        assertFalse(AppSettings(habitSort = "name").manualOrderEnabled)
-    }
-
-    @Test
     fun `an untouched account is a phone that reminds`() {
         // `notifyChannels` defaults to the on-device alarm alone — the one
         // destination that needs no setup and the only one that fires with no
@@ -144,6 +129,34 @@ class AppSettingsDefaultsTest {
         // the app actually asks rather than comparing shapes.
         assertTrue(default("notifyChannels").contains(AppSettings.CHANNEL_ANDROID))
         assertTrue(AppSettings().androidRemindersEnabled)
+    }
+
+    /**
+     * `habitSort` moved off `AppSettings` entirely (issue #200 review) — it
+     * rides on `Overview` now, the same response `habits` comes from, so the
+     * reorder gate cannot disagree with the order it guards. This is the
+     * behavioural half of that move: the field actually parses off the wire,
+     * and an ABSENT key — a server with no sort feature at all, whose list is
+     * therefore already in `position, id` order — reads as manual and
+     * therefore reorder-ENABLED, never the other way round. Mutating that
+     * fallback to disabled is what proves this test, rather than the pure
+     * default above it, is the one that would notice.
+     */
+    @Test
+    fun `Overview parses habitSort, and an absent key means manual and enabled`() {
+        val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+
+        val withSort = json.decodeFromString<Overview>(
+            """{"start":"2026-01-01","end":"2026-01-01","habits":[],"habitSort":"name"}"""
+        )
+        assertEquals("name", withSort.habitSort)
+        assertFalse(withSort.manualOrderEnabled)
+
+        val absent = json.decodeFromString<Overview>(
+            """{"start":"2026-01-01","end":"2026-01-01","habits":[]}"""
+        )
+        assertEquals(null, absent.habitSort)
+        assertTrue(absent.manualOrderEnabled)
     }
 
     /**
@@ -164,7 +177,7 @@ class AppSettingsDefaultsTest {
     private val mirrored = setOf(
         "dayOrder", "weekStart", "calendarZoom", "skipDays", "questionMarks",
         "atMostUnlogged", "scoreGranularity", "historyGranularity", "historyMode",
-        "notifyChannels", "confirmDelete", "groupByCategory", "habitSort",
+        "notifyChannels", "confirmDelete", "groupByCategory",
     )
 
     private val notMirrored = mapOf(
@@ -214,6 +227,20 @@ class AppSettingsDefaultsTest {
         // so there is nothing here for this to govern. `resolveTimeZone` reads
         // it for the SERVER's sends only.
         "notifyTimezone" to "the local alarm is already on this device's clock",
+        // Used to be mirrored, and moved here on review (issue #200): the
+        // phone no longer reads this from `GET /settings` at all, mirrored
+        // default or otherwise. `Overview.manualOrderEnabled` gates the
+        // reorder menu on the sort `/overview` reports having APPLIED to
+        // `habits` in the SAME response — which cannot disagree with the
+        // order it arrived with, where a mirrored default read from a
+        // second request could (and did: `api.settings()` and
+        // `api.overview()` were two independent calls that could land
+        // apart). That is the same distinction `notifyTimezone`'s entry
+        // above draws between an OBSERVATION and a copy of a setting — this
+        // is now the former, carried on `Overview` rather than `AppSettings`,
+        // and there is nothing left here for a mirror to drift out of step
+        // with.
+        "habitSort" to "read off Overview's own applied sort, not a mirrored default",
         // The one entry here that records a COST rather than an absence of one,
         // and it is written down as such deliberately.
         //
@@ -315,10 +342,6 @@ class AppSettingsDefaultsTest {
             historyGranularity = "day",
             historyMode = "count",
             scoreGranularity = "year",
-            // Non-default on purpose — a fixture holding a field's default
-            // compares equal to itself and would pass with the field dropped
-            // from AppSettings entirely. "name" is not "manual".
-            habitSort = "name",
         )
         assertFalse(set.androidRemindersEnabled)
         assertFalse(set.newestLeft)
@@ -332,8 +355,6 @@ class AppSettingsDefaultsTest {
         assertEquals("day", set.historyGranularityOrDefault)
         assertEquals("count", set.historyModeOrDefault)
         assertEquals("year", set.scoreGranularityOrDefault)
-        assertEquals("name", set.habitSortOrDefault)
-        assertFalse(set.manualOrderEnabled)
     }
 
     /**

@@ -1007,6 +1007,11 @@ api.get('/overview', (req, res) => {
     start,
     end,
     categories,
+    // The RESOLVED sort that actually ordered `habits` below, not the raw
+    // stored string — echoed so both clients can gate reordering on the same
+    // response the order itself came from, rather than a separately fetched
+    // setting that can disagree with it (issue #200 review).
+    habitSort,
     habits: sortHabitPayloads(habitPayloads, habitSort, lastMissById),
     ...(categorySummaries ? { categorySummaries } : {}),
   });

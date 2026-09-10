@@ -123,7 +123,7 @@ fun HabitList(
     rows: List<Habit>,            // habits + the pending-write overlay, still unfiltered
     categories: List<Category>,   // this account's categories, in the server's own order
     grouped: Boolean,             // whether to draw one section per category
-    manualOrder: Boolean,         // `AppSettings.manualOrderEnabled` — see the reorder gate below
+    manualOrder: Boolean,         // `Overview.manualOrderEnabled` — see the reorder gate below
     loading: Boolean,
     loaded: Boolean,
     error: String?,
@@ -549,10 +549,10 @@ fun HabitList(
                                 // oddly. This is not a sixth mirror of sort LOGIC
                                 // (the phone never decides how to sort; it draws
                                 // whatever `/overview` returns, in that order, as
-                                // it always has) — it is the mirrored DEFAULT for
-                                // `habitSort` that `AppSettings` already carries,
-                                // read here only to know whether reordering means
-                                // anything right now.
+                                // it always has) — it is `Overview.manualOrderEnabled`,
+                                // read from the SAME response `habits` came from,
+                                // only to know whether reordering means anything
+                                // right now.
                                 enabled = habits.size > 1 && manualOrder,
                                 onClick = { menuOpen = false; onReorder(habits) },
                             )

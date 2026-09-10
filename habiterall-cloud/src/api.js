@@ -1231,17 +1231,6 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
   const { rows: categories } = await db.query(
     `SELECT * FROM categories ORDER BY position, id`
   );
-  if (!habits.length) {
-    // Same key shape as the full path below: `categorySummaries` is absent
-    // only in archived mode, never merely because there is nothing to
-    // summarise yet — an empty category still draws its header.
-    return {
-      start, end, categories, habits: [],
-      ...(archived ? {} : { categorySummaries: summariseByCategory(categories, [], new Map(), summaryEnd) }),
-    };
-  }
-
-  const ids = habits.map((h) => h.id);
 
   // One answer for the account, read once for the whole payload — the map
   // below runs per habit and this is not a per-habit question. `habitSort`
@@ -1249,6 +1238,12 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
   // `windowKey` above for why it is not in the memo key, and
   // shared/src/habit-order.js for why it is read from the stored setting
   // rather than a `?sort=` parameter at all.
+  //
+  // Read even with no habits below, and BEFORE the empty-habit return —
+  // `habitSort` is the RESOLVED sort every return path must carry (issue
+  // #200 review): an absent key on the wire has to mean "a server with no
+  // sort feature at all", which is only true if no current server, on any
+  // path, ever omits it.
   const { rows: [prefs] } = await db.query(
     `SELECT settings ->> 'atMostUnlogged' AS unlogged,
             settings ->> 'habitSort'      AS habit_sort
@@ -1257,6 +1252,20 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
   );
   const unlogged = unloggedFrom(prefs);
   const habitSort = resolveHabitSort(prefs?.habit_sort);
+
+  if (!habits.length) {
+    // Same key shape as the full path below: `categorySummaries` is absent
+    // only in archived mode, never merely because there is nothing to
+    // summarise yet — an empty category still draws its header. `habitSort`
+    // is present here too, for the same reason as the full path — see above.
+    return {
+      start, end, categories, habits: [], habitSort,
+      ...(archived ? {} : { categorySummaries: summariseByCategory(categories, [], new Map(), summaryEnd) }),
+    };
+  }
+
+  const ids = habits.map((h) => h.id);
+
   // `manual`, almost every request, needs no extra pass at all — see
   // `needsLastMiss`.
   const wantsLastMiss = needsLastMiss(habitSort);
@@ -1529,6 +1538,11 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
     start,
     end,
     categories,
+    // The RESOLVED sort that actually ordered `habits` below, not the raw
+    // stored string — echoed so both clients can gate reordering on the same
+    // response the order itself came from, rather than a separately fetched
+    // setting that can disagree with it (issue #200 review).
+    habitSort,
     habits: sortHabitPayloads(habitPayloads, habitSort, lastMissById),
     ...(categorySummaries ? { categorySummaries } : {}),
   };

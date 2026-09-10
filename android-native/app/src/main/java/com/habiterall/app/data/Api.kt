@@ -325,21 +325,6 @@ data class AppSettings(
      * `Settings.kt` alongside the reminder mirrors.
      */
     @SerialName("groupByCategory") val groupByCategory: Boolean? = null,
-    /**
-     * How the dashboard orders the habit list. Null means untouched — matches
-     * `SETTINGS.habitSort.default` in shared/public/ui/settings.js.
-     *
-     * This is NOT a sixth logic mirror: nothing about HOW to sort is copied
-     * here, and never will be — the phone renders whatever `/overview` returns,
-     * in that order, exactly as it always has. What the phone must know is
-     * only WHETHER reordering is meaningful right now, and that is a mirrored
-     * DEFAULT for the reason every default here is one: `GET /settings`
-     * returns only the keys that have been stored, so an untouched account
-     * sends no `habitSort` and every client must supply the same answer for
-     * it. See `manualOrderEnabled` for why a stale answer here is not merely
-     * a rendering gap but a data one.
-     */
-    @SerialName("habitSort") val habitSort: String? = null,
 ) {
     val androidRemindersEnabled: Boolean
         get() = notifyChannels?.contains(CHANNEL_ANDROID) ?: true
@@ -402,23 +387,6 @@ data class AppSettings(
     val groupByCategoryEnabled: Boolean
         get() = groupByCategory ?: DEFAULT_GROUP_BY_CATEGORY
 
-    val habitSortOrDefault: String get() = habitSort ?: DEFAULT_HABIT_SORT
-
-    /**
-     * Whether a drag on this phone's reorder screen would mean what it looks
-     * like it means.
-     *
-     * `HabitList.kt`'s overflow menu hands `onReorder(habits)` the FETCHED
-     * list, and `ReorderScreen` writes every id's on-screen index back as its
-     * `position`. Under a non-manual sort the fetched list IS the sorted list,
-     * so opening that screen and touching anything would rewrite every
-     * habit's stored `position` into the sort's order, permanently — the same
-     * hazard the web's fifth drag gate (`dashboard.js`) exists for, and here
-     * it is a reorder-menu gate rather than a per-row handle because this
-     * client's reorder is a separate full-screen list, not an in-place drag.
-     */
-    val manualOrderEnabled: Boolean get() = habitSortOrDefault == DEFAULT_HABIT_SORT
-
     companion object {
         const val CHANNEL_ANDROID = "android"
 
@@ -455,13 +423,6 @@ data class AppSettings(
 
         /** `SETTINGS.groupByCategory.default` in shared/public/ui/settings.js. */
         const val DEFAULT_GROUP_BY_CATEGORY = false
-
-        /**
-         * `SETTINGS.habitSort.default` in shared/public/ui/settings.js —
-         * `AppSettingsDefaultsTest` pins the two together, which is the whole
-         * reason this can be trusted to stay in step.
-         */
-        const val DEFAULT_HABIT_SORT = "manual"
     }
 }
 
@@ -510,7 +471,49 @@ data class Overview(
     // categorised ones included — not an ungrouped list — which is the same
     // answer `dashboard.js` gives an empty `state.categories`.
     val categories: List<Category> = emptyList(),
-)
+    /**
+     * The RESOLVED sort the server applied to `habits` above, from the SAME
+     * response — never read from `AppSettings`/`GET /settings`, which used to
+     * be a second, separate request. That split was the bug (issue #200
+     * review): `MainActivity`'s fetch effect called `api.settings()` and
+     * `api.overview()` as two independent try/catch blocks, so a settings
+     * timeout left `manualOrderEnabled` at its default while a SUCCEEDING
+     * overview right after it still returned a sorted list — the overflow
+     * menu could then offer "Reorder habits", enabled, over a list that was
+     * not in `position, id` order, and `ReorderScreen` writes every visible
+     * id's on-screen index back as its `position`. One response now answers
+     * both "what order is this in" and "is reordering meaningful right now",
+     * so they cannot disagree.
+     *
+     * Null means a server with no sort feature at all, whose list is
+     * therefore already in `position, id` order — see `manualOrderEnabled`,
+     * which is why that reads null the same as `"manual"` rather than as
+     * "unknown". This is also what keeps an old server working with a new
+     * app.
+     */
+    @SerialName("habitSort") val habitSort: String? = null,
+) {
+    /**
+     * Whether a drag on this phone's reorder screen would mean what it looks
+     * like it means.
+     *
+     * `HabitList.kt`'s overflow menu hands `onReorder(habits)` the FETCHED
+     * list, and `ReorderScreen` writes every id's on-screen index back as its
+     * `position`. Under a non-manual sort the fetched list IS the sorted list,
+     * so opening that screen and touching anything would rewrite every
+     * habit's stored `position` into the sort's order, permanently — the same
+     * hazard the web's fifth drag gate (`dashboard.js`) exists for, and here
+     * it is a reorder-menu gate rather than a per-row handle because this
+     * client's reorder is a separate full-screen list, not an in-place drag.
+     *
+     * This is NOT a sixth logic mirror: nothing about HOW to sort is copied
+     * here, and never will be — the phone renders whatever `/overview`
+     * returns, in that order, exactly as it always has. What the phone must
+     * know is only WHETHER reordering is meaningful right now, read straight
+     * off this response rather than mirrored anywhere.
+     */
+    val manualOrderEnabled: Boolean get() = (habitSort ?: "manual") == "manual"
+}
 
 @Serializable
 data class Entry(

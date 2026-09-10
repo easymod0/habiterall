@@ -449,27 +449,27 @@ that has CHOSEN a convention is followed in the browser and not here. Under
 `auto`, which is almost everybody, the phone resolves its own locale and there is
 nothing to carry.
 
-**The habit ORDER and the reorder GATE arrive from two different requests, and
-there is a narrow window where they can disagree.** `MainActivity`'s fetch
-effect calls `api.settings()` and `api.overview(...)` as two separate,
-sequential `try`/`catch` blocks — the second is not conditioned on the first
-succeeding. `manualOrder` is seeded `true` (the registry default,
-`AppSettings.DEFAULT_HABIT_SORT`, per the mirrored-default rule above) and a
-failed `api.settings()` is swallowed with a comment to "keep whatever order is
-already showing", leaving `manualOrder` at that default; a SUCCEEDING
-`api.overview` right after it still returns whatever order the account's
-`habitSort` sorts to. So a settings call that times out or 500s while the
-overview call that follows it succeeds can leave the overflow menu offering
-"Reorder habits", `enabled`, over a list that is not in `position, id` order —
+**The habit ORDER and the reorder GATE used to arrive from two different
+requests, and there was a narrow window where they could disagree — fixed
+now by having both come from the SAME response.** `MainActivity`'s fetch
+effect called `api.settings()` and `api.overview(...)` as two separate,
+sequential `try`/`catch` blocks, the second not conditioned on the first
+succeeding: a settings call that timed out or 500'd while the overview call
+right after it succeeded could leave `manualOrder` at its seeded default while
+`/overview` had actually returned a sorted list — the overflow menu offering
+"Reorder habits", `enabled`, over a list that was not in `position, id` order,
 and `ReorderScreen` writes every visible id's on-screen index back as its
-`position`, so opening it there and touching anything rewrites the account's
-manual order into whatever the server had sorted to. `grouped` has no
-equivalent window: the grouping and its own gate both come from the identical
-`fetched` object, never from two requests that can land apart. This is
-recorded as a known, narrow window rather than a fix made here — the
-settings-then-overview split is otherwise unrelated to this issue, and closing
-it (retrying, or gating the overview render on the settings fetch too) is a
-call for review rather than one this brief scoped.
+`position`. `Overview` now carries the RESOLVED `habitSort` the server applied
+to `habits` in that same reply (issue #200 review), and `MainActivity` reads
+`manualOrder` off it (`data.manualOrderEnabled`) rather than off the settings
+fetch — see the KDoc on `Overview.manualOrderEnabled` in `Api.kt`. The two
+questions "what order is this list in" and "is reordering meaningful right
+now" are now answered by one request, so they cannot land apart; `habitSort`
+is no longer read from `GET /settings` by this client at all, mirrored default
+or otherwise (`AppSettingsDefaultsTest`'s `notMirrored` map has the reason).
+`grouped` never had this problem in the first place: the grouping and its own
+gate both come from the identical `fetched` object, never from two requests
+that can land apart.
 
 Robolectric is not only `ReminderWiringTest`'s: `HabitListTest`,
 `ArchiveScreenTest`, `SettingsScreenTest` and `ReminderTimeFieldTest` all run

@@ -108,9 +108,9 @@ class HabitListTest {
         // Defaulted off, so every test above this step's own leaves the
         // ungrouped path untouched.
         grouped: Boolean = false,
-        // Defaulted on (manual order enabled), matching `AppSettings`'s own
-        // default, so every test above this step's own leaves the reorder
-        // gate exercising the same path it always has.
+        // Defaulted on (manual order enabled), matching `Overview`'s own
+        // absent-key default, so every test above this step's own leaves the
+        // reorder gate exercising the same path it always has.
         manualOrder: Boolean = true,
         loading: Boolean = false,
         loaded: Boolean = true,
@@ -301,7 +301,7 @@ class HabitListTest {
      * `ReorderScreen` writing every id's on-screen index back as its
      * `position` would rewrite it into that order permanently. Disabling the
      * menu item is what stops a tap from reaching `onReorder` at all — a test
-     * asserting only `AppSettings.manualOrderEnabled` would not see this: the
+     * asserting only `Overview.manualOrderEnabled` would not see this: the
      * hazard is one line below that pure answer, at the call site that wires
      * it into the menu.
      */

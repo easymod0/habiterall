@@ -119,6 +119,14 @@ export const state = {
   // not one of the four. `outstanding` in ui/nudge.js refuses to judge a day
   // outside it.
   gridLoaded: null,
+  // The RESOLVED sort `/overview` applied to `habits`, from the SAME reply —
+  // never a separately fetched setting, which can disagree with the order
+  // that actually arrived (issue #200 review). `'manual'` until the first
+  // load answers, which is also what an absent key on the payload means: a
+  // server with no sort feature at all, whose list is already in `position`
+  // order. `canReorder` (`ui/dashboard.js`) gates on this field, not on
+  // `settings.get('habitSort')`.
+  habitSort: 'manual',
   offline: false,      // showing cached data / writes are being queued
   pending: 0,          // writes waiting in the outbox
 };

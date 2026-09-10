@@ -88,6 +88,15 @@ const todayIn = (zone) => new Intl.DateTimeFormat('en-CA', {
   timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
 }).format(new Date());
 
+// issue #200 review: `habitSort` must be on EVERY return path, including the
+// one with no habits at all — an ABSENT key is what a client reads as "an old
+// server with no sort feature, so the list is already in position order", and
+// that reasoning collapses the moment a CURRENT server can omit the key on any
+// path. Asked before the first habit exists, deliberately.
+const emptyOverview = await overview({ days: 7 });
+ck("with no habits at all, /overview still carries habitSort: 'manual'",
+  emptyOverview.habitSort === 'manual', JSON.stringify(emptyOverview.habitSort));
+
 const habit = await post('/habits', { name: 'Anchor', type: 'boolean' });
 
 // A run of completions ending today, and nothing at all in the month before
@@ -187,6 +196,9 @@ const archivedOverview = await overview({ days: 7, archived: 'true' });
 ck('?archived=true carries no categorySummaries',
   !('categorySummaries' in archivedOverview),
   JSON.stringify(Object.keys(archivedOverview)));
+ck('...but ?archived=true still carries habitSort',
+  'habitSort' in archivedOverview && archivedOverview.habitSort === 'manual',
+  JSON.stringify(archivedOverview.habitSort));
 
 /* ---- issue #223: /overview's bestStreak reads the same credit rule ----
  *
@@ -427,6 +439,8 @@ const sortByName = await overview({ days: 7 });
 ck("habitSort: 'name' sorts A-Z, case-insensitively",
   JSON.stringify(sortOrderOf(sortByName)) === JSON.stringify(['Alpha', 'Bravo', 'Charlie']),
   JSON.stringify(sortOrderOf(sortByName)));
+ck("...and the payload's own habitSort says 'name', in the SAME response that carries the order",
+  sortByName.habitSort === 'name', JSON.stringify(sortByName.habitSort));
 
 await put('/settings', { habitSort: 'strength' });
 const sortByStrength = await overview({ days: 7 });
@@ -483,6 +497,22 @@ const afterRejectedSort = await overview({ days: 7 });
 ck('...and /overview still returns manual order',
   JSON.stringify(sortOrderOf(afterRejectedSort)) === JSON.stringify(['Charlie', 'Alpha', 'Bravo']),
   JSON.stringify(sortOrderOf(afterRejectedSort)));
+
+// issue #200 review: `habitSort` on the payload must be the RESOLVED value,
+// never the raw stored string. `PUT /settings` already refuses 'nope' at
+// write time (above), which only pins the WRITE-time validator — it says
+// nothing about a row already holding a bad value (a hand-edited database, or
+// one written by an older server). So this bypasses the API and writes the
+// raw string directly, the same way a stale or hand-edited row would arrive.
+db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES ('habitSort', ?)`)
+  .run(JSON.stringify('nope'));
+const withRawBadSort = await overview({ days: 7 });
+ck("a raw stored habitSort of 'nope' is resolved to 'manual' on the payload, never echoed raw",
+  withRawBadSort.habitSort === 'manual', JSON.stringify(withRawBadSort.habitSort));
+ck('...and the list is in manual (position, id) order to match',
+  JSON.stringify(sortOrderOf(withRawBadSort)) === JSON.stringify(['Charlie', 'Alpha', 'Bravo']),
+  JSON.stringify(sortOrderOf(withRawBadSort)));
+await put('/settings', { habitSort: 'manual' });
 
 // A sort reorders the list; it must change nothing else on any row.
 const charlieManual = sortManual.habits.find((h) => h.id === sortCharlie.id);
