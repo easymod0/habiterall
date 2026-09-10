@@ -223,6 +223,39 @@ aggregation in `stats.js` already uses `boundedRange`; keep it that way, because
 the unbounded `dateRange` on a distant-past entry turns one request into
 ~700,000 iterations on a single-threaded server.
 
+**`boundedRange`'s clamp compares two `Date`s, and that is the one comparison
+in this file that is deliberately not lexical.** It was
+`start < earliest`, and a phantom `start` can sort one side of that boundary
+while landing on the other: `2017-00-05` is lexically ABOVE an `earliest` of
+`2016-12-11` (2017 > 2016) while month 00 rolls back into the previous
+December, so the walk opened six days early and the range came back **3667**
+days — the cap escaped on exactly the input class the function's JSDoc tells a
+caller reading a start out of STORAGE to rely on it for. It is the argument and
+not the output that cannot be trusted, which is the same reasoning
+`dateRange`'s past-end trim already carries about `end`. Not reachable through
+a route today (`assertDate` guards route dates, `isRealDay`/`earliestRealDay`
+guard all six stored anchors — #270), and the overrun was ~one month at worst
+because month 13 rolls the other way; the guarantee is what was broken.
+The two DATES are compared, and neither their spellings nor the elapsed SPAN
+between them — both of those were written first and each is wrong, which is why
+they are named here rather than left to be re-derived. Comparing against a
+RE-PARSED `earliest` fails because `earliest` is a string this file spelled and
+`fromISO` cannot read every one of them back: an `end` of `0100-03-05` (year
+0100 is `assertDate`'s floor) puts the boundary in year 0090, which parses as
+**1990**, and clamping through it answered `[]` for nine ordinary year-0100
+ranges. Comparing the elapsed span against the cap fails for a subtler reason
+and only a zone finds it: `daysBetween` counts elapsed 24-hour spans while
+`setDate` takes CALENDAR steps, so under `Pacific/Apia`, which deleted
+2011-12-30 outright, 3,660 calendar steps back from 2020-02-29 land on
+2010-02-21 while the elapsed distance to 2010-02-20 is exactly −3,660 — the
+span test keeps a start the calendar boundary clamps. The whole of
+`stats.test.js` passes under that version; `test/timezones.test.js`, which
+re-runs the literals in a child process under a fixed `TZ`, is the only thing
+that catches it. So the boundary is built by the same calendar walk it always
+was, kept as a `Date`, and spelled only on the branch that returns it.
+Clamping a phantom start is not REFUSING one — where a window may open stays
+the caller's question, which is #303.
+
 **`dateRange` walks one local-time `Date` with `setDate`, never an epoch
 integer.** It used to re-derive every day from a string — two `fromISO` calls
 and a `toISO` per element — measured at 92% of `computeScores`' total time;
@@ -283,7 +316,7 @@ the list is a contiguous run of days that happened, spelled one way.
 
 **A date is a real day spelled `YYYY-MM-DD`, and the padding is not
 cosmetic.** The whole stats model compares dates as strings — `from <= date <=
-end`, `start < earliest`, `boundedRange`'s clamp — which is correct and cheap
+end`, `windowStart`'s `from < earliest` clamp — which is correct and cheap
 only while every date has four year digits, two month digits and two day
 digits. `999-12-31` sorts ABOVE `2016-…`, so a day a thousand years in the past
 reads as one in the future to every comparison in the file. `toISO` pads all

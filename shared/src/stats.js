@@ -20,8 +20,9 @@ const TWO_DIGIT = Array.from({ length: 100 }, (_, i) => String(i).padStart(2, '0
 /**
  * The canonical spelling of a day: four-digit year, two-digit month, two-digit
  * day. The year is padded for the same reason the other two fields are — every
- * comparison in this file is a STRING comparison (`from <= date <= end`,
- * `start < earliest`), and an unpadded '999-12-31' sorts ABOVE '2016-...' —
+ * comparison in this file is a STRING comparison (`from <= date <= end`, and
+ * `windowStart`'s own `from < earliest` clamp — `boundedRange`'s compares
+ * calendar days, see there), and an unpadded '999-12-31' sorts ABOVE '2016-...' —
  * a day a thousand years back reading as one in the future to every one of
  * them. That is a hazard closed here rather than a wrong figure anybody saw;
  * `resolveWindow` says at length why its own clamps kept it off the reachable
@@ -273,10 +274,76 @@ export function dateRange(start, end) {
  * an import) turns a single request into hundreds of thousands of iterations
  * on a single-threaded server. Callers that take a start date from *stored
  * data* rather than from validated input must use this.
+ *
+ * **The clamp compares two `Date`s, not two strings**, for the same reason the
+ * past-end trim in `dateRange` does — and it is the ARGUMENT that this cannot
+ * trust, exactly as it is there. A `start` out of storage need not
+ * be a real day even when it is canonically spelled, and for a phantom one the
+ * lexical order and the calendar order disagree: `'2017-00-05'` sorts ABOVE an
+ * `earliest` of `'2016-12-11'` (2017 > 2016) while `fromISO` rolls month 00
+ * back into the previous December, so the walk began on 2016-12-05 and the
+ * range came back **3667 days** — six past the cap the string test believed it
+ * had enforced. Month 13 rolls the other way and merely shortens the range,
+ * which is why the overrun was bounded by about a month rather than by
+ * nothing; it is still the one input class this function is documented to
+ * defend against, escaping the one check that defends against it.
+ *
+ * This clamps a phantom `start`; it does not REFUSE one. Where a window may
+ * OPEN is the caller's question and stays visibly the caller's — every anchor
+ * taken out of storage is filtered through `isRealDay` / `earliestRealDay` at
+ * the point it is CHOSEN (#270, and #303 for why the guard is not moved to the
+ * point of use). Clamping correctly is a different act from refusing.
+ *
+ * **The two DATES are compared, and neither their spellings nor the elapsed
+ * span between them.** Both of the other two spellings of this are wrong, and
+ * each was written first and measured:
+ *
+ * `daysBetween(earliest, start) < 0` re-parses a string this function
+ * SPELLED, and `fromISO` does not read every one of those back. An `end` of
+ * `'0100-03-05'` — a date `assertDate` accepts, year 0100 being its floor —
+ * puts the boundary in year 0090, and `fromISO('0090-…')` is `new Date(90, …)`,
+ * which `Date` resolves to **1990** (the same 0-99 case `isRealDay`
+ * documents). Clamping through it answered `[]` for nine ordinary year-0100
+ * ranges — every real day the sweep asked about with such an `end` — and the
+ * `'0100-02-25'` case in `test/stats.test.js` is what fails if it comes back.
+ * Holding the boundary as a `Date` and never respelling it closes that: the
+ * string is built only on the branch that returns it, where it is `from` and
+ * not an operand.
+ *
+ * `daysBetween(end, start) < -MAX_RANGE_DAYS` — the elapsed SPAN against the
+ * cap — is wrong for a subtler reason, and a zone finds it: `daysBetween`
+ * counts elapsed 24-hour spans while `setDate` takes CALENDAR steps, and the
+ * two disagree in a zone that deleted a calendar day. Under `Pacific/Apia`,
+ * which deleted 2011-12-30 outright, 3,660 calendar steps back from
+ * 2020-02-29 land on **2010-02-21** while the elapsed distance to 2010-02-20
+ * is exactly -3,660 — so the span test kept a start the calendar boundary
+ * clamps, and one ordinary real-day range came back 3,661 days where master
+ * answered 3,660. `test/timezones.test.js` is what caught it, running the
+ * stats literals under that zone in a child process, and it is the reason the
+ * boundary has to be compared as the same calendar walk `earliest` always was
+ * rather than as a distance.
+ *
+ * An unparseable `start` gives an Invalid Date, and every comparison against
+ * one is false, so it is left as `from` — where `dateRange`'s own
+ * `!(n >= 0)` answers `[]`. That is the bounded direction: no walk at all,
+ * rather than a fabricated ten-year one.
+ *
+ * The `daysBetween(from, end)` guard below is left exactly as it was, and it
+ * is worth knowing what it is: over every shape the sweep in
+ * `test/stats.test.js` constructs — real, phantom, unparseable and a
+ * five-digit year — deleting it changes no answer, because `dateRange`'s own
+ * `!(n >= 0)` already returns `[]` for every one of them, `NaN` included. It
+ * is redundant on master too, so this is not something the clamp above
+ * introduced and not something this change removes: it costs one comparison,
+ * and deleting a guard on the strength of its being unreachable today is a
+ * separate decision from fixing the one above it.
  */
 export function boundedRange(start, end) {
-  const earliest = addDays(end, -MAX_RANGE_DAYS);
-  const from = start < earliest ? earliest : start;
+  // The same walk `addDays(end, -MAX_RANGE_DAYS)` took, kept as a `Date` so
+  // that the comparison below is of two days rather than of two strings.
+  const earliest = fromISO(end);
+  earliest.setDate(earliest.getDate() - MAX_RANGE_DAYS);
+  const from = fromISO(start) < earliest ? toISO(earliest) : start;
   if (daysBetween(from, end) < 0) return [];
   return dateRange(from, end);
 }

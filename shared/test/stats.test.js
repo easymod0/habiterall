@@ -197,7 +197,7 @@ test('a range whose year predates 1000 is spelled with four digits at both ends'
 
 test('every date this file spells is the day it is, spelled YYYY-MM-DD', () => {
   // The whole stats model compares dates as strings — `from <= date <= end`,
-  // `start < earliest`, `boundedRange`'s clamp — which is correct and cheap
+  // `windowStart`'s `from < earliest` clamp — which is correct and cheap
   // only while every date is spelled 'YYYY-MM-DD'. An unpadded year is the one
   // way a real day can be spelled shorter: '999-12-31' sorts ABOVE '2016-...',
   // so a date a thousand years in the past reads as one in the future to every
@@ -843,6 +843,159 @@ test('boundedRange leaves ordinary ranges untouched', () => {
 
 test('boundedRange returns nothing when start is after end', () => {
   assert.deepEqual(boundedRange('2026-12-31', '2026-01-01'), []);
+});
+
+test('boundedRange clamps a start that sorts above the cap but LANDS below it', () => {
+  // The clamp used to be a lexical `start < earliest`, and a phantom start can
+  // sort one side of the boundary while parsing to the other. With an `end` of
+  // '2026-12-19' the boundary is '2016-12-11', and '2017-00-05' sorts ABOVE it
+  // (2017 > 2016) while month 00 rolls back into the previous December, so the
+  // walk opened on 2016-12-05 and the range came back 3667 days long — past
+  // the one bound this function exists to enforce, on the one input class its
+  // JSDoc says callers reading a start out of STORAGE must rely on it for.
+  //
+  // 3661 is written out rather than taken from `MAX_RANGE_DAYS`: a test that
+  // imports the constant it checks would pass just as happily against a cap
+  // that had quietly moved, and pins the name instead of the boundary.
+  const r = boundedRange('2017-00-05', '2026-12-19');
+  assert.equal(r.length, 3661, `expected the cap, got ${r.length} days`);
+  assert.equal(r[0], '2016-12-11', 'the range must open on the clamp boundary');
+  assert.equal(r.at(-1), '2026-12-19', 'the end date must be preserved');
+
+  // The same string, one component at a time, so a fix that special-cased
+  // month 00 rather than comparing the calendar does not pass. A month of 13
+  // rolls FORWARD, which shortens the range instead of widening it, and is
+  // why the old overrun was bounded by about a month rather than by nothing.
+  assert.equal(boundedRange('2016-13-05', '2026-12-19')[0], '2017-01-05');
+  assert.equal(boundedRange('2017-00-31', '2026-12-19')[0], '2016-12-31');
+
+  // The BOUNDARY itself, in real days and to the day, because the assertions
+  // above are satisfied by a clamp that fires one day late: a mutation to
+  // `span < -MAX_RANGE_DAYS - 1` passed every other case in this file, the
+  // generated sweep below included, since none of them lands on the exact
+  // boundary and the differential steps over it.
+  assert.equal(boundedRange('2016-12-11', '2026-12-19').length, 3661, 'exactly at the cap');
+  assert.equal(boundedRange('2016-12-12', '2026-12-19').length, 3660, 'one inside the cap');
+  const overBy1 = boundedRange('2016-12-10', '2026-12-19');
+  assert.equal(overBy1.length, 3661, 'one day past the cap must clamp to it');
+  assert.equal(overBy1[0], '2016-12-11');
+
+  // An `end` in year 0100 — `assertDate`'s own floor, so a route can ask for
+  // one — is why the boundary is held as a `Date` and never respelled. Spelled
+  // out it lands in year 0090, and `fromISO('0090-…')` is `new Date(90, …)`,
+  // which `Date` resolves to 1990 — so a clamp that compared against the
+  // RE-PARSED boundary answered [] for this ordinary nine-day range.
+  const low = boundedRange('0100-02-25', '0100-03-05');
+  assert.equal(low.length, 9);
+  assert.equal(low[0], '0100-02-25');
+});
+
+test('no start, real or phantom, makes boundedRange exceed its cap', () => {
+  // The shapes matter more than the count here. A generator that emitted only
+  // real days could not have seen the defect above at all, so this constructs,
+  // for each of eleven years: month 00 and month 13 (both rollover
+  // directions), day 00, day 31 in a 30-day and in a 28-day month, 02-30,
+  // day 99, and the real days either side of each boundary — against ends that
+  // include a leap day, a month end, a DST fall-back day, `assertDate`'s
+  // year-0100 floor and year 9999, and with starts BOTH before and after every
+  // end so the inverted window is covered too.
+  const two = (n) => String(n).padStart(2, '0');
+  const ends = ['2026-12-19', '2026-08-12', '2020-02-29', '2026-02-28', '2026-11-01',
+    '0100-03-05', '9999-12-31'];
+  const starts = [];
+  for (const y of [100, 999, 1000, 1969, 2011, 2016, 2017, 2026, 2027, 2036, 9999]) {
+    for (const m of [0, 1, 2, 4, 12, 13, 99]) {
+      for (const d of [0, 1, 5, 28, 29, 30, 31, 99]) {
+        starts.push(`${String(y).padStart(4, '0')}-${two(m)}-${two(d)}`);
+      }
+    }
+  }
+
+  // The generator is only as good as what it actually emitted, so the shapes
+  // are counted rather than trusted: an off-by-one in the loops above would
+  // otherwise leave this asserting the cap over real days alone.
+  const phantom = starts.filter((s) => !isRealDay(s));
+  assert.ok(starts.some((s) => isRealDay(s)), 'no real day was constructed');
+  assert.ok(phantom.length > 300, `only ${phantom.length} phantom starts`);
+  for (const shape of ['2017-00-05', '2016-13-05', '2026-02-30', '2026-04-31', '2026-02-31',
+    '2026-01-00', '2026-01-99']) {
+    assert.ok(starts.includes(shape), `the generator never emits ${shape}`);
+  }
+
+  let clamped = 0;
+  let unmeasurable = 0;
+  for (const end of ends) {
+    for (const start of starts) {
+      const r = boundedRange(start, end);
+      // The cap is the invariant, and it is asserted for every shape.
+      assert.ok(r.length <= 3661,
+        `boundedRange('${start}', '${end}') spanned ${r.length} days`);
+      if (r.length === 0) continue;
+      assert.equal(r.at(-1), end, `boundedRange('${start}', '${end}') lost its end`);
+      if (r.length === 3661) clamped += 1;
+
+      // The two SHAPE checks below are measured with `daysBetween`, which
+      // cannot read back a year in 0000-0099: a start of '0100-00-00' rolls
+      // legitimately to 0099-11-30, and `fromISO('0099-11-30')` is 1999. The
+      // walk is right and the ruler is not, so those ranges are counted rather
+      // than asserted over — and the count is asserted, because a gate that
+      // silently swallowed the whole sweep would leave this test pinning only
+      // the line above.
+      if (!isRealDay(r[0])) { unmeasurable += 1; continue; }
+      assert.equal(daysBetween(r[0], r.at(-1)), r.length - 1,
+        `boundedRange('${start}', '${end}') is not a contiguous run`);
+      assert.ok(daysBetween(end, r[0]) >= -3660,
+        `boundedRange('${start}', '${end}') opened ${daysBetween(end, r[0])} days out`);
+    }
+  }
+  // And the cap was actually REACHED — an invariant nothing ever tests at its
+  // boundary is satisfied by a function that returns [] for everything.
+  assert.ok(clamped > 50, `the cap was only reached ${clamped} times`);
+  assert.ok(unmeasurable < 40, `${unmeasurable} ranges opened below year 0100`);
+});
+
+test('boundedRange answers exactly as the lexical clamp did for every REAL day', () => {
+  // The differential half: the fix must move nothing any route can ask for.
+  // `assertDate` guards every route's own date, and every anchor taken out of
+  // storage is filtered through `isRealDay`/`earliestRealDay` before it gets
+  // here (#270), so "route-reachable" is "both ends are real days" — and over
+  // those the two comparisons are provably the same, since for canonically
+  // spelled four-digit years lexical order IS calendar order.
+  //
+  // The reference is the pre-fix expression written out here, not an import:
+  // this is the one test in the pair that must keep passing if the clamp is
+  // reverted, which is what makes it a differential rather than a second copy
+  // of the test above.
+  const lexical = (start, end) => {
+    const earliest = addDays(end, -MAX_RANGE_DAYS);
+    const from = start < earliest ? earliest : start;
+    if (daysBetween(from, end) < 0) return [];
+    return dateRange(from, end);
+  };
+
+  let pairs = 0;
+  for (const end of ['2026-12-19', '2020-02-29', '2026-11-01', '0100-03-05', '1000-01-01']) {
+    // Every day from just outside the cap to just past `end`, which is the
+    // whole of the boundary either side of where the clamp fires.
+    // Every day, not every seventh: stepping over the boundary is how an
+    // off-by-one in the clamp survives a sweep this wide.
+    let start = addDays(end, -3670);
+    for (let i = 0; i <= 3690; i += 1) {
+      if (isRealDay(start) && isRealDay(end)) {
+        pairs += 1;
+        const got = boundedRange(start, end);
+        const want = lexical(start, end);
+        assert.equal(got.length, want.length,
+          `boundedRange('${start}', '${end}') changed length`);
+        assert.deepEqual([got[0], got.at(-1)], [want[0], want.at(-1)],
+          `boundedRange('${start}', '${end}') changed its ends`);
+      }
+      start = addDays(start, 1);
+    }
+  }
+  // 18,454 on this tree. Asserted as a floor so a generator that quietly
+  // stopped emitting pairs cannot leave this test passing over nothing.
+  assert.ok(pairs > 18000, `only ${pairs} real-day pairs compared`);
 });
 
 test('an empty history scores zero', () => {
