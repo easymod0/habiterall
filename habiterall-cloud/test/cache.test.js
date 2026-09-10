@@ -48,6 +48,37 @@ const code = (text) => text
   .filter((line) => !line.trimStart().startsWith('//'))
   .join('\n');
 
+/**
+ * The text between a call's parentheses, found by tracking paren DEPTH from
+ * the `(` at `openAt` to its match — never by searching for a closing
+ * delimiter.
+ *
+ * `indexOf('));')` was the first version and review of #328 defeated it: an
+ * ordinary statement earlier in the callback produces a `'));'` of its own
+ * (`const noop = () => (db.toString());`), so the region ended there and
+ * everything after it — a real `UPDATE` included — went unexamined. A depth
+ * count cannot be short-circuited that way.
+ *
+ * It is not a JS parser and does not need to be: a `(` or `)` inside a string
+ * or template literal would throw the count off. The direction that matters is
+ * which way it fails — an unbalanced literal makes the walk run PAST the call
+ * and return too much, so the assertions over the region get stricter rather
+ * than blinder. Returning the rest of the text on no match is the same
+ * choice: over-scan, never under-scan.
+ */
+function callArgs(text, openAt) {
+  assert.equal(text[openAt], '(', `callArgs must be given a '(', got ${text[openAt]}`);
+  let depth = 0;
+  for (let i = openAt; i < text.length; i += 1) {
+    if (text[i] === '(') depth += 1;
+    else if (text[i] === ')') {
+      depth -= 1;
+      if (depth === 0) return text.slice(openAt + 1, i);
+    }
+  }
+  return text.slice(openAt + 1);
+}
+
 /** A clock the test moves by hand, so a 60s TTL costs no seconds. */
 const clock = (start = 1_000) => {
   let t = start;
@@ -923,16 +954,44 @@ test('no mutating route in api.js writes through bare withUser', () => {
       + 'data_version and every replica keeps serving its pre-write dashboard');
     // `withUserWrite(` does not match this — the paren is what separates them.
     if (BARE_WITHUSER_READS.has(name)) {
-      // Exempted, but only as a READ. Each bare `withUser(` region is taken up
-      // to the end of its call and checked for a write verb, so the exemption
-      // covers the lookup it was granted for and not a write that arrives in
-      // the same handler later.
-      const regions = body.split(/withUser\(/).slice(1)
-        .map((tail) => tail.slice(0, tail.indexOf('));') + 3 || tail.length));
+      // Exempted, but only as a READ, and the shape is asserted POSITIVELY:
+      // one arrow expression whose single statement is a `SELECT`. That makes
+      // a write **unrepresentable** in an exempted region rather than filtered
+      // out of one, which is the discipline `ntfyTarget` follows for the same
+      // reason — a negative scan is only as good as its idea of where the
+      // region ends.
+      //
+      // **The first version of this was a negative scan and review defeated
+      // it.** The region was taken as everything up to the first literal
+      // `'));'`, and an ordinary earlier statement produces one —
+      // `const noop = () => (db.toString());` was enough — so the scan stopped
+      // there and a real `UPDATE users SET settings = jsonb_set(...)` after it
+      // was never looked at. The guard passed on a handler doing exactly the
+      // cache-invisible write it exists to forbid. (That version also wrote
+      // `indexOf('));') + 3 || tail.length`, where a miss gives `-1 + 3 = 2` —
+      // truthy, so the fallback was dead code and the region became two
+      // characters. Both are why this no longer searches for a delimiter.)
+      const regions = [...body.matchAll(/\bwithUser\(/g)]
+        .map((m) => callArgs(body, m.index + 'withUser'.length));
       assert.ok(regions.length >= 1,
         `${name} is exempted as a bare-withUser READ but has no bare withUser `
         + 'call — the exemption is stale and must be removed');
       for (const region of regions) {
+        // No block body: a `{` is how a second statement gets in, and a second
+        // statement is how the write above hid behind the first.
+        assert.ok(!/\{/.test(region),
+          `${name} is exempted as a single-expression READ, but its bare `
+          + `withUser callback has a block body: ${region.trim()}`);
+        const queries = [...region.matchAll(/db\.query\(\s*`([^`]*)`/g)];
+        assert.equal(queries.length, 1,
+          `${name} is exempted as ONE read, but its bare withUser region `
+          + `issues ${queries.length} queries: ${region.trim()}`);
+        assert.match(queries[0][1].trim(), /^SELECT\b/i,
+          `${name} is exempted as a READ, but its bare withUser query does not `
+          + `start with SELECT: ${queries[0][1].trim()}`);
+        // Belt as well as braces: the positive shape above is what makes a
+        // write unrepresentable, and this still fails if one appears inside a
+        // SELECT-shaped statement (a write CTE, say).
         assert.ok(!/\b(INSERT|UPDATE|DELETE)\b/i.test(region),
           `${name} is exempted as a READ, but its bare withUser region writes: `
           + region.trim());
