@@ -28,7 +28,7 @@ import {
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
 import * as settings from '/shared/ui/settings.js';
-import { dashboardShowing, isQueryActive, matchesQuery, on, state } from '/shared/ui/store.js';
+import { dashboardShowing, emit, isQueryActive, matchesQuery, on, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
 import { SKIP } from '/shared/ui/values.js';
 import * as views from '/shared/ui/views.js';
@@ -320,7 +320,22 @@ export async function load() {
     // produces without any load at all. The implication runs one way only
     // (every load bumps both), which is why the categories line keeps the
     // narrower guard and `categorySummaries` beside it does not need one.
-    if (categoryRead === state.categoryReadSeq) state.categories = data.categories;
+    if (categoryRead === state.categoryReadSeq) {
+      state.categories = data.categories;
+      // ...and say so, because `paint()` below is the DASHBOARD's repaint and
+      // the habit dialog's two category controls are views of this same field
+      // sitting outside it. This is the one writer of `state.categories` that
+      // is not itself in `ui/habit-dialog.js`, and it was the one that told
+      // nobody: a reload while the dialog is open left `#category-manage`
+      // showing the pre-reload order over a store holding the post-reload one,
+      // and `moveCategory` decides from the STORE. See the listener in that
+      // file's `init()` for what the disagreement costs a press.
+      //
+      // Inside the assignment's own guard, so the event means "this field just
+      // moved" and not "a load finished": a reply the narrower ticket retired
+      // changed nothing here and has nothing to repaint from.
+      emit('categories');
+    }
     // Each grouped section's mean/spread, one row per category plus a trailing
     // `id: null` for Uncategorised. `?archived=true` sends no such key at all —
     // that mode has nothing active to average — and an older cached payload

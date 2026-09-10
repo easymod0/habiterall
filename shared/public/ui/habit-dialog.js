@@ -13,7 +13,7 @@ import { convention } from '/shared/ui/count-field.js';
 import { iconField, initIconField } from '/shared/ui/icon-field.js';
 import { reminderField } from '/shared/ui/reminder-field.js';
 import * as settings from '/shared/ui/settings.js';
-import { dashboardShowing, emit, staysOnList, state } from '/shared/ui/store.js';
+import { dashboardShowing, emit, on, staysOnList, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -636,6 +636,36 @@ function repaintCategories() {
 }
 
 /**
+ * `repaintCategories()` with the user's place in the manage list kept across
+ * it — the scroll offset and, where they were standing in it, the focus.
+ *
+ * Both are lost by `renderCategoryManage`'s `replaceChildren()` and neither is
+ * recoverable afterwards, so this is the sequence rather than two of them:
+ * `moveCategory` needs it because a press must not scroll the row it moved out
+ * of view, and the `'categories'` listener in `init()` needs it because a
+ * background reload must not move the list under somebody reading it. One rule
+ * — a rebuild keeps the user where they were — written once.
+ *
+ * `focused` is PASSED rather than read here, because `moveCategory` takes it
+ * before its own splice and this runs after, and because the two call sites
+ * disagree about which keys may be restored: see the note at the listener.
+ * `revealId` is `moveCategory`'s alone — the listener moved no row and has
+ * nothing to reveal, and revealing one would scroll the list it just promised
+ * not to move.
+ *
+ * @param {string|null} focused the `data-focus-key` to put focus back on
+ * @param {number|null} [revealId] a category id to scroll back into view
+ */
+function repaintCategoriesKeepingPlace(focused, revealId = null) {
+  const list = $('#category-manage');
+  const scrollTop = list.scrollTop;
+  repaintCategories();
+  list.scrollTop = scrollTop;
+  if (revealId != null) revealCategoryRow(list, revealId);
+  restoreArrowFocus(list, focused);
+}
+
+/**
  * Keep the row a press just moved in view.
  *
  * `.category-manage` is `max-height: 160px; overflow-y: auto` over up to 30
@@ -752,7 +782,14 @@ async function moveCategory(id, delta) {
   // `state.categories` too and has to ask the same question.
   const mine = ++state.categoryReadSeq;
   state.categories = order.map((catId) => byId.get(catId));
+  // Captured HERE and not left to the helper below, because the SECOND repaint
+  // — the one `refreshCategoryPicker` does when the GET lands, further down —
+  // has to restore this same PRESS-TIME offset, and by then the list has been
+  // rebuilt twice with `scrollTop` clamped to 0 each time. The helper reads its
+  // own copy at the same instant and gets the same number; this one has to
+  // outlive it.
   const list = $('#category-manage');
+  const scrollTop = list.scrollTop;
   // `.category-manage` is `max-height: 160px; overflow-y: auto` over up to 30
   // rows, and `list.replaceChildren()` inside `repaintCategories()` clamps
   // `scrollTop` back to 0 on every rebuild — twice here, once per repaint
@@ -764,20 +801,17 @@ async function moveCategory(id, delta) {
   // the fold scrolled the moving row out of view. The browser suites are
   // Chrome-only, so nothing there could see this. Save and restore the
   // scroll position explicitly instead, across both repaints.
-  const scrollTop = list.scrollTop;
-  // Not `renderCategoryManage()` alone — the select's option order has to
-  // follow too, and this is the one function that redraws both controls from
-  // `state.categories` as it stands.
-  repaintCategories();
-  list.scrollTop = scrollTop;
-  // The offset above is the one from BEFORE the splice, so the row this press
-  // moved is one slot away from where the view was left — see
-  // `revealCategoryRow`.
-  revealCategoryRow(list, id);
-  // So holding ↑ walks a category up instead of dropping focus on the first
-  // press — `repaintCategories()` just tore out the button that was focused
-  // and built a new one under the same `data-focus-key`.
-  restoreArrowFocus(list, focused);
+  //
+  // `repaintCategoriesKeepingPlace` is that sequence, and it repaints BOTH
+  // controls rather than calling `renderCategoryManage()` alone: the select's
+  // option order has to follow the list's. The offset it saves is the one
+  // from before this splice, so the row this press moved is one slot away
+  // from where the view was left — which is what `revealCategoryRow` is
+  // handed the id for. And restoring the focus key is what makes holding ↑
+  // walk a category up instead of dropping focus on the first press:
+  // `repaintCategories()` just tore out the button that was focused and built
+  // a new one under the same `data-focus-key`.
+  repaintCategoriesKeepingPlace(focused, id);
 
   try {
     await api('/categories/reorder', { method: 'POST', body: JSON.stringify({ order }) });
@@ -1169,6 +1203,47 @@ async function restoreHabit(habit, entries) {
 }
 
 export function init() {
+  // **`state.categories` has one writer outside this file, and it used to tell
+  // nobody.** `dashboard.load()` installs it (`ui/dashboard.js`) and then
+  // `paint()`s the DASHBOARD; `#category-manage` and the picker are views of
+  // the same field and are not on that page. So any background reload while
+  // this dialog is open — an outbox flush's `syncNow()`, a reconnect, a save
+  // from another surface, all of which reach `emit('reload')` — left the list
+  // showing the pre-reload order over a store holding the post-reload one.
+  //
+  // That is not cosmetic, because `moveCategory` decides from the STORE while
+  // the user pressed a row in the LIST. At the disagreement a press either
+  // returns at `to < 0` having moved nothing, repainted nothing and fetched
+  // nothing — the silent no-op the `up.disabled` note above already names as
+  // the failure this control must not have — or moves the right category from
+  // a slot the user was not looking at, which reads as the arrows moving the
+  // wrong row. `categorycheck.mjs` reached it by racing its own queued
+  // reorder, which is how it was found; a user reaches it by leaving the
+  // dialog open across a reconnect.
+  //
+  // The listener is `'categories'` and not `'reload'`: `'reload'` is emitted
+  // BEFORE `load()` has fetched anything, so a repaint there would redraw the
+  // stale order it is meant to replace and look like a fix. The event fires
+  // where the field is actually written.
+  on('categories', () => {
+    // Closed, this must do nothing, and the reason is `restoreArrowFocus`:
+    // handed a key it cannot find it focuses the LIST, so a repaint while the
+    // user is on the dashboard would move focus into a panel they are not in.
+    // Nothing is lost by declining — `openDialog` runs `refreshCategoryPicker`
+    // on the way in, which repaints from whatever the store holds by then.
+    if (!dialog.open) return;
+    const list = $('#category-manage');
+    // ...and the same fallback is why the key is offered only from INSIDE the
+    // list. Focus on the habit form's own fields carries no `data-focus-key`
+    // today and would restore as `null` anyway, but that is a property of
+    // those fields rather than a rule, and the one this depends on is stated
+    // here instead.
+    const focused = list.contains(document.activeElement)
+      ? focusKeyOf(document.activeElement)
+      : null;
+    repaintCategoriesKeepingPlace(focused);
+  });
+
   $('#btn-new').addEventListener('click', () => openDialog());
   $('#dialog-cancel').addEventListener('click', () => dialog.close());
   del.addEventListener('click', deleteHabit);
