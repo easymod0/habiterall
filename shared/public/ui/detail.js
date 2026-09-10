@@ -66,15 +66,76 @@ const historyMode = () => state.historyMode ?? settings.get('historyMode');
 const scoreGranularity = () => state.scoreGranularity ?? settings.get('scoreGranularity');
 
 /**
+ * Which request for this page is the current one, and so which reply may still
+ * be INSTALLED.
+ *
+ * The `state.categoryReadSeq` shape (`ui/store.js`), extended to the payload
+ * this view draws itself from rather than restated as a second mechanism
+ * beside it: a caller takes a number before its request goes out, and only a
+ * reply still holding that number may `render()`. It is a counter and not a
+ * timestamp for the reason stated there — two of these can start inside one
+ * millisecond.
+ *
+ * **A separate counter from `categoryReadSeq` because it is a separate
+ * question, not a second answer to that one.** `categoryReadSeq` asks which
+ * view of the category LIST is newest, and three writers that say nothing
+ * about a habit's stats bump it — `refreshCategoryPicker`, `moveCategory`'s
+ * splice, the queued DELETE's optimistic removal. Gating a `/stats` reply on
+ * it would throw a habit's page away because somebody opened the habit dialog.
+ * It lives at module scope here rather than on `state` for the reason
+ * `categoryReadSeq` gives for the opposite choice: that field has writers in
+ * two modules and no single owner, and this one has exactly two, both in this
+ * file.
+ *
+ * **`seed` bumps it, and that half is not optional.** It is `moveCategory`'s
+ * optimistic splice in every structural respect — a write of the thing the
+ * ticket protects, with no read of its own — and without it the reply that was
+ * issued before the seed is still the newest and still installs. That is the
+ * one-round-trip revert `refresh` does not close: `render(stale)` rebuilds the
+ * head, the Edit button behind it re-captures the pre-save habit, and because
+ * `PUT /habits/:id` REPLACES, one Edit-then-Save writes the newer save back
+ * out. Every seed is followed by a `refresh` in the same synchronous task
+ * (`init()`'s `'change'` listener is the only caller), so a reply retired by
+ * one always has a newer request already promised behind it.
+ */
+let openSeq = 0;
+
+/**
  * Open (or redraw) the detail view for one habit.
  *
- * Reports whether it rendered. Every caller but one ignores that: the boot in
- * `app.js` opens a deep link without a list behind it, so it is the one place
- * that has to know a refused habit left nothing on screen.
+ * Reports whether the habit ANSWERED — not whether this call is what painted
+ * it. The distinction exists because a reply can be superseded (see `openSeq`
+ * above), and a superseded reply has no honest answer between the two: `false`
+ * would send the one caller that reads this to the dashboard over a page
+ * something newer is about to draw, and "it rendered" is not true either.
  *
- * @returns {Promise<boolean>}
+ * **So the boolean was narrowed rather than widened to a third state, and the
+ * caller decided it.** `app.js`'s boot is the only reader —
+ * `if (!await detail.open(opening.id)) await dashboard.load()` — and what it
+ * is asking is "did this deep link name a habit, or am I about to show
+ * nothing?"; its own comment says so ("a deleted habit's link leaves the app
+ * showing nothing at all"). A discard is not that: whatever superseded this
+ * call owns the screen, and it is either a newer `open()` for a habit the user
+ * has since asked for or a `seed` over a page that has already rendered. So a
+ * discard answers `true`, the failure path still answers `false`, and no
+ * caller had to learn a third word. A third return value was the alternative
+ * and it buys the one reader nothing: neither `!== 'rendered'` (paint the list
+ * over the newer open) nor `=== 'failed'` (identical to this) is a better
+ * answer than this one, and it would leave `detail.open` and
+ * `categories.open` — the two adjacent lines of that boot — answering the same
+ * question in two shapes.
+ *
+ * Note the values this can actually return did not move: the old code answered
+ * `false` in the `catch` and `true` everywhere else, so a shell holding one
+ * version of this file over a cached other version of `app.js` behaves
+ * identically either way round.
+ *
+ * @returns {Promise<boolean>} false only when the request failed
  */
 export async function open(id) {
+  // Taken before anything is awaited, so the number describes THIS request.
+  const ticket = ++openSeq;
+
   // Every control in the detail view — zoom, calendar paging, granularity,
   // history mode — re-renders through here, and replaceChildren() drops the
   // page height to zero, which scrolls the window back to the top. Keeping
@@ -101,6 +162,19 @@ export async function open(id) {
   try {
     const stats = await api(`/habits/${id}/stats?granularity=${historyGranularity()}`);
     const entries = await api(`/habits/${id}/entries`);
+    // Superseded while these were out: DISCARDED, not merely overtaken. The
+    // reply is answered and drawable, and drawing it is exactly the defect —
+    // History's granularity control issues DIFFERENT urls
+    // (`?granularity=week` then `?granularity=month`), so an older payload
+    // rendering last leaves week buckets under a control reading month with
+    // nothing behind it to correct the page. The other seven in-page callers
+    // send an identical url and would merely redraw the same payload, and this
+    // costs them nothing: the request that superseded theirs draws it instead.
+    //
+    // Checked HERE and not between the two awaits. One rule, at the one moment
+    // that matters — the install — rather than a second early exit whose only
+    // gain is skipping an `/entries` already in flight.
+    if (ticket !== openSeq) return true;
     render(stats, entries);
 
     if (redraw && scroll) {
@@ -376,6 +450,13 @@ const detailHost = {
  * A request arriving mid-flight is remembered rather than dropped: the write
  * that prompted it has already landed, so skipping the reload would leave the
  * page a version behind with nothing to trigger another.
+ *
+ * **`openSeq` sits underneath this and does not replace it.** The ticket says
+ * which reply may be installed; this says how many requests are made and
+ * guarantees one is issued after the last write. Neither implies the other —
+ * without the ticket a serialised path still installs a reply the seed has
+ * superseded, and without this a triple tap still spends three of the app's
+ * heaviest route and leaves the last two discarded.
  */
 let refreshing = null;
 let refreshAgain = false;
@@ -444,6 +525,15 @@ function refresh(id) {
 function seed(habit) {
   if (!habit || !lastStats || !lastEntries) return;
   if (habit.id !== lastStats.habit?.id || habit.id !== state.openHabitId) return;
+  // Retires every reply already out, because none of them can know about the
+  // write this is painting — see `openSeq`. Bumped rather than merely drawn
+  // over: `refresh` coalesces a second save into the refetch already in
+  // flight, so nothing NEWER takes a ticket to supersede that reply, and
+  // without this line it lands, redraws the head, and re-arms the Edit-Save
+  // revert this function exists to close. The `refresh` on the line after the
+  // call site is what re-asks; a seed never leaves the page with no request
+  // promised behind it.
+  openSeq++;
   render({ ...lastStats, habit: { ...lastStats.habit, ...habit } }, lastEntries);
 }
 
@@ -1568,37 +1658,30 @@ export function init() {
   // wrong. `countcheck.mjs` forces that interleaving with CDP rather than
   // hoping for it.
   //
-  // **The flicker was left, and the counter that would close it was looked at
-  // again and declined a second time — for a reason that is not "it is only
-  // cosmetic".** Two findings, and the archive
-  // (`docs/decisions/dashboard-and-detail.md`) has both in full. The residual
-  // is a little more than a flicker: for the length of the refetch promised
-  // behind the stale render, the head — and so the Edit button drawn with
-  // it — is holding the pre-second-save habit again, which is this section's
-  // own revert on a window one round trip long instead of two. And a counter
-  // scoped to "a reply issued before the last seed" would close that while
-  // leaving the LARGER hole untouched and looking closed: `refresh` guards
-  // this listener alone, and the eight OTHER callers of `open()` — the zoom
-  // press, three segmented controls and four cards' `redraw` — run
-  // unserialised, so two presses on the History granularity control put two
+  // **The flicker this used to leave open is closed by `openSeq`, one level
+  // up, and it was never only a flicker.** For the length of the refetch
+  // `refreshAgain` promises behind a stale render, the head — and so the Edit
+  // button drawn with it — held the pre-second-save habit again, which is this
+  // section's own revert on a window one round trip long instead of two. What
+  // the ticket had to be, and the reason it was not a rider on the `refresh`
+  // change: not a counter scoped to "a reply issued before the last seed",
+  // which guards this listener alone. The eight OTHER callers of `open()` —
+  // the zoom press, three segmented controls and four cards' `redraw` — run
+  // unserialised, and History's granularity is the one of the eight that
+  // issues DIFFERENT urls, so two presses there put two
   // differently-parameterised `/stats` in flight and the older landing last
-  // SETTLES the page on week buckets under a control reading month. That one
-  // is also the only one of the eight that can: the other seven send the
-  // identical request, so a reply out of order renders the same payload. One
-  // ticket on `open()` answers both (the `state.categoryReadSeq` shape in
-  // `ui/store.js`), and it has to decide what a DISCARDED reply returns —
-  // `open()`'s boolean is load bearing at boot, where `app.js` answers false
-  // by loading the dashboard instead. That is its own change with its own
-  // test, not a rider on this one.
+  // SETTLED the page on week buckets under a control reading month. The ticket
+  // sits on `open()` itself and answers both; `seed` bumps it, which is the
+  // half that reaches this listener.
   //
-  // A third option gets proposed here and is in the archive with its
-  // rebuttal: make the SEED sticky — remember the saved habit and overlay it
-  // in `render()` on an id match — which closes the revert with no reply
+  // A third option was proposed here and is in the archive with its rebuttal:
+  // make the SEED sticky — remember the saved habit and overlay it in
+  // `render()` on an id match — which closes the revert with no reply
   // discarded. Its clearing rule is the whole of it: cleared on navigation it
   // draws this device's last save over a rename made on the phone, forever,
-  // and cleared correctly it IS the generation comparison above. It also says
-  // nothing about which payload wins, so the settle stays open under a head
-  // that now looks right.
+  // and cleared correctly it IS the generation comparison. It also says
+  // nothing about which payload wins, so it could not have reached the settle
+  // at all.
   on('change', (habit) => {
     if (state.openHabitId == null) return;
     seed(habit);

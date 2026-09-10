@@ -1123,12 +1123,24 @@ try {
    * above is about. What has to be waited for is that a render HAPPENED,
    * whatever it happened to draw.
    *
+   * **And WHAT each render drew, beside the count.** The ticket's whole claim
+   * is that the superseded reply never reaches the page, and a count alone
+   * cannot say which payload a render was made of — a page that draws the
+   * stale answer and then corrects itself has the same final head as one that
+   * never drew it. The head is read INSIDE the callback, which is delivered
+   * after `render()`'s synchronous fill has returned, so each entry is the
+   * subtitle that render actually put on screen.
+   *
    * Installed after the reload above, since nothing here navigates again.
    */
   await ev(`(()=>{
     window.__renders = 0;
-    new MutationObserver(() => { window.__renders += 1; })
-      .observe(document.getElementById('view-detail'), { childList: true });
+    window.__heads = [];
+    new MutationObserver(() => {
+      window.__renders += 1;
+      window.__heads.push(
+        document.querySelector('#view-detail .habit-sub')?.textContent ?? '');
+    }).observe(document.getElementById('view-detail'), { childList: true });
     return true;})()`);
   const renders = () => ev(`window.__renders`);
   /** Wait for the next redraw after `from`, and answer the count it reached. */
@@ -1197,43 +1209,61 @@ try {
   const outstanding = paused.length;
 
   /*
-   * Release what is held, NEWEST first, and let each answer be drawn before
-   * the next is let go — one reply in flight at a time, because two have no
-   * order and the order is the whole of what this block forces.
+   * Release what is held, NEWEST first, until the page has stopped answering.
    *
-   * The settle is two more renders, and it is two in EITHER world, which is
-   * what lets the mutation fail by NAME rather than time out: under `refresh`
-   * the held reply draws the pre-second-save habit and the coalesced re-run
-   * behind it draws the newest; without it the two independent refetches draw
-   * newest and then oldest. Two answers were computed either way, and each is
-   * drawn once.
+   * **The loop may not wait for a render between releases, and that is the
+   * ticket's own signature.** It used to: release one, wait for the redraw it
+   * caused, release the next. Under `openSeq` the held reply is DISCARDED
+   * rather than drawn, so that loop stalls on the very behaviour this block
+   * now exists to assert — measured, it spent its whole 15s deadline with the
+   * coalesced re-run still paused, which `Fetch.disable` then freed, and the
+   * failure read `0 render(s) after the seed, 1 reply(s) released, 1 still
+   * held` with the interesting question never asked.
    *
-   * **What this replaces, and what it cost.** Both loops used to be durations
-   * — a 700ms settle after each release, then a bounded poll with a 500ms
-   * sleep in it — and the re-run was issued 16-20ms after the release, INSIDE
-   * that first settle, where a `paused.length = 0` written for the loop's own
-   * bookkeeping then dropped its requestId unreleased. The poll that followed
-   * had nothing to let through, spun its full six seconds, and the reply was
-   * finally freed by `Fetch.disable` — so the last two checks were decided by
-   * a photo finish between the page's `/entries` round trip and the
-   * assertion's own `fetch('/api/habits')`, measured at 3-4ms in the runs it
-   * won. That is the ~4% flake this block shipped with, and every failing
-   * instance reported the identical `statsLanded` and `outstanding` as a
-   * passing one, because the reply had landed and only the render had not.
+   * So the loop releases whatever is held and stops on QUIET: three
+   * consecutive polls with nothing held and at least one render behind it.
+   * The quiet period is what keeps the mutation from passing — the coalesced
+   * re-run is issued in `refresh`'s own `finally`, milliseconds after the
+   * release, so a loop that stopped at the first empty `paused` would break
+   * before the second reply was ever held and report one render either way.
+   * 250ms a poll is the margin its `Fetch.requestPaused` has to reach the
+   * runner over DevTools, the same figure the settle above uses.
+   *
+   * Two answers are computed in either world; what differs is how many are
+   * DRAWN. Under the ticket the older one is let through, discarded, and the
+   * re-run behind it draws the newest — one render. Without it both draw, and
+   * the older draws last.
+   *
+   * **What the wait-per-release replaced, and what that cost.** Both loops
+   * used to be durations — a 700ms settle after each release, then a bounded
+   * poll with a 500ms sleep in it — and the re-run was issued 16-20ms after
+   * the release, INSIDE that first settle, where a `paused.length = 0` written
+   * for the loop's own bookkeeping then dropped its requestId unreleased. The
+   * poll that followed had nothing to let through, spun its full six seconds,
+   * and the reply was finally freed by `Fetch.disable` — so the last two
+   * checks were decided by a photo finish between the page's `/entries` round
+   * trip and the assertion's own `fetch('/api/habits')`, measured at 3-4ms in
+   * the runs it won. That is the ~4% flake this block shipped with, and every
+   * failing instance reported the identical `statsLanded` and `outstanding` as
+   * a passing one, because the reply had landed and only the render had not.
+   * The quiet rule keeps that property: it ends on the page having gone
+   * silent, never on a duration chosen for it.
    */
   let drawn = seeded;
   let released = 0;
-  let awaitingRender = false;
-  const drainBy = Date.now() + 15_000;
-  while (drawn < seeded + 2 && Date.now() < drainBy) {
-    if (!awaitingRender && paused.length) {
+  let quiet = 0;
+  const drainBy = Date.now() + 20_000;
+  while (Date.now() < drainBy) {
+    if (paused.length) {
       await release(paused.pop());
       released++;
-      awaitingRender = true;
+      quiet = 0;
+    } else if (released) {
+      quiet++;
     }
-    await sleep(25);
-    const now = await renders();
-    if (now > drawn) { drawn = now; awaitingRender = false; }
+    await sleep(250);
+    drawn = await renders();
+    if (quiet >= 3 && drawn > seeded) break;
   }
 
   await send('Fetch.disable', {}, sessionId);
@@ -1250,30 +1280,53 @@ try {
       statsLanded: performance.getEntriesByType('resource')
         .filter(e => e.name.includes('/stats')).length,
     };})()`);
+  // Everything this page drew after the second save's seed, in order — the
+  // half a count cannot answer. See the observer above.
+  const after = await ev(`window.__heads.slice(${seeded})`);
   check('both saves reached storage, the second one last',
     settledOn.stored === 9.5, JSON.stringify(settledOn));
-  // **Every reply this block held has to have LANDED, or the checks below are
-  // vacuous.** `api()` abandons a request after ten seconds, and a held one on
-  // a loaded fleet can reach that: the older reply then never renders at all,
-  // the seeded head is left standing, and the assertion passes for the one
-  // reason it must not — the interleaving it exists to survive never happened.
-  // A shortfall is a failed GUARD rather than a quiet pass.
-  check('...and every held refetch actually answered, so the interleaving was '
-    + 'real', settledOn.statsLanded >= outstanding,
-    `${settledOn.statsLanded} landed of ${outstanding} held`);
+  // **Every reply this block released has to have LANDED, or the checks below
+  // are vacuous.** `api()` abandons a request after ten seconds, and a held one
+  // on a loaded fleet can reach that: the older reply then never arrives at
+  // all, the seeded head is left standing, and the assertions pass for the one
+  // reason they must not — the interleaving they exist to survive never
+  // happened. A shortfall is a failed GUARD rather than a quiet pass, and it
+  // counts what was RELEASED rather than what was held at one instant, since
+  // the re-run behind the first release is held too.
+  check('...and every released refetch actually answered, so the interleaving '
+    + 'was real', settledOn.statsLanded >= released && released >= 2,
+    `${settledOn.statsLanded} landed, ${released} released, ${outstanding} `
+    + 'held at the seed');
   // The other half of the same guard, and the one the flake needed: a reply
   // can land — the resource timing above says so — with its render still a
-  // round trip away, and the check below would then be reading a page that
-  // has not finished answering. Two answers are drawn in BOTH worlds, so this
-  // is satisfied by the mutation as well and cannot swallow its verdict.
-  check('...and both of them were DRAWN, so the page had finished settling '
-    + 'before it was read', drawn === seeded + 2,
-    `${drawn - seeded} render(s) after the seed, ${released} reply(s) `
-    + `released, ${paused.length} still held`);
+  // round trip away, and the checks below would then be reading a page that
+  // has not finished answering.
+  check('...and the page had finished settling before it was read',
+    drawn > seeded && !paused.length,
+    `${drawn - seeded} render(s) after the seed, ${paused.length} still held`);
   check('the page settles on the LAST save even when the older refetch answers '
     + 'after it', settledOn.head.endsWith('≥ 9.5 pages'),
     `${JSON.stringify(settledOn)} (${outstanding} refetch(es) were outstanding, `
     + `${released} released, ${drawn - seeded} drawn)`);
+  /*
+   * The ticket's own claim, and it is a different one from the settle above:
+   * the reply computed BEFORE the second save is DISCARDED, not merely
+   * overtaken. `refresh` alone leaves it drawable — it is an answered request
+   * and `render()` draws what it is given — and while that render is on screen
+   * the head, and so the Edit button captured with it, is holding the
+   * pre-second-save habit again: this whole section's revert, on a window one
+   * round trip long. The settle check above cannot see it, because the page is
+   * allowed to flicker there and only its final state is judged.
+   *
+   * Named against the payload rather than the count, so a failure prints which
+   * answer reached the page.
+   */
+  check('the reply computed before the second save never reaches the page',
+    !after.some((h) => h.includes('12.5')),
+    `drew ${JSON.stringify(after)} after the seed`);
+  check('...so exactly one render follows the seed — the discarded reply drew '
+    + 'nothing at all', after.length === 1,
+    `${after.length} render(s): ${JSON.stringify(after)}`);
 
   // The head is the Edit button's own habit — same `render()`, same object —
   // and this is the press that would spend a stale one. Asserted rather than
@@ -1286,6 +1339,118 @@ try {
   check('...so Edit-then-Save from here cannot revert the second one',
     boxAfter === '9.5', `${JSON.stringify(boxAfter)} (a revert reads as "12.5")`);
   await ev(`document.getElementById('dialog-cancel').click(); true`);
+
+  console.log('\n--- two granularities, and the OLDER reply landing last ---');
+  /*
+   * The same race one road over, and the ONE place it settles the page wrong
+   * rather than flickering.
+   *
+   * `refresh` guards the `'change'` listener alone. The other eight callers of
+   * `open()` (`ui/detail.js`) run unserialised — `changeZoom`, three segmented
+   * controls and four cards' `redraw` — and seven of them send the IDENTICAL
+   * url, so a reply landing out of order redraws the same payload against
+   * current state and costs a wasted render. History's granularity control is
+   * the exception and is why this block exists: its presses parameterise the
+   * request (`?granularity=year` then `?granularity=day`), so the older reply
+   * rendering last leaves the chart drawn from one granularity under a control
+   * reading the other, with nothing behind it to correct the page. Nothing
+   * refetches; that is a SETTLE, not a flicker.
+   *
+   * Read off the CHART and not the control. `historyGranularity()` is
+   * `state.granularity`, which the second press moved before either reply
+   * landed, so the control reads 'day' in both worlds — it is the bars beneath
+   * it that disagree. `formatStamp` (`ui/dates.js`) is what makes the two
+   * legible apart in one string: a year bucket is the bare key, so its bar
+   * titles read `2026: 40/100 (40%)`, while a day bucket is a `YYYY-MM-DD` and
+   * formats as a written date. The check is the shape of the key rather than a
+   * count of bars, because `windowedChart` slices both to what fits.
+   *
+   * `requestStage: 'Response'` for the reason the block above gives at length:
+   * the answer has to be COMPUTED before it is held, or releasing it late just
+   * asks the server the same question again.
+   *
+   * The two are released by URL rather than by arrival order. A response-stage
+   * pause fires when the server answers, and nothing promises the year request
+   * — issued first, over a coarser aggregation — is answered first, so
+   * `paused.pop()` here would pick whichever it happened to be and the block
+   * would prove a different thing on different runs.
+   */
+  const historyIn = (what) => ev(`(()=>{
+    const c=[...document.querySelectorAll('#view-detail .card')]
+      .find(c=>c.querySelector('.card-title')?.textContent==='History');
+    if (!c) return null;
+    if (${JSON.stringify(what)} === 'pressed') {
+      const b=[...c.querySelectorAll('.seg button')]
+        .find(b=>b.getAttribute('aria-pressed')==='true'
+          && ['day','week','month','quarter','year'].includes(b.textContent.trim()));
+      return b ? b.textContent.trim() : null;
+    }
+    return [...c.querySelectorAll('svg title')].map(t=>t.textContent);})()`);
+  const pressGran = (value) => ev(`(()=>{
+    const c=[...document.querySelectorAll('#view-detail .card')]
+      .find(c=>c.querySelector('.card-title')?.textContent==='History');
+    const b=[...(c ? c.querySelectorAll('.seg button') : [])]
+      .find(b=>b.textContent.trim()===${JSON.stringify(value)});
+    if (!b) return false;
+    b.click(); return true;})()`);
+  /** The held reply for one granularity, taken out of `paused` by its url. */
+  const takeGran = (g) => {
+    const i = paused.findIndex((p) => (p.request?.url ?? '').includes(`granularity=${g}`));
+    return i === -1 ? null : paused.splice(i, 1)[0];
+  };
+
+  await send('Network.enable', {}, sessionId);
+  await send('Network.setBypassServiceWorker', { bypass: true }, sessionId);
+  paused.length = 0;
+  await ev(`performance.clearResourceTimings(); true`);
+  await send('Fetch.enable', {
+    patterns: [{ urlPattern: '*/api/habits/*/stats*', requestStage: 'Response' }],
+  }, sessionId);
+
+  const granStart = await renders();
+  check('the History card has a granularity control to press',
+    await pressGran('year') === true, `pressed ${await historyIn('pressed')}`);
+  check("...and the year reply is held before the second press is made",
+    await takePaused(1), `${paused.length} paused`);
+  // The page has not rebuilt — the first reply is still held — so this is the
+  // same control, still on screen, being pressed a second time. That is the
+  // gesture: two presses inside one round trip.
+  await pressGran('day');
+  check('...and the day reply is held beside it, so two are outstanding',
+    await takePaused(2), `${paused.length} paused`);
+
+  // Newest first, and named: the reply the control's own state agrees with.
+  await release(takeGran('day'));
+  await waitUntil(ev, `window.__renders > ${granStart}`,
+    { what: 'the newer granularity to draw' });
+  const afterNewer = await renders();
+  // ...and then the older one, which is the whole question. A post-action
+  // settle rather than a poll, because what is being established is that a
+  // render did NOT happen, which has no predicate to wait on.
+  await release(takeGran('year'));
+  await sleep(1200);
+  const granDrawn = await renders();
+
+  await send('Fetch.disable', {}, sessionId);
+  await send('Network.setBypassServiceWorker', { bypass: false }, sessionId);
+
+  const granBars = await historyIn('bars');
+  const granPressed = await historyIn('pressed');
+  const granLanded = await ev(`performance.getEntriesByType('resource')
+    .filter(e => e.name.includes('/stats')).length`);
+  // Both replies have to have ARRIVED, or the page is right for a reason this
+  // block is not about: `api()` abandons a request at ten seconds, and an
+  // abandoned one renders nothing under either version of the code.
+  check('both granularity replies actually answered, so the interleaving was '
+    + 'real', granLanded >= 2, `${granLanded} landed`);
+  check('the page settles on the granularity its control reads, not on the '
+    + 'reply that answered last',
+    granBars.length > 0 && !granBars.some((t) => /^\d{4}:/.test(t)),
+    `control reads ${JSON.stringify(granPressed)} over `
+    + `${JSON.stringify(granBars.slice(0, 3))}`);
+  check('...and the superseded reply drew nothing at all — discarded, not '
+    + 'overtaken', granDrawn === afterNewer,
+    `${granDrawn - granStart} render(s) for two presses`);
 } catch (e) {
   console.log('ERROR:', e.message);
   fails++;

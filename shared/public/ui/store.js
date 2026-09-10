@@ -44,6 +44,24 @@ export const state = {
   //
   // A counter and not a timestamp: `Date.now()` has no ordering guarantee
   // finer than a millisecond, and two of these can start in the same one.
+  //
+  // **Two other tickets now use this SHAPE, and neither may use this
+  // COUNTER.** `loadSeq` (`ui/dashboard.js`) covers the rest of what a
+  // `/overview` load installs, and `openSeq` (`ui/detail.js`) covers the
+  // `/stats` payload a habit's page renders from. One mechanism — take a
+  // number before the request, install only while you still hold it — asked of
+  // three different questions, because three writers bump THIS one while
+  // saying nothing about a habit's stats or the dashboard's grid:
+  // `refreshCategoryPicker`, `moveCategory`'s splice and the queued DELETE's
+  // optimistic removal. Sharing the counter would throw a habit's page or a
+  // dashboard load away because somebody opened the habit dialog. They live at
+  // module scope in the files that write them, which is this field's own
+  // placement rule applied the other way round: the two of them have one owner
+  // each, and this one has none.
+  //
+  // What that changes about the note below: `habits` and `categorySummaries`
+  // are still not guarded by THIS counter, and are no longer unguarded — see
+  // `loadSeq`.
   categoryReadSeq: 0,
   editingId: null,
   openHabitId: null,   // habit shown in the detail view, null on the dashboard
