@@ -424,17 +424,25 @@ try {
     // Cleanup is not what this suite is testing, so a failed DELETE is
     // reported rather than turned into a `ck` failure — but reported, not
     // discarded, since a silent leak is exactly finding 2's hazard.
-    if (avgHabitId != null) {
-      const ok = await ev(
-        "fetch('/api/habits/" + avgHabitId + "', { method: 'DELETE' })" +
-        '.then(function(r){ return r.ok; })');
-      if (!ok) console.log('cleanup: DELETE /api/habits/' + avgHabitId + ' (average-lapse habit) did not come back ok');
-    }
-    if (nullHabitId != null) {
-      const ok = await ev(
-        "fetch('/api/habits/" + nullHabitId + "', { method: 'DELETE' })" +
-        '.then(function(r){ return r.ok; })');
-      if (!ok) console.log('cleanup: DELETE /api/habits/' + nullHabitId + ' (null-lapse habit) did not come back ok');
+    //
+    // Each delete is guarded on its OWN, because a throw in here would
+    // REPLACE whatever the block above threw: `ev` raises on a CDP
+    // `exceptionDetails`, which is what a rejected in-page `fetch` produces,
+    // so the one condition likeliest to break the seeding — a degraded server
+    // or connection — is also the one likeliest to break the cleanup. The run
+    // still fails either way, but the diagnostic naming WHICH seed step failed
+    // is the thing worth keeping.
+    for (const [id, what] of [[avgHabitId, 'average-lapse'], [nullHabitId, 'null-lapse']]) {
+      if (id == null) continue;
+      const where = 'cleanup: DELETE /api/habits/' + id + ' (' + what + ' habit)';
+      try {
+        const ok = await ev(
+          "fetch('/api/habits/" + id + "', { method: 'DELETE' })" +
+          '.then(function(r){ return r.ok; })');
+        if (!ok) console.log(where + ' did not come back ok');
+      } catch (err) {
+        console.log(where + ' threw :: ' + err.message);
+      }
     }
   }
 
