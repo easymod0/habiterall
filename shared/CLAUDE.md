@@ -286,21 +286,44 @@ That makes `dateRange` the one place in the file that spells a date without
 calling `toISO`, so a test compares every element against `toISO` directly —
 every other assertion in that suite is a literal and would pin the wrong half.
 
-**Building the list is still the largest single line item, and the reason is no
-longer how it is built.** One `computeStats` calls `boundedRange` **eight
-times** on the identical window — once each in `computeScores`, `computeHistory`,
-`computeWeekdays`, `computeWeekdayByMonth`, `computeFrequency` and
-`computeCoverage`, and once per `onPaceSeries`, which `computeStreaks` and
-`computeMissRuns` each build separately. `/habits/:id/stats` is the only route
-left that calls `computeStats`, and pays for all eight; `coverage` still
-defaults to **true** there. `/overview` no longer calls `computeStats` at
-all — it calls `summaryStats`, which walks the window **twice**, instrumented
-and counted rather than read off the two call sites it makes: once in
-`computeScores` and once in `computeStreaks`'s `onPaceSeries`. Sharing one
-walk, and one `onPaceSeries`, inside `computeStats` is worth more than any
-further tuning of the loop; it is filed rather than done because it changes
-signatures or adds a cache, and it stays filed regardless of what `/overview`
-calls, because `/habits/:id/stats` still needs every one of the eight.
+**Building the list is one walk now, not eight, and building `onPaceSeries` is
+one build, not two (#219).** One `computeStats` call used to call
+`boundedRange` on the identical window eight times — once each in
+`computeScores`, `computeHistory`, `computeWeekdays`, `computeWeekdayByMonth`,
+`computeFrequency` and `computeCoverage`, and once per `onPaceSeries`, which
+`computeStreaks` and `computeMissRuns` each built separately — and built
+`onPaceSeries` itself twice for exactly that reason. `/habits/:id/stats`, the
+only route left calling `computeStats`, paid for all eight walks every time,
+`coverage` defaulting to **true** there. `summaryStats`, what `/overview` calls
+instead, walked the window twice for the same reason (`computeScores` and
+`computeStreaks`'s `onPaceSeries`). Both now walk once and build the series
+once, and `computeCategoryStats` now shares its own bucket-axis walk with the
+`computeMissRuns` call it runs per member — its per-member `computeScores` call
+keeps its own walk on purpose, because that one runs over a different,
+per-member warm-up window and sharing it would change scores.
+
+The shape is module-private `*Over(dates)` cores behind exported wrappers whose
+signatures did **not** change: `computeStats` / `summaryStats` /
+`computeCategoryStats` each build one clamped `dates = boundedRange(from, end)`
+and hand it to every core that needs it, while every exported pass — still
+called the old way by `summary-cache.js` and every test — builds its own
+`dates` and delegates to its core, unchanged in behaviour. This was chosen over
+a memo or a cache: `dateRange` trims its own array during the past-end walk, so
+a memo handing one retained array to many callers across calls is a hazard, and
+a cache is #191's eviction question, which this change does not re-open. The
+reason the cores are private is the one a future reader most needs: not being
+exported, and taking no optional `dates` parameter, means nothing outside
+`stats.js` can hand a pass an unclamped range — the `boundedRange` clamp stays
+reachable only through the wrappers and through the three entry points
+themselves, which is what makes it structurally inescapable rather than merely
+followed by convention.
+
+Measured on the same 1,464-row fixture, before -> after: `computeStats`
+(`coverage: true`, the `/habits/:id/stats` shape) 1.77 -> 1.20 ms/habit (-32%);
+`computeStats` (`coverage: false`) 1.65 -> 1.16 ms/habit (-30%); `summaryStats`
+(the `/overview` shape) 0.30 -> 0.22 ms/habit (-27%); `boundedRange` walks per
+`computeStats(coverage: true)` call, 8 -> 1; `onPaceSeries` builds per
+`computeStats` call, 2 -> 1.
 
 **One thing changed meaning with that rewrite, deliberately: the FIRST
 element.** The old walk pushed the string it was handed before normalising

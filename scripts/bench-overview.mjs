@@ -84,6 +84,43 @@ const WARMUP = 30;
 const HABIT_COUNTS = [20, 50];
 
 /**
+ * How many `boundedRange` walks one `computeStats(coverage: true)` call
+ * performs — the shape `GET /habits/:id/stats` calls now that #183 has ended
+ * `/overview`'s call to `computeStats` in favour of `summaryStats`. This is
+ * only the multiplier for the arithmetic in the `#198` table below; the real
+ * guard on this count is `shared/test/stats.test.js` (T2), which counts
+ * `boundedRange(` call sites in the module itself and prints its inventory —
+ * a source-text count in THIS file could not see a renamed binding either,
+ * so it is not asserted here.
+ *
+ * #219 closed the gap this constant used to describe: `computeStats` now
+ * threads one shared `dates` array through every pass instead of building it
+ * separately in each (private `*Over(dates)` cores behind unchanged exported
+ * wrappers — see `shared/src/stats.js` and `shared/CLAUDE.md`), so this is 1,
+ * not 8. Kept as a named constant rather than a literal in the prose below for
+ * the same reason it was one before: so the multiplier is checkable rather
+ * than folklore.
+ *
+ * What master paid for, before #219 — eight walks, in `computeStats`'s call
+ * order, by function name rather than line number (those move; the names
+ * don't):
+ *   1. `computeScores`
+ *   2. `computeStreaks` -> `onPaceSeries`
+ *   3. `computeHistory`
+ *   4. `computeWeekdays`
+ *   5. `computeWeekdayByMonth`
+ *   6. `computeFrequency`
+ *   7. `computeResilience` -> `computeMissRuns` -> `onPaceSeries` (the same
+ *      series `computeStreaks` already built, over the same window, rebuilt
+ *      because nothing threaded it through)
+ *   8. `computeCoverage`, the opt-out pass already measured above
+ */
+const WALKS_PER_COMPUTESTATS = 1;
+
+/** What master paid, before #219 — see the constant above's comment. */
+const WALKS_BEFORE_219 = 8;
+
+/**
  * A boolean daily habit, every present row a completion.
  *
  * Deliberately the plain case. Skips are NOT modelled and neither is a
@@ -386,6 +423,19 @@ function main() {
   const summary = bench(() =>
     summaryStats(HABIT, recent, { end: END, unlogged: UNLOGGED_DEFAULT, creditFrom }));
 
+  // #219: the shape that used to pay for all eight walks, and the one whose
+  // cost is permanent. #183 closed `/overview`'s call to `computeStats` —
+  // `route` above and `summary` are its old and new cost — but `GET
+  // /habits/:id/stats` in both editions still calls `computeStats` with
+  // `coverage` untouched at its default `true`, keeping every field and so
+  // every pass. That is why #219 was worth doing on this shape even after
+  // #183 had removed most of its value from `/overview`, and why this row
+  // is the one to read the #219 saving off. No `creditFrom` here: unlike
+  // `summaryStats`,
+  // `computeStats` has no such option — it derives its own from `entries`.
+  const statsRoute = bench(() =>
+    computeStats(HABIT, recent, { end: END, unlogged: UNLOGGED_DEFAULT }));
+
   /* --- #183: what the route keeps and what it throws away --- */
 
   const kept = bench(() => {
@@ -411,6 +461,7 @@ function main() {
   console.log(`|---|---:|---|`);
   console.log(`| \`computeStats\` (\`coverage: false\`) — what \`/overview\` used to call | ${ms(route)} | whole module |`);
   console.log(`| \`summaryStats\` — what \`/overview\` calls now | **${ms(summary)}** | whole module |`);
+  console.log(`| \`computeStats\` (\`coverage: true\`, its default) — what \`GET /habits/:id/stats\` calls, still today | **${ms(statsRoute)}** | whole module, permanent |`);
   console.log(`| \`computeScores\` + \`computeStreaks\` | ${ms(kept)} | KEPT |`);
   for (const [name, t] of Object.entries(discarded)) {
     console.log(`| \`${name}\` | ${ms(t)} | discarded |`);
@@ -427,19 +478,27 @@ function main() {
   const coverage = bench(() => computeCoverage(recentMap, from, END).length);
   console.log(`\`computeCoverage\` is ${ms(coverage)} ms/habit — still \`computeStats\`'s opt-out; \`/overview\` no longer calls \`computeStats\` at all to decline it.\n`);
 
-  // The passes are timed one at a time and `computeStats` is timed whole, so
-  // they are two independent measurements of the same work and the remainder
-  // is a statement about the bench rather than about the program. It should be
-  // the entry Map plus the `totalCompleted` filter and nothing else; a large
-  // or negative remainder means a pass here is not the call the route makes.
+  // The passes are timed one at a time, each through its own EXPORTED wrapper,
+  // and `computeStats` is timed whole. Before #219 those were two independent
+  // measurements of the same work, and a large or negative remainder would
+  // have meant a pass here was not the call the route makes. After #219 that
+  // reading no longer holds: each pass here still pays for its own
+  // `boundedRange` walk through its wrapper, while `computeStats` shares ONE
+  // walk across all of them — so the parts summed here legitimately EXCEED the
+  // whole, by roughly the walks `computeStats` no longer pays for on top of
+  // the one it keeps. A negative remainder is the win showing up, not a fault
+  // in the bench; it would only mean the bench measures the wrong call if it
+  // were unexpectedly LARGE and POSITIVE, or if `computeStats` had somehow
+  // regressed to costing less than one pass alone.
   const unaccounted = route - passTotal;
   console.log(
     `Passes sum to ${ms(passTotal)} ms against ${ms(route)} ms for the whole ` +
-    `module — ${ms(unaccounted)} ms unaccounted, which is the entry Map and ` +
-    `\`totalCompleted\`.\n`
+    `module — ${ms(unaccounted)} ms unaccounted, negative because #219 made ` +
+    `\`computeStats\` share one walk across every pass while each pass timed ` +
+    `here still pays for its own.\n`
   );
 
-  console.log(`Per request — what \`/overview\` used to spend calling \`computeStats\`, against what \`summaryStats\` costs it now:\n`);
+  console.log(`Per request — what \`/overview\` would spend today if it still called \`computeStats\` (itself cheaper now, post-#219), against what \`summaryStats\` costs it:\n`);
   for (const n of HABIT_COUNTS) {
     console.log(`- ${n} habits — was ${ms(route * n)} ms, now ${ms(summary * n)} ms, saving ~${ms((route - summary) * n)} ms`);
   }
@@ -493,6 +552,26 @@ function main() {
   console.log(`| \`boundedRange\`, ${WINDOW_DAYS} days | ${us(walkWindow)} | ${pct(walkWindow, scoresOnly)} of \`computeScores\` |`);
   console.log(`| \`boundedRange\`, ${HISTORY_DAYS} days | ${us(walkHistory)} | ${pct(walkHistory, streakScan)} of the \`bestStreak\` scan |`);
   console.log(`| \`computeScores\`, whole pass | ${us(scoresOnly)} | |\n`);
+
+  // #219's arithmetic: the SAME `boundedRange` walk timed above, charged
+  // `WALKS_PER_COMPUTESTATS` times against `WALKS_BEFORE_219` — against the
+  // whole `computeStats(coverage: true)` call measured as `statsRoute` above.
+  // This is the "walked the identical window eight times, now walks it once"
+  // claim as a number rather than folklore: both multipliers are named,
+  // commented constants, and the walk cost and the whole-call cost are both
+  // read off the SAME bench run rather than recomputed here.
+  const walkShare = walkWindow * WALKS_PER_COMPUTESTATS;
+  const walkShareBefore = walkWindow * WALKS_BEFORE_219;
+  console.log(
+    `#219 — one \`computeStats(coverage: true)\` call (the \`/habits/:id/stats\` ` +
+    `shape, \`statsRoute\` above) now performs ${WALKS_PER_COMPUTESTATS} of the ` +
+    `\`boundedRange\` walks timed above, not ${WALKS_BEFORE_219}: was ` +
+    `${WALKS_BEFORE_219} x ${us(walkWindow)}us = ${us(walkShareBefore)}us ` +
+    `(${pct(walkShareBefore, statsRoute)} of the whole call), now ` +
+    `${WALKS_PER_COMPUTESTATS} x ${us(walkWindow)}us = ${us(walkShare)}us ` +
+    `(${pct(walkShare, statsRoute)}), a saving of ` +
+    `${us(walkShareBefore - walkShare)}us per \`computeStats\` call.\n`
+  );
 
   console.log(`<details><summary>fixture shape, asserted</summary>\n`);
   for (const [k, v] of Object.entries(shapes)) console.log(`- ${k}: ${v}`);
