@@ -1606,6 +1606,61 @@ test('summaryStats returns exactly the two fields /overview reads, nothing more'
   assert.deepEqual(Object.keys(stats).sort(), ['currentStreak', 'score']);
 });
 
+/* ---------- summaryStats: the opt-in `lastMiss` pass, for issue #200's
+   'recently missed' habit sort ---------- */
+
+test('summaryStats omits lastMiss entirely when not asked for', () => {
+  // Asserted with `'lastMiss' in stats`, not `=== undefined` — the key must be
+  // ABSENT, the same distinction `coverage` draws above `computeStats`. `null`
+  // would be a claim that the habit has never missed; this is the absence of
+  // a claim, and a `=== undefined` check cannot tell "no key" from "a key
+  // holding undefined" apart.
+  const entries = [
+    { date: '2026-08-01', value: YES }, // 08-02, 08-03 unlogged -> a miss run
+    { date: '2026-08-04', value: YES },
+  ];
+  const stats = summaryStats(boolHabit, entries, { end: '2026-08-04' });
+  assert.ok(!('lastMiss' in stats), 'lastMiss must be absent, not present-and-undefined');
+});
+
+test('summaryStats reports the end of the most recent miss run when lastMiss is asked for', () => {
+  const entries = [
+    { date: '2026-08-01', value: YES },
+    // 08-02 has no row: a one-day miss run, closed by the 08-03 completion.
+    { date: '2026-08-03', value: YES },
+    // Nothing recorded from 08-04 onward: an OPEN run, whose end is the last
+    // day the window covers — `computeMissRuns` includes an open run
+    // deliberately, and its `end` is exactly "the most recently missed day".
+  ];
+  const stats = summaryStats(boolHabit, entries, { end: '2026-08-06', lastMiss: true });
+  assert.equal(stats.lastMiss, '2026-08-06');
+});
+
+test('a trailing SKIP does not move the lastMiss answer', () => {
+  // Skips are transparent to computeMissRuns (shared/CLAUDE.md, "a streak and
+  // a lapse are made of 'on pace'"), so a skip after the last real miss must
+  // not read as a fresher one, and must not keep an already-closed run open.
+  const entries = [
+    { date: '2026-08-01', value: YES },
+    // 08-02 unlogged: closes as a one-day run ending 2026-08-02.
+    { date: '2026-08-03', value: YES },
+    { date: '2026-08-04', value: 0, status: 'skip' },
+    { date: '2026-08-05', value: 0, status: 'skip' },
+  ];
+  const stats = summaryStats(boolHabit, entries, { end: '2026-08-05', lastMiss: true });
+  assert.equal(stats.lastMiss, '2026-08-02');
+});
+
+test('a habit that has never missed reports lastMiss: null', () => {
+  const entries = [
+    { date: '2026-08-01', value: YES },
+    { date: '2026-08-02', value: YES },
+    { date: '2026-08-03', value: YES },
+  ];
+  const stats = summaryStats(boolHabit, entries, { end: '2026-08-03', lastMiss: true });
+  assert.equal(stats.lastMiss, null);
+});
+
 test('an explicit start after end collapses the window to [end, end], not an empty one', () => {
   // Neither route can hand `resolveWindow` this shape — both editions' /stats
   // routes reject `start > end` with a 400 before `computeStats` is ever

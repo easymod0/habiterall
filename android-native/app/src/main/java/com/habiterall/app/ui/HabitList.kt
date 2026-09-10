@@ -123,6 +123,7 @@ fun HabitList(
     rows: List<Habit>,            // habits + the pending-write overlay, still unfiltered
     categories: List<Category>,   // this account's categories, in the server's own order
     grouped: Boolean,             // whether to draw one section per category
+    manualOrder: Boolean,         // `Overview.manualOrderEnabled` — see the reorder gate below
     loading: Boolean,
     loaded: Boolean,
     error: String?,
@@ -532,7 +533,27 @@ fun HabitList(
                                 // rather than the web's in-place drag handle: it
                                 // keeps working under a query that hides most of
                                 // the grid.
-                                enabled = habits.size > 1,
+                                //
+                                // Third reason, `&& manualOrder`: under a
+                                // non-manual `habitSort` the FETCHED list —
+                                // `habits`, exactly what this hand-off sends — is
+                                // already in the sort's order, not
+                                // `position, id`. `ReorderScreen` still writes
+                                // every id's on-screen index back as its
+                                // `position`, so opening it under a sort and
+                                // touching anything would rewrite every habit's
+                                // stored position into that sort's order,
+                                // permanently — the same "corrupts stored data"
+                                // hazard the `habits`-not-`visible` choice above
+                                // guards, not merely a screen that would render
+                                // oddly. This is not a sixth mirror of sort LOGIC
+                                // (the phone never decides how to sort; it draws
+                                // whatever `/overview` returns, in that order, as
+                                // it always has) — it is `Overview.manualOrderEnabled`,
+                                // read from the SAME response `habits` came from,
+                                // only to know whether reordering means anything
+                                // right now.
+                                enabled = habits.size > 1 && manualOrder,
                                 onClick = { menuOpen = false; onReorder(habits) },
                             )
                             DropdownMenuItem(

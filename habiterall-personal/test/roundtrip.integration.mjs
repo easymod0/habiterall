@@ -823,7 +823,14 @@ const nonCanonicalDetailCards = [
 ];
 await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right',
   atMostUnlogged: 'success', theme: 'dark', numberFormat: 'comma',
-  gridDays: '7', detailCards: nonCanonicalDetailCards });
+  gridDays: '7', detailCards: nonCanonicalDetailCards,
+  // `'strength'` and not `'manual'`, for the reason `theme` is `'dark'` above:
+  // `manual` IS the registry default, so a fixture carrying it would compare
+  // equal to itself and pass with `habitSort` dropped from PORTABLE_SETTINGS
+  // altogether — which is the one decision #200 had to make about this key.
+  // It is a display preference: restoring it moves no figure on any row, only
+  // the order the list paints in.
+  habitSort: 'strength' });
 const withSettings = Buffer.from(await (await api('/api/export')).arrayBuffer());
 const exported = JSON.parse(withSettings.toString('utf8')).settings ?? {};
 
@@ -831,7 +838,7 @@ ck('the JSON backup carries the settings',
   exported.skipDays === true && exported.questionMarks === true &&
   exported.dayOrder === 'newest-right' && exported.atMostUnlogged === 'success' &&
   exported.theme === 'dark' && exported.numberFormat === 'comma' &&
-  exported.gridDays === '7' &&
+  exported.gridDays === '7' && exported.habitSort === 'strength' &&
   JSON.stringify(exported.detailCards) === JSON.stringify(nonCanonicalDetailCards),
   JSON.stringify(exported));
 
@@ -863,11 +870,16 @@ ck('though it can still set a display preference',
 await restore(jsonBackup, 'replace');
 await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right',
   atMostUnlogged: 'success', theme: 'dark', numberFormat: 'comma',
-  gridDays: '7', detailCards: nonCanonicalDetailCards });
+  gridDays: '7', detailCards: nonCanonicalDetailCards, habitSort: 'strength' });
 
+// Every key overwritten with a DIFFERENT value, so the restore below has
+// something to put back. `habitSort` is `'name'` here rather than `'manual'`
+// for the same reason it is not `'manual'` in the fixture: the restore has to
+// be observed moving it OFF a value, and off the default is the one move a
+// dropped key could fake.
 await putSettings({ skipDays: false, questionMarks: false, dayOrder: 'newest-left',
   atMostUnlogged: 'miss', theme: 'light', numberFormat: 'point',
-  gridDays: 'auto', detailCards: ['awards'] });
+  gridDays: 'auto', detailCards: ['awards'], habitSort: 'name' });
 const restored = await restore(withSettings, 'replace');
 const back = await getSettings();
 
@@ -875,7 +887,7 @@ ck('a replace-mode restore puts them back',
   back.skipDays === true && back.questionMarks === true &&
   back.dayOrder === 'newest-right' && back.atMostUnlogged === 'success' &&
   back.theme === 'dark' && back.numberFormat === 'comma' &&
-  back.gridDays === '7' &&
+  back.gridDays === '7' && back.habitSort === 'strength' &&
   JSON.stringify(back.detailCards) === JSON.stringify(nonCanonicalDetailCards),
   JSON.stringify(back));
 ck('and says how many it applied', restored.settings >= 3, String(restored.settings));

@@ -1,6 +1,8 @@
 package com.habiterall.app
 
 import com.habiterall.app.data.AppSettings
+import com.habiterall.app.data.Overview
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -130,6 +132,34 @@ class AppSettingsDefaultsTest {
     }
 
     /**
+     * `habitSort` moved off `AppSettings` entirely (issue #200 review) — it
+     * rides on `Overview` now, the same response `habits` comes from, so the
+     * reorder gate cannot disagree with the order it guards. This is the
+     * behavioural half of that move: the field actually parses off the wire,
+     * and an ABSENT key — a server with no sort feature at all, whose list is
+     * therefore already in `position, id` order — reads as manual and
+     * therefore reorder-ENABLED, never the other way round. Mutating that
+     * fallback to disabled is what proves this test, rather than the pure
+     * default above it, is the one that would notice.
+     */
+    @Test
+    fun `Overview parses habitSort, and an absent key means manual and enabled`() {
+        val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+
+        val withSort = json.decodeFromString<Overview>(
+            """{"start":"2026-01-01","end":"2026-01-01","habits":[],"habitSort":"name"}"""
+        )
+        assertEquals("name", withSort.habitSort)
+        assertFalse(withSort.manualOrderEnabled)
+
+        val absent = json.decodeFromString<Overview>(
+            """{"start":"2026-01-01","end":"2026-01-01","habits":[]}"""
+        )
+        assertEquals(null, absent.habitSort)
+        assertTrue(absent.manualOrderEnabled)
+    }
+
+    /**
      * Every key the registry has is one somebody decided about.
      *
      * The tests above name their keys, so a key ADDED to the registry could not
@@ -197,6 +227,20 @@ class AppSettingsDefaultsTest {
         // so there is nothing here for this to govern. `resolveTimeZone` reads
         // it for the SERVER's sends only.
         "notifyTimezone" to "the local alarm is already on this device's clock",
+        // Used to be mirrored, and moved here on review (issue #200): the
+        // phone no longer reads this from `GET /settings` at all, mirrored
+        // default or otherwise. `Overview.manualOrderEnabled` gates the
+        // reorder menu on the sort `/overview` reports having APPLIED to
+        // `habits` in the SAME response — which cannot disagree with the
+        // order it arrived with, where a mirrored default read from a
+        // second request could (and did: `api.settings()` and
+        // `api.overview()` were two independent calls that could land
+        // apart). That is the same distinction `notifyTimezone`'s entry
+        // above draws between an OBSERVATION and a copy of a setting — this
+        // is now the former, carried on `Overview` rather than `AppSettings`,
+        // and there is nothing left here for a mirror to drift out of step
+        // with.
+        "habitSort" to "read off Overview's own applied sort, not a mirrored default",
         // The one entry here that records a COST rather than an absence of one,
         // and it is written down as such deliberately.
         //

@@ -108,6 +108,10 @@ class HabitListTest {
         // Defaulted off, so every test above this step's own leaves the
         // ungrouped path untouched.
         grouped: Boolean = false,
+        // Defaulted on (manual order enabled), matching `Overview`'s own
+        // absent-key default, so every test above this step's own leaves the
+        // reorder gate exercising the same path it always has.
+        manualOrder: Boolean = true,
         loading: Boolean = false,
         loaded: Boolean = true,
         error: String? = null,
@@ -138,6 +142,7 @@ class HabitListTest {
                 rows = rows,
                 categories = categories,
                 grouped = grouped,
+                manualOrder = manualOrder,
                 loading = loading,
                 loaded = loaded,
                 error = error,
@@ -288,6 +293,41 @@ class HabitListTest {
 
         compose.onNodeWithContentDescription("More").performClick()
         compose.onNodeWithText("Reorder habits").assertIsEnabled()
+    }
+
+    /**
+     * The `habitSort` gate: under a non-manual sort, `habits` (what this
+     * hand-off sends whole) is already in the SORTED order, so
+     * `ReorderScreen` writing every id's on-screen index back as its
+     * `position` would rewrite it into that order permanently. Disabling the
+     * menu item is what stops a tap from reaching `onReorder` at all — a test
+     * asserting only `Overview.manualOrderEnabled` would not see this: the
+     * hazard is one line below that pure answer, at the call site that wires
+     * it into the menu.
+     */
+    @Test
+    fun `Reorder habits is disabled under a non-manual sort, and the hand-off never fires`() {
+        val all = listOf(water, reading, cycling)
+        show(habits = all, rows = all, manualOrder = false)
+
+        compose.onNodeWithContentDescription("More").performClick()
+        compose.onNodeWithText("Reorder habits").assertIsNotEnabled()
+        compose.onNodeWithText("Reorder habits").performClick()
+
+        assertEquals(null, reordered)
+    }
+
+    /** The other direction: manual order restored, more than one habit, the hand-off fires. */
+    @Test
+    fun `Reorder habits is enabled and hands off under manual order`() {
+        val all = listOf(water, reading, cycling)
+        show(habits = all, rows = all, manualOrder = true)
+
+        compose.onNodeWithContentDescription("More").performClick()
+        compose.onNodeWithText("Reorder habits").assertIsEnabled()
+        compose.onNodeWithText("Reorder habits").performClick()
+
+        assertEquals(all, reordered)
     }
 
     /**

@@ -88,6 +88,15 @@ const todayIn = (zone) => new Intl.DateTimeFormat('en-CA', {
   timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
 }).format(new Date());
 
+// issue #200 review: `habitSort` must be on EVERY return path, including the
+// one with no habits at all — an ABSENT key is what a client reads as "an old
+// server with no sort feature, so the list is already in position order", and
+// that reasoning collapses the moment a CURRENT server can omit the key on any
+// path. Asked before the first habit exists, deliberately.
+const emptyOverview = await overview({ days: 7 });
+ck("with no habits at all, /overview still carries habitSort: 'manual'",
+  emptyOverview.habitSort === 'manual', JSON.stringify(emptyOverview.habitSort));
+
 const habit = await post('/habits', { name: 'Anchor', type: 'boolean' });
 
 // A run of completions ending today, and nothing at all in the month before
@@ -187,6 +196,9 @@ const archivedOverview = await overview({ days: 7, archived: 'true' });
 ck('?archived=true carries no categorySummaries',
   !('categorySummaries' in archivedOverview),
   JSON.stringify(Object.keys(archivedOverview)));
+ck('...but ?archived=true still carries habitSort',
+  'habitSort' in archivedOverview && archivedOverview.habitSort === 'manual',
+  JSON.stringify(archivedOverview.habitSort));
 
 /* ---- issue #223: /overview's bestStreak reads the same credit rule ----
  *
@@ -370,6 +382,223 @@ ck('...and all three figures agree with the habit\'s own page',
   && phantomRow.score === phantomStats.score,
   `overview ${phantomRow.score}/${phantomRow.currentStreak}/${phantomRow.bestStreak} vs `
   + `stats ${phantomStats.score}/${phantomStats.currentStreak}/${phantomStats.bestStreak}`);
+
+/* ---- issue #200: /overview orders the habit list by the stored `habitSort` ----
+ *
+ * Created in an order that is deliberately NOT name order and NOT score
+ * order: Charlie first (created, so first in POSITION order) and scores
+ * HIGHEST; Alpha second and scores LOWEST (no entries at all); Bravo third
+ * and scores in between. So manual (`Charlie, Alpha, Bravo`), name
+ * (`Alpha, Bravo, Charlie`) and strength/streak (`Charlie, Bravo, Alpha`) are
+ * three genuinely different orders, and no assertion below can pass by
+ * coincidence between two of them.
+ */
+const sortCharlie = await post('/habits', { name: 'Charlie', type: 'boolean' });
+const sortAlpha = await post('/habits', { name: 'Alpha', type: 'boolean' });
+const sortBravo = await post('/habits', { name: 'Bravo', type: 'boolean' });
+const SORT_IDS = new Set([sortCharlie.id, sortAlpha.id, sortBravo.id]);
+const sortOrderOf = (data) =>
+  data.habits.filter((h) => SORT_IDS.has(h.id)).map((h) => h.name);
+
+// Charlie: a strong, unbroken 20-day run. Bravo: a shorter 5-day one. Alpha:
+// nothing, so its score and current streak are both 0.
+for (let i = 19; i >= 0; i--) await put(`/habits/${sortCharlie.id}/entries/${daysAgo(i)}`, { value: 2 });
+for (let i = 4; i >= 0; i--) await put(`/habits/${sortBravo.id}/entries/${daysAgo(i)}`, { value: 2 });
+
+// A tie, deliberately: two habits in one category with IDENTICAL entries, so
+// their `score` is the exact same number. `summariseByCategory`'s `best`/
+// `worst` (`extremeMember`) keeps whichever member it meets FIRST on a tie —
+// so this is what makes the "categorySummaries must not move" check below
+// able to fail at all: a caller that fed it the SORTED array rather than the
+// unsorted one would hand it these two members in a different order under
+// `name` than under `manual`, and the tie would resolve to a different
+// habit. Named so their creation (position) order and their name order
+// disagree: TieZzz is created first and sorts LAST by name.
+const tieCategory = await post('/categories', { name: 'TieCat', color: '#a3a3a3' });
+const tieZzz = await post('/habits',
+  { name: 'TieZzz', type: 'boolean', category_id: tieCategory.id });
+const tieAaa = await post('/habits',
+  { name: 'TieAaa', type: 'boolean', category_id: tieCategory.id });
+for (let i = 4; i >= 0; i--) {
+  await put(`/habits/${tieZzz.id}/entries/${daysAgo(i)}`, { value: 2 });
+  await put(`/habits/${tieAaa.id}/entries/${daysAgo(i)}`, { value: 2 });
+}
+
+// No habitSort stored at all — not one storing 'manual' — is the case this
+// asserts: the account's row for the setting does not exist yet.
+const sortManual = await overview({ days: 7 });
+ck('with no habitSort stored, /overview returns manual (position, id) order',
+  JSON.stringify(sortOrderOf(sortManual)) === JSON.stringify(['Charlie', 'Alpha', 'Bravo']),
+  JSON.stringify(sortOrderOf(sortManual)));
+ck('...and the tied pair reads TieZzz first, in POSITION order',
+  sortManual.categorySummaries.find((s) => s.id === tieCategory.id)?.best?.name === 'TieZzz',
+  JSON.stringify(sortManual.categorySummaries.find((s) => s.id === tieCategory.id)));
+
+await put('/settings', { habitSort: 'name' });
+const sortByName = await overview({ days: 7 });
+ck("habitSort: 'name' sorts A-Z, case-insensitively",
+  JSON.stringify(sortOrderOf(sortByName)) === JSON.stringify(['Alpha', 'Bravo', 'Charlie']),
+  JSON.stringify(sortOrderOf(sortByName)));
+ck("...and the payload's own habitSort says 'name', in the SAME response that carries the order",
+  sortByName.habitSort === 'name', JSON.stringify(sortByName.habitSort));
+
+await put('/settings', { habitSort: 'strength' });
+const sortByStrength = await overview({ days: 7 });
+const strengthScores = sortByStrength.habits
+  .filter((h) => SORT_IDS.has(h.id)).map((h) => h.score);
+ck("habitSort: 'strength' sorts strongest first",
+  JSON.stringify(sortOrderOf(sortByStrength)) === JSON.stringify(['Charlie', 'Bravo', 'Alpha']),
+  JSON.stringify(sortOrderOf(sortByStrength)));
+ck('...and the scores sorted by are genuinely different, or this proves nothing',
+  new Set(strengthScores).size === 3, JSON.stringify(strengthScores));
+
+await put('/settings', { habitSort: 'streak' });
+const sortByStreak = await overview({ days: 7 });
+ck("habitSort: 'streak' sorts the longest current streak first",
+  JSON.stringify(sortOrderOf(sortByStreak)) === JSON.stringify(['Charlie', 'Bravo', 'Alpha']),
+  JSON.stringify(sortOrderOf(sortByStreak)));
+
+/* 'recently missed' needs its own fixture: a habit with NO entries at all is
+ * not "never missed" under `computeMissRuns` — its window is a single day
+ * (today), unanswered, which reads as missed TODAY. "Never missed" here means
+ * a continuous, gap-free run instead. */
+const rmNever = await post('/habits', { name: 'NeverMissed', type: 'boolean' });
+const rmWeekAgo = await post('/habits', { name: 'MissedWeekAgo', type: 'boolean' });
+const rmYesterday = await post('/habits', { name: 'MissedYesterday', type: 'boolean' });
+for (let i = 9; i >= 0; i--) await put(`/habits/${rmNever.id}/entries/${daysAgo(i)}`, { value: 2 });
+for (let i = 9; i >= 0; i--) {
+  await put(`/habits/${rmWeekAgo.id}/entries/${daysAgo(i)}`, { value: i === 7 ? 0 : 2 });
+}
+for (let i = 9; i >= 0; i--) {
+  await put(`/habits/${rmYesterday.id}/entries/${daysAgo(i)}`, { value: i === 1 ? 0 : 2 });
+}
+const RM_IDS = new Set([rmNever.id, rmWeekAgo.id, rmYesterday.id]);
+
+await put('/settings', { habitSort: 'recently missed' });
+const sortByRecentMiss = await overview({ days: 7 });
+const recentMissOrder = sortByRecentMiss.habits
+  .filter((h) => RM_IDS.has(h.id)).map((h) => h.name);
+ck("habitSort: 'recently missed' sorts the most recent miss first, never-missed last",
+  JSON.stringify(recentMissOrder)
+    === JSON.stringify(['MissedYesterday', 'MissedWeekAgo', 'NeverMissed']),
+  JSON.stringify(recentMissOrder));
+
+// An unrecognised value is rejected outright, and the stored setting is left
+// exactly as it was — back to 'manual' here, deliberately, rather than
+// whatever the last of the sorts above happened to leave it as, so "still
+// returns manual order" is asserting the REJECTION and not merely echoing
+// 'recently missed' order by coincidence.
+await put('/settings', { habitSort: 'manual' });
+const rejectedSort = await put('/settings', { habitSort: 'nope' });
+ck("PUT /settings {habitSort: 'nope'} is rejected",
+  Array.isArray(rejectedSort.ignored) && rejectedSort.ignored.includes('habitSort'),
+  JSON.stringify(rejectedSort));
+const afterRejectedSort = await overview({ days: 7 });
+ck('...and /overview still returns manual order',
+  JSON.stringify(sortOrderOf(afterRejectedSort)) === JSON.stringify(['Charlie', 'Alpha', 'Bravo']),
+  JSON.stringify(sortOrderOf(afterRejectedSort)));
+
+// issue #200 review: `habitSort` on the payload must be the RESOLVED value,
+// never the raw stored string. `PUT /settings` already refuses 'nope' at
+// write time (above), which only pins the WRITE-time validator — it says
+// nothing about a row already holding a bad value (a hand-edited database, or
+// one written by an older server). So this bypasses the API and writes the
+// raw string directly, the same way a stale or hand-edited row would arrive.
+db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES ('habitSort', ?)`)
+  .run(JSON.stringify('nope'));
+const withRawBadSort = await overview({ days: 7 });
+ck("a raw stored habitSort of 'nope' is resolved to 'manual' on the payload, never echoed raw",
+  withRawBadSort.habitSort === 'manual', JSON.stringify(withRawBadSort.habitSort));
+ck('...and the list is in manual (position, id) order to match',
+  JSON.stringify(sortOrderOf(withRawBadSort)) === JSON.stringify(['Charlie', 'Alpha', 'Bravo']),
+  JSON.stringify(sortOrderOf(withRawBadSort)));
+await put('/settings', { habitSort: 'manual' });
+
+// A sort reorders the list; it must change nothing else on any row.
+const charlieManual = sortManual.habits.find((h) => h.id === sortCharlie.id);
+const charlieByName = sortByName.habits.find((h) => h.id === sortCharlie.id);
+ck('a sort moves the row and changes none of the figures on it',
+  charlieManual.score === charlieByName.score
+  && charlieManual.currentStreak === charlieByName.currentStreak
+  && charlieManual.bestStreak === charlieByName.bestStreak
+  && charlieManual.totalCompleted === charlieByName.totalCompleted,
+  `manual ${charlieManual.score}/${charlieManual.currentStreak}/${charlieManual.bestStreak}/`
+  + `${charlieManual.totalCompleted} vs name ${charlieByName.score}/${charlieByName.currentStreak}/`
+  + `${charlieByName.bestStreak}/${charlieByName.totalCompleted}`);
+
+// categorySummaries is the aggregate the unsorted-payloads rule protects —
+// built from `habitPayloads` before the display sort is ever applied — and it
+// must not move with the list beneath it, tie included.
+ck('categorySummaries is byte-identical under manual and under name',
+  JSON.stringify(sortManual.categorySummaries) === JSON.stringify(sortByName.categorySummaries),
+  `${JSON.stringify(sortManual.categorySummaries)} vs ${JSON.stringify(sortByName.categorySummaries)}`);
+
+await put('/settings', { habitSort: 'manual' });
+
+/* ---------- POST /habits/reorder is gated on the SERVER ----------
+ *
+ * issue #200 review, HIGH: the drag handle is gated in `paint()` and Android
+ * hides its own affordance, but a client gate is advisory. The APK ships
+ * separately from the server, so an OLD build against a NEW one is the
+ * ordinary state after a release — and that build has never heard of
+ * `habitSort`, so it offers the drag, sends the permutation, and rewrites
+ * every `position` the account has. Silently: the sorted list it is looking at
+ * does not read `position`, so nothing appears to happen.
+ *
+ * The status is read here, which `post` above cannot do (it returns parsed
+ * JSON and throws the response away), and the STORED ORDER is asserted
+ * afterwards rather than only the status — a 409 that had already written the
+ * positions would pass a status-only check, which is the whole defect.
+ */
+const rawReorder = (order) => fetch(`${base}/api/habits/reorder`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ order }),
+});
+
+/** The manual order, read by switching the sort off rather than by trusting it. */
+const manualOrderNow = async () => {
+  await put('/settings', { habitSort: 'manual' });
+  return sortOrderOf(await overview({ days: 7 }));
+};
+
+const orderBefore = await manualOrderNow();
+ck('the fixture starts in a known manual order, so a rewrite of it is visible',
+  JSON.stringify(orderBefore) === JSON.stringify(['Charlie', 'Alpha', 'Bravo']),
+  JSON.stringify(orderBefore));
+
+// The permutation is a REAL one — the exact reverse — so a guard that let it
+// through would be caught by the order assertion below rather than by luck.
+const reversal = [sortBravo.id, sortAlpha.id, sortCharlie.id];
+
+for (const sort of ['name', 'strength', 'streak', 'recently missed']) {
+  await put('/settings', { habitSort: sort });
+  const refused = await rawReorder(reversal);
+  const body = await refused.json();
+  ck(`POST /habits/reorder is 409 while habitSort is '${sort}'`,
+    refused.status === 409, `got ${refused.status} ${JSON.stringify(body)}`);
+  ck(`...and the refusal names the sort in force, not a generic message`,
+    typeof body.error === 'string' && body.error.includes(sort),
+    JSON.stringify(body.error));
+  const after = await manualOrderNow();
+  ck(`...and NOTHING was written: the manual order is untouched under '${sort}'`,
+    JSON.stringify(after) === JSON.stringify(orderBefore),
+    `${JSON.stringify(after)} vs ${JSON.stringify(orderBefore)}`);
+}
+
+// The other half, or the gate could simply refuse everything and pass above.
+await put('/settings', { habitSort: 'manual' });
+const allowed = await rawReorder(reversal);
+ck('POST /habits/reorder still succeeds under manual', allowed.status === 200,
+  `got ${allowed.status}`);
+const reordered = await manualOrderNow();
+ck('...and the permutation actually took effect',
+  JSON.stringify(reordered) === JSON.stringify(['Bravo', 'Alpha', 'Charlie']),
+  JSON.stringify(reordered));
+
+// Put it back, so anything appended after this block starts where it expects.
+await rawReorder([sortCharlie.id, sortAlpha.id, sortBravo.id]);
+await put('/settings', { habitSort: 'manual' });
 
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }

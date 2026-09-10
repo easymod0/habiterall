@@ -44,6 +44,7 @@ import {
   STREAK_HISTORY_DAYS, recomputeBestStreak, stripSummaryCache, summaryCacheHit,
 } from '@habiterall/shared/summary-cache.js';
 import { computeAwards } from '@habiterall/shared/awards.js';
+import { resolveHabitSort, needsLastMiss, sortHabitPayloads } from '@habiterall/shared/habit-order.js';
 
 export const api = express.Router();
 
@@ -374,6 +375,55 @@ api.delete('/habits/:id', route(async (req, res) => {
 }));
 
 api.post('/habits/reorder', route(async (req, res) => {
+  // The account's own order has to be MANUAL for a permutation of it to mean
+  // anything, and that has to be asked HERE rather than left to the clients.
+  // `paint()` gates the drag handle on the sort (`shared/public/ui/dashboard.js`)
+  // and Android hides its own reorder affordance, but a client gate is only ever
+  // advisory: the APK ships separately from the server, so an OLD build against
+  // a NEW one is the ordinary state after a release rather than a contrived
+  // case, and that build has never heard of `habitSort`. It would offer the
+  // drag, send the permutation, and rewrite every `position` the account has —
+  // silently, because the sorted list it is looking at does not read `position`
+  // and so shows nothing at all happening.
+  //
+  // 409 rather than 400: the body is well-formed and the ids are real, and what
+  // is wrong is the account's state at the moment it arrived. It is also the
+  // answer the outbox wants — `shared/public/offline.js` drops every 4xx but
+  // 401 and 403 as permanently inapplicable, which is exactly right for a
+  // reorder issued against a list that is not manually ordered. Replaying it
+  // later cannot make it apply.
+  //
+  // **Read in its own `withUser` BEFORE `withUserWrite`, and that placement is
+  // a lock-order decision rather than a style one.** Every mutating path in
+  // this edition reaches `habits` before `users` — `withUserWrite` pre-clears
+  // the summary stamp for exactly that reason, `ORDER BY id` in an explicit
+  // `LockRows` pass — and `PUT /settings` going `users -> habits` alone once
+  // deadlocked five pairs of ordinary routes into 500s on somebody's tap, which
+  // nothing in either edition handles. A `SELECT` of `users.settings` inside
+  // `fn` would take no ROW lock and so could not close a cycle by itself, but
+  // it would put a `users` statement in the middle of a `habits` write on the
+  // one route whose whole job is to rewrite `habits` rows, and the next reader
+  // would have to re-derive that argument to know it was safe. Asking before
+  // the write transaction opens means the question does not arise: the read
+  // commits first, and a refusal opens no write transaction at all.
+  //
+  // The cost is one extra checkout on a route a human reaches by dragging a row,
+  // not on a dashboard load — and the refusal path is now the cheaper of the
+  // two. What it buys instead of a consistent snapshot is a window: the setting
+  // can change between the read and the write, so a reorder can be accepted as
+  // the account switches to a sort, or refused as it switches back. Both are
+  // self-correcting on the client's next `/overview`, and neither writes an
+  // order anybody is looking at — which is why this is stated rather than
+  // closed with a `FOR SHARE` that would put a `users` row lock ahead of
+  // `habits` and reintroduce precisely the inversion above.
+  const sort = resolveHabitSort(await withUser(uid(req), (db) =>
+    db.query(`SELECT settings ->> 'habitSort' AS habit_sort FROM users WHERE id = $1`, [uid(req)])
+      .then((r) => r.rows[0]?.habit_sort)
+  ));
+  if (sort !== 'manual') {
+    throw httpError(409, `habits are ordered by ${sort}; set habitSort to manual to reorder`);
+  }
+
   const order = req.body.order;
   if (!Array.isArray(order) || order.some((n) => !Number.isInteger(Number(n)))) {
     throw httpError(400, 'order must be an array of habit ids');
@@ -1085,6 +1135,16 @@ api.get('/overview', route(async (req, res) => {
   // window; `summaryEnd` IS, even though it equals `end` on an unpaged
   // dashboard, because paging back separates them.
   //
+  // `habitSort` is a new input, read out of `users.settings` inside
+  // `buildOverview` itself — it is NOT spelled into `windowKey` below. That is
+  // deliberate rather than an omission: `PUT /settings` is a write through
+  // `withUserWrite`, which bumps `data_version` in the same transaction as the
+  // setting change, so every memo entry built under the OLD sort is keyed at a
+  // version no reader will ever ask for again. This sentence is load-bearing —
+  // without that bump, changing the sort would go on serving the memoised old
+  // order, and the dashboard would look simply broken. `test:dataversion` is
+  // what guards it.
+  //
   // The account's `data_version` goes in FRONT of all of it (#192), and it is
   // second rather than first: `<account id>:` has to stay the whole of what
   // `forgetAccount` and `capAccount` match on — that prefix is
@@ -1220,25 +1280,46 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
   const { rows: categories } = await db.query(
     `SELECT * FROM categories ORDER BY position, id`
   );
+
+  // One answer for the account, read once for the whole payload — the map
+  // below runs per habit and this is not a per-habit question. `habitSort`
+  // rides on the same query rather than a second one — see the KDoc on
+  // `windowKey` above for why it is not in the memo key, and
+  // shared/src/habit-order.js for why it is read from the stored setting
+  // rather than a `?sort=` parameter at all.
+  //
+  // Read even with no habits below, and BEFORE the empty-habit return —
+  // `habitSort` is the RESOLVED sort every return path must carry (issue
+  // #200 review): an absent key on the wire has to mean "a server with no
+  // sort feature at all", which is only true if no current server, on any
+  // path, ever omits it.
+  const { rows: [prefs] } = await db.query(
+    `SELECT settings ->> 'atMostUnlogged' AS unlogged,
+            settings ->> 'habitSort'      AS habit_sort
+       FROM users WHERE id = $1`,
+    [user]
+  );
+  const unlogged = unloggedFrom(prefs);
+  const habitSort = resolveHabitSort(prefs?.habit_sort);
+
   if (!habits.length) {
     // Same key shape as the full path below: `categorySummaries` is absent
     // only in archived mode, never merely because there is nothing to
-    // summarise yet — an empty category still draws its header.
+    // summarise yet — an empty category still draws its header. `habitSort`
+    // is present here too, for the same reason as the full path — see above.
     return {
-      start, end, categories, habits: [],
+      start, end, categories, habits: [], habitSort,
       ...(archived ? {} : { categorySummaries: summariseByCategory(categories, [], new Map(), summaryEnd) }),
     };
   }
 
   const ids = habits.map((h) => h.id);
 
-  // One answer for the account, read once for the whole payload — the map
-  // below runs per habit and this is not a per-habit question.
-  const { rows: [prefs] } = await db.query(
-    `SELECT settings ->> 'atMostUnlogged' AS unlogged FROM users WHERE id = $1`,
-    [user]
-  );
-  const unlogged = unloggedFrom(prefs);
+  // `manual`, almost every request, needs no extra pass at all — see
+  // `needsLastMiss`.
+  const wantsLastMiss = needsLastMiss(habitSort);
+  /** @type {Map<number, string|null>} */
+  const lastMissById = new Map();
 
   // The grouped lifetime read `/categories/stats` also runs (same shape, line
   // 453 there), reused here for two things the bounded windows below cannot
@@ -1424,7 +1505,14 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
     // shared, so the three figures cannot disagree by construction.
     const creditFrom = creditAnchor(firstAnswer.get(h.id) ?? null, summaryEnd);
 
-    const stats = summaryStats(h, recent, { end: summaryEnd, unlogged, creditFrom });
+    const stats = summaryStats(h, recent, {
+      end: summaryEnd, unlogged, creditFrom, lastMiss: wantsLastMiss,
+    });
+    // Collected while each row is built rather than in a second pass over
+    // `habitPayloads`: `stats.lastMiss` is absent unless `wantsLastMiss` asked
+    // for it (see `summaryStats`), and `?? null` is what keeps an absent key
+    // from becoming `undefined` in the map `sortHabitPayloads` reads below.
+    if (wantsLastMiss) lastMissById.set(h.id, stats.lastMiss ?? null);
 
     // The cached pair, or the derivation it was cached from — off the same
     // `fresh` the slice above was chosen by, so a habit cannot be served a
@@ -1477,12 +1565,35 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
   // on the row beneath each header — never a second scoring pass. See
   // `summariseByCategory` (`@habiterall/shared/stats.js`) for the partition
   // rule.
+  //
+  // `categorySummaries` is built from `habitPayloads` in its UNSORTED,
+  // `position, id` order, and the display sort is applied only to the
+  // `habits` array returned below — never fed back into this call. That
+  // ordering is what `sortHabitPayloads` returning a new array (rather than
+  // sorting in place) exists to make safe: the mean and member counts must
+  // not move depending on what the account's `habitSort` happens to be.
+  //
+  // The sort also comes AFTER `writeBackSummaries` above, and that ordering
+  // is safe rather than merely convenient: `writeBackSummaries`' `candidates`
+  // CTE takes its row locks `ORDER BY id`, precisely so that the order this
+  // function hands rows over in cannot influence its lock order (see the KDoc
+  // above `writeBackSummaries`). Reordering the payload here adds no
+  // statement to that write and touches no lock.
+  const categorySummaries = archived
+    ? undefined
+    : summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd);
+
   return {
     start,
     end,
     categories,
-    habits: habitPayloads,
-    ...(archived ? {} : { categorySummaries: summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd) }),
+    // The RESOLVED sort that actually ordered `habits` below, not the raw
+    // stored string — echoed so both clients can gate reordering on the same
+    // response the order itself came from, rather than a separately fetched
+    // setting that can disagree with it (issue #200 review).
+    habitSort,
+    habits: sortHabitPayloads(habitPayloads, habitSort, lastMissById),
+    ...(categorySummaries ? { categorySummaries } : {}),
   };
 }
 

@@ -252,6 +252,33 @@ export const SETTINGS = {
     // than the flat list it would replace.
     default: false,
   },
+  habitSort: {
+    section: 'Dashboard',
+    label: 'Habit order',
+    // The `manual` label says dragging is what it enables, because turning a
+    // sort ON switches dragging off (see `reorderable` in ui/dashboard.js) —
+    // and a user who has just lost the drag handle needs to be told which
+    // setting gets it back.
+    help: 'Manual order can be dragged into place; any other choice draws the ' +
+      'list in that order instead and turns dragging off, since a drop would ' +
+      'otherwise rewrite every habit\'s stored position into the sort\'s order.',
+    type: 'select',
+    // `manual` — the incoming `position, id` order, unchanged — because an
+    // untouched account must go on being draggable exactly as it always was.
+    // Values and spelling are byte-identical to `SETTING_VALUES.habitSort`
+    // (shared/src/validate.js) and to `HABIT_SORTS` (shared/src/habit-order.js):
+    // `test/settings.test.js` fails on drift, and so does Android's
+    // `AppSettingsDefaultsTest`. Note `recently missed` has a SPACE — it is
+    // not `recentlyMissed`.
+    default: 'manual',
+    options: [
+      { value: 'manual', label: 'Manual — drag to reorder' },
+      { value: 'name', label: 'Name (A-Z)' },
+      { value: 'strength', label: 'Strength — strongest first' },
+      { value: 'streak', label: 'Current streak — longest first' },
+      { value: 'recently missed', label: 'Recently missed — most recent first' },
+    ],
+  },
   gridDays: {
     section: 'Dashboard',
     label: 'Day columns',

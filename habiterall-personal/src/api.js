@@ -17,6 +17,7 @@ import { computeAwards } from '@habiterall/shared/awards.js';
 import {
   STREAK_HISTORY_DAYS, stripSummaryCache, summaryCacheHit, recomputeBestStreak,
 } from '@habiterall/shared/summary-cache.js';
+import { resolveHabitSort, needsLastMiss, sortHabitPayloads } from '@habiterall/shared/habit-order.js';
 
 /** Lookback used for the dashboard's score/current-streak summary. */
 const SUMMARY_WINDOW_DAYS = 400;
@@ -388,6 +389,28 @@ api.delete('/habits/:id', (req, res) => {
 const MAX_REORDER_IDS = 1000;
 
 api.post('/habits/reorder', (req, res) => {
+  // The account's own order has to be MANUAL for a permutation of it to mean
+  // anything, and that has to be asked HERE rather than left to the clients.
+  // `paint()` gates the drag handle on the sort (`shared/public/ui/dashboard.js`)
+  // and Android hides its own reorder affordance, but a client gate is only ever
+  // advisory: the APK ships separately from the server, so an OLD build against
+  // a NEW one is the ordinary state after a release rather than a contrived
+  // case, and that build has never heard of `habitSort`. It would offer the
+  // drag, send the permutation, and rewrite every `position` the account
+  // has — silently, because the sorted list it is looking at does not read
+  // `position` and so shows nothing at all happening.
+  //
+  // 409 rather than 400: the body is well-formed and the ids are real, and what
+  // is wrong is the account's state at the moment it arrived. It is also the
+  // answer the outbox wants — `shared/public/offline.js` drops every 4xx but
+  // 401 and 403 as permanently inapplicable, which is exactly right for a
+  // reorder issued against a list that is not manually ordered. Replaying it
+  // later cannot make it apply.
+  const sort = storedHabitSort();
+  if (sort !== 'manual') {
+    throw httpError(409, `habits are ordered by ${sort}; set habitSort to manual to reorder`);
+  }
+
   const order = req.body.order;
   if (!Array.isArray(order)) throw httpError(400, 'order must be an array of habit ids');
   if (order.length > MAX_REORDER_IDS) {
@@ -783,6 +806,18 @@ api.get('/overview', (req, res) => {
   // dashboard's hot path.
   const unlogged = storedUnlogged();
 
+  // Read from the STORED setting rather than a query parameter, so the two
+  // editions and every client of the same account agree BY CONSTRUCTION about
+  // the list's order — see shared/src/habit-order.js and the brief for issue
+  // #200. `needsLastMiss` decides whether the extra `computeMissRuns` pass
+  // below runs at all: every sort but `'recently missed'` is almost every
+  // request, since `manual` is the default, so this costs nothing on the
+  // dashboard's hot path.
+  const habitSort = storedHabitSort();
+  const wantsLastMiss = needsLastMiss(habitSort);
+  /** @type {Map<number, string|null>} */
+  const lastMissById = new Map();
+
   // The grouped lifetime read `/categories/stats` also runs
   // (`q.firstEntryPerHabit`), reused here for two things the bounded windows
   // below cannot answer. `first_date` lets a section header tell "never logged"
@@ -884,7 +919,14 @@ api.get('/overview', (req, res) => {
     // so the three figures cannot disagree by construction.
     const creditFrom = creditAnchor(firstAnswer.get(h.id) ?? null, summaryEnd);
 
-    const stats = summaryStats(h, windowed, { end: summaryEnd, unlogged, creditFrom });
+    const stats = summaryStats(h, windowed, {
+      end: summaryEnd, unlogged, creditFrom, lastMiss: wantsLastMiss,
+    });
+    // Collected as each row is built rather than in a second pass over
+    // `habitPayloads`: `stats.lastMiss` is absent unless `wantsLastMiss` asked
+    // for it (see `summaryStats`), and `?? null` is what keeps an absent key
+    // from becoming `undefined` in the map `sortHabitPayloads` reads below.
+    if (wantsLastMiss) lastMissById.set(h.id, stats.lastMiss ?? null);
 
     // The cached pair, or the derivation it was cached from — off the same
     // `fresh` the slice above was chosen by, so a habit cannot be served a
@@ -978,11 +1020,21 @@ api.get('/overview', (req, res) => {
     ? undefined
     : summariseByCategory(categories, habitPayloads, firstEntry, summaryEnd);
 
+  // Display order only, applied AFTER `categorySummaries` is built from the
+  // unsorted `habitPayloads` above — the mean and the member counts must not
+  // depend on which order the rows happen to be handed back in, which is
+  // exactly the property `sortHabitPayloads` guarantees by returning a new
+  // array rather than sorting in place. See shared/src/habit-order.js.
   res.json({
     start,
     end,
     categories,
-    habits: habitPayloads,
+    // The RESOLVED sort that actually ordered `habits` below, not the raw
+    // stored string — echoed so both clients can gate reordering on the same
+    // response the order itself came from, rather than a separately fetched
+    // setting that can disagree with it (issue #200 review).
+    habitSort,
+    habits: sortHabitPayloads(habitPayloads, habitSort, lastMissById),
     ...(categorySummaries ? { categorySummaries } : {}),
   });
 });
@@ -1012,6 +1064,18 @@ function storedWeekStart() {
  */
 function storedUnlogged() {
   return storedSetting('atMostUnlogged') === 'success' ? 'success' : UNLOGGED_DEFAULT;
+}
+
+/**
+ * How `/overview` orders the habit list. Read here and handed to
+ * `resolveHabitSort` rather than trusted raw, for the same reason
+ * `storedWeekStart` and `storedUnlogged` normalise their own: a stored value
+ * can outlive the code that wrote it — an older client, or a hand-edited
+ * settings row — and `resolveHabitSort` is the one place, shared with cloud,
+ * that decides what an unrecognised word falls back to.
+ */
+function storedHabitSort() {
+  return resolveHabitSort(storedSetting('habitSort'));
 }
 
 /**

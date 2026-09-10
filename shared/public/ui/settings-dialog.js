@@ -556,7 +556,13 @@ function refreshDeliveryNotices() {
  * tomorrow.
  */
 /**
- * Settings the server's own figures are computed with.
+ * Settings the server's own figures are computed with — and, for `habitSort`,
+ * the server's own ANSWER the dashboard renders as given rather than a figure
+ * it recomputes. Same reason, same consequence: `habitSort` moves the ORDER
+ * `/overview` hands back rather than a number on a row, but the order is
+ * decided server-side for the same reason `atMostUnlogged`'s figures are (see
+ * `shared/src/habit-order.js` and the brief for issue #200), so a change here
+ * is exactly as invisible to a repaint as a moved score would be.
  *
  * Named rather than inlined because the test for "did I remember to refetch?"
  * is not one a reader can run: the dashboard shows a plausible number either
@@ -565,7 +571,7 @@ function refreshDeliveryNotices() {
  * `/overview`, or a future third reader of the same figures — belongs in this
  * list, whichever route it reaches through.
  */
-const SERVER_COMPUTED = ['atMostUnlogged'];
+const SERVER_COMPUTED = ['atMostUnlogged', 'habitSort'];
 
 async function applyDraft() {
   applying = true;

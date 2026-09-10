@@ -868,6 +868,18 @@ class MainActivity : ComponentActivity() {
         // is nothing here that has to work offline. Read from the fetch and
         // used to draw, and no more.
         var grouped by remember { mutableStateOf(false) }
+        // Read from the OVERVIEW fetch, not the settings one — see
+        // `Overview.manualOrderEnabled`'s KDoc for why: the two used to be two
+        // separate requests that could land apart (issue #200 review), and a
+        // failed settings fetch left this at a stale default while a
+        // succeeding overview still returned a sorted list. One response now
+        // answers both "what order is this in" and "is reordering meaningful
+        // right now", so nothing about sorting is a mirror here — the phone
+        // still draws whatever order `/overview` returns and gates the
+        // reorder hand-off on the same reply. Defaults to `true` (manual order
+        // enabled) before that first fetch has landed, matching
+        // `Overview.manualOrderEnabled`'s own null-means-manual answer.
+        var manualOrder by remember { mutableStateOf(true) }
         // Seeded from the mirror the notification already reads, so the grid and
         // the shade agree during the first paint — before any fetch lands, and for
         // as long as one cannot (the mirror is what works offline).
@@ -974,6 +986,11 @@ class MainActivity : ComponentActivity() {
                 val data = api.overview(days = windowDays)
                 habits = data.habits.filter { h -> !h.archived }
                 categories = data.categories
+                // From the SAME response `habits` above came from, never the
+                // settings fetch — see `Overview.manualOrderEnabled`'s KDoc
+                // for why the two must not be two requests that can land
+                // apart.
+                manualOrder = data.manualOrderEnabled
                 // Reported upward the same way `onAccount(fetched)` is above: the
                 // activity holds one copy for the whole of it, which is what the
                 // habit form's category picker reads from.
@@ -1224,6 +1241,7 @@ class MainActivity : ComponentActivity() {
             rows = shown,
             categories = categories,
             grouped = grouped,
+            manualOrder = manualOrder,
             loading = loading,
             loaded = loaded,
             error = error,

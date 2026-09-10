@@ -146,6 +146,10 @@
  * @typedef {object} SummaryStats
  * @property {number} score            latest strength, 0..1
  * @property {number} currentStreak
+ * @property {string|null} [lastMiss]  the end of the most recent miss run,
+ *   present only when `summaryStats` was called with `{lastMiss: true}` —
+ *   for the `habitSort: 'recently missed'` ordering. Absent, not `null`,
+ *   when not asked for; see the note on `coverage` above `computeStats`.
  */
 
 /**

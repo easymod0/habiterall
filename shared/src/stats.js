@@ -1789,15 +1789,30 @@ export function computeStats(habit, entries,
  * never answered from one that answered before the rows it fetched, and the two
  * readings differ by the whole width of the figure.
  *
+ * **`lastMiss` is a third, opt-IN pass, for the `'recently missed'` habit
+ * sort and nothing else.** Declined — the default — the key is ABSENT from
+ * the return, not `null`: the same precedent `coverage` sets in
+ * `computeStats` above, because `null` would be a claim that the habit has
+ * never missed, and this is the absence of a claim rather than one. Asking
+ * for it runs `computeMissRuns` over the same window and window-derived
+ * inputs (`unlogged`, `creditFrom`) every other pass here already uses — skips
+ * are transparent to it exactly as they are to `computeStreaks` — and takes
+ * the LAST run's `end` as the answer: `onPaceSeries` underneath it already
+ * honours the habit's frequency, and an OPEN run (an ongoing lapse) is
+ * included with its `end` at the last missed day, which is exactly the
+ * "most recently missed" date wanted here. `/overview` only asks for this
+ * when the account's sort needs it, so the dashboard's hot path — `manual`,
+ * which is almost everybody — pays nothing extra for it.
+ *
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
  * @param {{start?: string, end?: string, unlogged?: string,
- *          creditFrom?: string}} [opts]
+ *          creditFrom?: string, lastMiss?: boolean}} [opts]
  * @returns {import('./types.js').SummaryStats}
  */
 export function summaryStats(habit, entries,
                              { start, end, unlogged = UNLOGGED_DEFAULT,
-                               creditFrom: creditGiven } = {}) {
+                               creditFrom: creditGiven, lastMiss = false } = {}) {
   const { entryMap, from, creditFrom } = resolveWindow(entries, start, end, creditGiven);
 
   // Same one-walk, one-series sharing as `computeStats` — see the comment
@@ -1808,11 +1823,24 @@ export function summaryStats(habit, entries,
   // rather than a second time apiece inside that wrapper (#219).
   const dates = boundedRange(from, end);
   const scores = scoresOver(habit, entryMap, dates, unlogged, creditFrom);
-  const streaks = streaksFrom(onPaceSeries(habit, entryMap, dates, unlogged, creditFrom));
+  const series = onPaceSeries(habit, entryMap, dates, unlogged, creditFrom);
+  const streaks = streaksFrom(series);
+  // `missRunsFrom(series)` and NOT `computeMissRuns`, which would rebuild
+  // both the walk and the series this function has already built — the same
+  // duplicate #219 removed from `computeStats`, which the opt-in below would
+  // otherwise reintroduce on the one route that asks for it. The two folds
+  // read the identical series, so `lastMiss` costs the run-detection pass
+  // alone rather than a second walk: a sorted dashboard is cheaper here than
+  // the figure was measured at when this pass was written against the
+  // eight-walk shape.
+  const runs = lastMiss ? missRunsFrom(series) : null;
 
   return {
     score: scores.length ? scores[scores.length - 1].score : 0,
     currentStreak: currentStreak(streaks, end),
+    // Spread rather than assigned, so a caller that did not ask for this
+    // gets no key at all — see the note above on why absent and not null.
+    ...(lastMiss ? { lastMiss: runs.length ? runs[runs.length - 1].end : null } : {}),
   };
 }
 

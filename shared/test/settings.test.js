@@ -641,6 +641,19 @@ test('groupByCategory defaults to false', () => {
   assert.deepEqual(parseSettings({ groupByCategory: 'yes' }).accepted, {});
 });
 
+test('habitSort accepts its five values and rejects anything else, and is portable', () => {
+  // parseSettings: the server side of issue #200's registry entry.
+  assert.deepEqual(parseSettings({ habitSort: 'name' }).accepted, { habitSort: 'name' });
+  assert.deepEqual(parseSettings({ habitSort: 'nope' }).accepted, {});
+  assert.deepEqual(parseSettings({ habitSort: 'nope' }).rejected, ['habitSort']);
+
+  // Portable: a display preference carrying no capability, exactly like
+  // `theme` and `groupByCategory` — restoring it moves no figure, only the
+  // order the list paints in.
+  assert.ok(PORTABLE_SETTINGS.includes('habitSort'));
+  assert.deepEqual(portableSettings({ habitSort: 'strength' }), { habitSort: 'strength' });
+});
+
 test('a backup carries no notification destination, in either direction', () => {
   // A backup file is emailed, synced and attached to bug reports, and
   // `discordWebhook` is a bearer capability for a channel. Out: it would sit in
