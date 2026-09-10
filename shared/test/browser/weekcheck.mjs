@@ -37,12 +37,15 @@ globalThis.document = {
   createElement: (name) => new FakeNode(name),
 };
 
-const { frequencyChart, historyChart, streakChart, weekdayChart, weekdayMonthChart } =
-  await import(sharedPublic('charts.js'));
+const {
+  frequencyChart, historyChart, streakChart, weekdayChart, weekdayMonthChart,
+  weekdayMonthReserve,
+} = await import(sharedPublic('charts.js'));
 const { calendarWindow, weekdayIndex } = await import(sharedPublic('ui/calendar.js'));
 const { estimateTextWidth, formatMonthShort, formatStamp, formatYear, gutterFor,
   weekdayNames } =
   await import(sharedPublic('ui/dates.js'));
+const { columnsForWidth } = await import(sharedPublic('ui/window.js'));
 
 let fails = 0;
 const check = (label, cond, extra = '') => {
@@ -751,6 +754,75 @@ for (const width of [328, 358, 700, 1100]) {
       years.map((y) => `${y.text}@${y.attrs.x}`).join(' '));
   }
   }
+}
+
+/* ---------- #285: the reserve `columnsForWidth` is handed is a CORRECT one ---------- */
+//
+// This is the rendered-geometry half of #285. `weekdayMonthReserve` is a
+// number computed independently of the chart; this proves it is the number
+// the chart ITSELF spends, in every locale this sweep runs — the arithmetic
+// half (`window.test.js`) can only pin the subtraction, not that the figure
+// subtracted is this chart's own gutter.
+//
+// A local generaliser rather than widening `twelveFrom` above, which existing
+// callers rely on staying a fixed twelve months.
+const monthsFrom = (year, month, count) => {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const d = new Date(year, month + i, 15);
+    out.push({
+      month: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`,
+      // Every weekday given a nonzero total, so all seven rows draw a circle
+      // in every column — a month where a row's `total` is 0 draws nothing at
+      // all (`charts.js`: `if (!d?.total) return;`), which would silently
+      // shrink the denominator Check C depends on.
+      days: [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({
+        weekday, completed: weekday + 1, total: 6, rate: (weekday + 1) / 6,
+      })),
+    });
+  }
+  return out;
+};
+
+for (const width of [320, 328, 358, 360, 390, 700, 768, 1060, 1440]) {
+  const reserve = weekdayMonthReserve(width);
+  const n = columnsForWidth(width, 'circle', reserve);
+  const months = monthsFrom(2020, 0, n);
+  const svg = weekdayMonthChart(months, '#3b82f6', { width, weekStart: 'monday' });
+  const nodes = collect(svg);
+
+  // Check A — the pitch clears the floor. The literal 22 (`MIN_SLOT.circle`),
+  // not the imported constant: a test importing the constant it checks pins
+  // the name and nothing else (root CLAUDE.md).
+  const cxs = [...new Set(nodes.filter((nn) => nn.name === 'circle')
+    .map((nn) => Number(nn.attrs.cx)))].sort((a, b) => a - b);
+  const colW = cxs.length > 1
+    ? Math.min(...cxs.slice(1).map((x, i) => x - cxs[i]))
+    : NaN;
+  check(`#285 at ${width}px: the pitch clears MIN_SLOT.circle (22)`,
+    cxs.length > 1 && colW >= 22,
+    `colW=${Number.isFinite(colW) ? colW.toFixed(2) : colW}, reserve=${reserve}, n=${n}`);
+
+  // Check B — the reserve and the chart cannot drift. The row captions are the
+  // `text-anchor: end` texts, drawn at `x = pad.left - WM_ROW_LABEL_GAP` (8),
+  // so `pad.left === x + 8`; `reserve === pad.left + WM_PAD_RIGHT` (12). Both
+  // gap and right-pad are restated as literals here rather than imported —
+  // this is what fails if the exported function and the chart's own `pad`
+  // ever stop being one declaration.
+  const rowLabelXs = [...new Set(nodes
+    .filter((nn) => nn.name === 'text' && nn.attrs['text-anchor'] === 'end')
+    .map((nn) => Number(nn.attrs.x)))];
+  const padLeft = rowLabelXs.length === 1 ? rowLabelXs[0] + 8 : NaN;
+  check(`#285 at ${width}px: the reserve is the chart's own pad.left + 12`,
+    rowLabelXs.length === 1 && padLeft + 12 === reserve,
+    `padLeft=${padLeft} (from x=${rowLabelXs.join(',')}), reserve=${reserve}`);
+
+  // Check C — the denominator. `n` must be a real window, and every column
+  // drawn must have drawn circles, or an empty or one-column measurement
+  // would pass Check A vacuously.
+  check(`#285 at ${width}px: every one of the n=${n} columns drew circles`,
+    n >= 2 && cxs.length === n,
+    `n=${n}, distinct cx count=${cxs.length}`);
 }
 
 console.log(fails ? `\n${fails} CHECK(S) FAILED` : '\nALL WEEK CHECKS PASSED');
