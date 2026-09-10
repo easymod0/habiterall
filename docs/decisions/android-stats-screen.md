@@ -81,28 +81,61 @@ inside `WebScreen`); it is consistent with every other screen; and Compose
 can draw on a `Canvas`, unlike `RemoteViews`.
 
 **What it costs is the whole issue: a second implementation of the charts,
-drifting invisibly.** `charts.js` is over 1,400 lines exporting ten chart
-functions; `ui/detail.js` draws nine cards (`DETAIL_CARDS`: strength,
-calendar, streaks, resilience, awards, history, weekdays, weekdayMonths,
-frequency), and each would need a native equivalent or a written-down
-omission. A Kotlin copy is worse than the ~1,750 lines of frontend that
-drifted across the two editions before being merged back (`CLAUDE.md`),
-because it cannot be merged back the same way: there is no shared module a
-Compose chart and an SVG chart can both live in. The two are different
-rendering technologies on the same data, not two copies of the same file.
+drifting invisibly.** `charts.js` exports nine chart-drawing functions;
+`ui/detail.js` draws ten cards, confirmed against the current tree —
+`DETAIL_CARDS` (`shared/src/validate.js`) is `recentDays`, `strength`,
+`calendar`, `streaks`, `resilience`, `awards`, `history`, `weekdays`,
+`weekdayMonths`, `frequency` — and each would need a native equivalent or a
+written-down omission. This count has grown since #171 was filed (nine cards
+then, ten now: `recentDays` shipped after), which is itself evidence for the
+issue's own point — the card list does not hold still, and a second
+implementation has to keep matching it. `recentDays` is not an SVG chart at
+all; it is the dashboard's tappable day strip for one habit (`ui/day-strip.js`,
+`shared/public/CLAUDE.md`), a shared, stateful, write-capable component — the
+hardest of the ten to leave out of "a small, native-drawn summary" and the
+first place a native/WebView split has to decide whether it is drawing a
+chart or reimplementing a write path. A Kotlin copy of the rest is worse than
+the ~1,750 lines of frontend that drifted across the two editions before
+being merged back (`CLAUDE.md`), because it cannot be merged back the same
+way: there is no shared module a Compose chart and an SVG chart can both live
+in. The two are different rendering technologies on the same data, not two
+copies of the same file.
 
-## The recommendation
+And the queue that would double is not hypothetical: #160 (three stats the
+detail view cannot answer), #159 (what a typical lapse costs), #132 (chart
+label estimation), #144 (translations for all of this prose) are each one
+change today; with a native screen each becomes two, and the second is the
+one nobody remembers. `detailCards` is a further cost: a server-stored list
+carrying order as well as visibility, normalised by `parseCardList` — a
+native screen that ignores it is a settings mirror that silently disagrees
+with the account, the failure mode `settings-and-mirrors.md` is about.
 
-**A bounded summary, or nothing.** Not a full native stats screen — the cost
-above is real and does not shrink — and not simply closing the question
-either, because the WebView's genuine gaps (offline, testability,
-consistency) are real too. The affordable middle is a small, native-drawn
-summary (score, current streak, best streak — the same fields #145's widget
-already needs) that reads the cached answer from `Api.stats`, with the full
-chart set staying in `WebScreen` for whoever opens the detail view. That
-keeps `charts.js` and `ui/detail.js` as the one implementation of the nine
-cards, and spends the Compose investment only on the numbers cheap enough to
-duplicate without inheriting the chart-drift risk.
+## The shape #171 itself argued for, if this is taken at all
 
-Building `Api.stats` for #145 first, and reusing it here rather than
-inventing a second cache shape, is what makes that affordable at all.
+**A bounded native summary, with the full detail view still one tap away —
+never a full native replacement of `ui/detail.js`.** The issue's own split:
+
+- **Native:** the four stat tiles, the score chart, and the recent-history
+  strip. These are the numbers someone opens a habit to see, they survive
+  being small, and they are the ones #145's widget needs anyway.
+- **`WebScreen`:** everything else — the calendar, weekday months, frequency,
+  survival, the award grid — behind an explicit affordance.
+
+That keeps `charts.js` and `ui/detail.js` as the one implementation of the
+other eight cards, spending the Compose investment only on the three pieces
+cheap enough to duplicate, and it leans on `Api.stats` (above) for the data
+rather than a second cache shape.
+
+**This shape is not itself a settled decision — it is gated on a question
+this record does not answer.** #171 opens its own recommendation with "the
+first one gates the rest": *is the offline argument the real motivation?* If
+nobody has actually wanted stats offline, part 3 (the native screen) is cost
+without a benefit and the issue reduces to parts 1 and 2 above — the stale
+comment and the shared `Api.stats` prerequisite. #171 also leaves open
+whether a native summary replaces the tap target or sits above `WebScreen` as
+a new screen (the first changes the app's most-used path), whether
+`detailCards` gates the native tiles at all, and whether v1 draws a score
+chart on a Compose `Canvas` or ships with numbers only — "a summary with no
+score chart is much cheaper and may be enough." None of those four questions
+is this record's to resolve; they are Mark's, the same way #144's
+server-prose question is `translations.md`'s.

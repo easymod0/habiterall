@@ -23,9 +23,11 @@ two nullable columns on `habits` (`best_streak`, `total_completed`,
 `summary_asof`) rather than a new table, with `summary_asof` alone deciding
 validity and a write clearing it. `docs/decisions/caching.md` has the full
 design, the measurements, and the concurrency proof (`test:summarycache`,
-`test:summaryrace`). #198 (closed: the `dateRange` rewrite, ~8x cheaper per
-aggregation) and #183 (closed: the measurement this whole sequence started
-from) both landed too. #196 itself is closed, unbuilt, exactly as predicted.
+`test:summaryrace`). #198 (closed: the `dateRange` rewrite — 9.2x on the
+function itself, 604.6 us to 65.9 us, and 3.35x/3.30x end to end on
+`/overview`/`/stats` per habit) and #183 (closed: the measurement this whole
+sequence started from) both landed too. #196 itself is closed, unbuilt,
+exactly as predicted.
 
 ## The shape of the workload #196 was answering
 
