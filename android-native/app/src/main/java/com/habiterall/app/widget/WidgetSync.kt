@@ -79,11 +79,19 @@ object WidgetSync {
      * One request, and only when a widget exists — the overview rather than the
      * habit list because it carries the DAYS, which is the half a widget is
      * about.
+     *
+     * [Widgets.MAX_STRIP_DAYS], not `1`: this is the six-hourly heartbeat
+     * (`Reminders.ScheduleWorker`) that is the stats widget's strip's own
+     * refresh, and a one-day window silently yields a strip [Widgets.encodeHistory]
+     * can put nothing but "unknown" in — the checkmark widget's one cell never
+     * noticed because it only ever reads `today`. [refreshFrom] itself is left
+     * asking nothing of its own: the list's fetch (its other caller) already
+     * asks for a far larger window, and narrowing this call is enough.
      */
     suspend fun refreshFromServer(context: Context, api: Api) {
         val app = context.applicationContext
         if (runCatching { Settings(app).cachedWidgets() }.getOrDefault(emptyList()).isEmpty()) return
-        val data = runCatching { api.overview(days = 1) }.getOrNull() ?: return
+        val data = runCatching { api.overview(days = Widgets.MAX_STRIP_DAYS) }.getOrNull() ?: return
         refreshFrom(app, data.habits)
     }
 

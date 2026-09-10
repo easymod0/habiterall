@@ -383,6 +383,68 @@ what `Grid.nextState` reads. `Widgets.answered` ignores an answer about an OLDER
 day than the record holds — a reminder answered at 00:05 names yesterday and is
 right to, but the widget has moved on.
 
+### The stats widget
+
+**A second provider, `StatsWidget`, over the SAME record store — one habit's
+score, current streak and a seven-day strip, read-only.** Reusing
+`Widgets.Record` rather than adding a second store is the same argument this
+section already makes above: `remap`/`onRestored`, `refreshedOrGone` and the
+encode/decode fail-safes are three hard-won mechanisms, and a second record
+type would have had to re-implement all three — precisely where those bugs
+lived.
+
+**The figures are cached ANSWERS, and mirroring them is the refused option.**
+`score` and `currentStreak` come from `/api/overview`, which already returns
+both per habit, so this widget added no sixth mirror and no `Api.stats()`. What
+it does NOT do is recompute either: the decay behind `score` is Loop's
+`0.5^(sqrt(frequency)/13)`, the most intricate arithmetic in the project, and a
+second implementation would drift from the first invisibly. "Make the strip
+update between syncs" is the version of this argument that will look tempting
+to the next person; the refusal is written as a comment at the one place the
+figures are taken from the fetch (`Widgets.refreshed`), because that is the
+only thing that will stop them.
+
+**The figures are as of `record.date`, on a line a user can see.** Same rule as
+the checkmark cell's own note above, and the same precedent behind it: the
+first version of THAT put the explanation in `setContentDescription` alone
+("It has to be VISIBLE, not just described"), so a stats widget repeating that
+mistake would have been the identical bug on a second surface.
+
+**`redraw` and `armMidnight` used to be hard-coded to `HabitWidget` alone, and
+the worse of the two failure modes was not "never redrawn."** Both asked
+`getAppWidgetIds(ComponentName(app, HabitWidget::class.java))` — the checkmark
+provider by name, from before `StatsWidget` existed. Left alone, a stats
+widget would never be redrawn by any of the five triggers, and — the sharper
+bug — with ONLY a stats widget on a home screen, `armMidnight`'s `wanted` read
+false off that same hard-coded question and CANCELLED the one alarm that would
+ever redraw anything at midnight. One helper now answers "the live ids, per
+provider" for both `redraw` and `armMidnight`, so the two cannot drift apart on
+which providers count again, and one alarm still serves both — not a second
+alarm per provider.
+
+**Read-only, deliberately — a tap opens the app on that habit and the widget
+answers nothing.** Its `PendingIntent` needs `data` distinct from every other
+widget's, for the same `filterEquals` reason the alarms above are two
+PendingIntents rather than one (`habiterall://snooze/<id>` vs
+`habiterall://remind/<id>`): extras are ignored by intent equality, so without
+a distinct `habiterall://stats/<widgetId>`, two stats widgets — or a stats
+widget and a checkmark widget for the same habit — would collapse onto one
+PendingIntent.
+
+**The strip is colour-only, and the collapse that comes with that is
+accepted.** At ~20dp a cell there is no room for `Widgets.markFor`'s glyphs, so
+`UNKNOWN`, `SKIPPED` and a yes/no `NO` all tint to `widget_cell_empty` and the
+strip does not tell them apart. That is accepted, not an oversight: it is a
+seven-day trend rather than a per-day answer, and the per-day answer is one tap
+away in the app. What the strip must not lose is the avoided-habit inversion —
+a clean day in the habit's own colour, a slip in red — which comes free from
+reusing `HabitWidget.fill` rather than writing a second one.
+
+**It follows the LAUNCHER's light/dark, never the account's `theme` setting.**
+`res/values-night/colors.xml` is the only `values-night` in the app and always
+has been; this is that same behaviour on a second layout, and this paragraph is
+the recorded decision rather than the default nobody chose.
+
 ## The WebView back stack
 
 **A view is named by a fragment, never a path** (`#/habit/42`), because that

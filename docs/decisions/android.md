@@ -434,4 +434,90 @@ answered at 00:05 names yesterday, and is right to — the notification is about
 that day — but the widget has moved on, and taking it would blank today to paint
 a day that is over.
 
+## The stats widget
+
+**A second widget, and the issue proposing it had the wrong premise for what
+it would cost.** The issue said the score "lives on the server ... reached
+through `GET /api/habits/:id/stats`", and a comment on it argued
+`Api.stats(habitId)` plus a new Kotlin model was a roughly 150-line
+prerequisite this work would have to build first. Neither exists in this
+change. `/api/overview` already returns, per habit and in both editions,
+`score`, `currentStreak`, `bestStreak` and `totalCompleted`, and `Api.kt`'s
+`Habit` already deserializes all four — `ui/DayGrid.kt` was already rendering
+`currentStreak` off it. The widget's data source is the `Overview` response the
+widget-refresh path already fetched, so the "prerequisite" the issue described
+turned out to be nothing this widget needed. #171 genuinely does need
+`Api.stats()` — for the `scores` series, `history`, `weekdays`, `frequency` and
+`resilience`, none of which `/overview` carries — but that is a different
+issue's cost, not this one's.
+
+**The obvious extraction of the checkmark widget's fill colour was wrong, and a
+mutation is what caught it.** `HabitWidget.fill`'s numerical arm read
+`record.value` — the record's ONE day — to decide a cell's partial-credit
+shading. Lifted unchanged into a per-cell call for a seven-day strip, every
+numerical cell in the strip would have shaded off the SAME day's number: seven
+dates, one figure. The fix changes `fill`'s signature to take the per-day
+value explicitly instead of the whole record, with `HabitWidget.render`
+passing `record.value` for its own one cell (always about `record.date`) and
+`StatsWidget.render` passing each cell's own resolved value. The mutation that
+proves the test would have caught the naive version — putting `record.value`
+back at the `StatsWidget` call site for every cell — failed with
+
+```
+a partial day is the faint alpha variant of it
+expected:<1497072374> but was:<-1580820>
+```
+
+— the partial cell painted as an empty cell instead of its own faint tint,
+because the record's one day (`null`, for that test's third and unanswered
+date) was standing in for six other dates' worth of value.
+
+**No `Bitmap`s, and three hazard classes that decision removes.** `RemoteViews`
+cannot draw, so a history strip drawn as one image would need
+`setImageViewBitmap` — which brings the marshalled-transaction size ceiling
+`RemoteViews` enforces on a bundle, and forces a full re-render on every
+resize, every theme change and every density change, because a baked bitmap
+does not itself adapt to any of the three. The strip is a fixed row of
+`ImageView`s over an opaque `@drawable/widget_cell`, tinted per cell with
+`setColorFilter`; the score is a `TextView` plus `RemoteViews.setProgressBar`
+rather than a hand-drawn arc. None of those three hazards exist for a tint or a
+platform-drawn bar.
+
+**`WidgetSync.refreshFromServer` asked for one day, and a strip needs seven.**
+It called `api.overview(days = 1)`, correct while its only consumer was the
+checkmark widget reading `today`. `Widgets.encodeHistory` reads
+`habit.entries`/`habit.skips` over the fetched window, so a one-day fetch left
+every date but the current one absent from the encoded history — the strip
+would have populated as all-unknown on every six-hourly sync, silently, with
+nothing failing loudly enough to say why. The fix is
+`days = Widgets.MAX_STRIP_DAYS` (7); `WidgetConfigActivity`'s own fetch,
+already wider than one day, is widened to the same constant so a freshly
+placed stats widget draws a populated strip immediately rather than waiting
+for the next sync.
+
+**`redraw` and `armMidnight` were hard-coded to one provider, and the second
+failure mode was the sharper one.** Both asked
+`getAppWidgetIds(ComponentName(app, HabitWidget::class.java))` — the checkmark
+provider by name, from before `StatsWidget` existed. Left alone, a stats
+widget would never be redrawn by any of the five triggers; and with ONLY a
+stats widget on a home screen, `armMidnight`'s `wanted` read false off that
+same hard-coded question and CANCELLED the one alarm that would ever redraw
+anything at midnight — not a missed redraw but an actively cancelled alarm.
+The fix is one helper answering "the live ids, per provider" for both
+`redraw` and `armMidnight`, with `redraw` drawing each id through the renderer
+for the provider that actually holds it and `armMidnight`'s `wanted` true if
+EITHER provider has ids. One alarm still serves both; this did not become a
+second alarm per provider.
+
+**A test-only dependency: `mockwebserver`.** `StatsWidgetTest` needs to assert
+the actual query string `WidgetSync.refreshFromServer` sends, rather than trust
+the call site's `days = Widgets.MAX_STRIP_DAYS` the way a stub `Api` would, so
+`testImplementation("com.squareup.okhttp3:mockwebserver:5.5.0")` joined
+`build.gradle.kts` — pinned to the same version as the `okhttp` implementation
+dependency it embeds a client for. It is test-only, and it buys a real local
+server the request can be read back from rather than asserted by inspection of
+the call site. The JDK's own `com.sun.net.httpserver.HttpServer` would be the
+dependency-free alternative, if pulling in OkHttp's test artifact is ever
+worth avoiding.
+
 

@@ -6,6 +6,7 @@ import com.habiterall.app.data.Sentinels
 import com.habiterall.app.data.Widgets
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -32,6 +33,9 @@ class WidgetTest {
         value: Double? = null,
         skip: Boolean = false,
         unloggedIsSuccess: Boolean = false,
+        score: Double = 0.0,
+        currentStreak: Int = 0,
+        history: String = "",
     ) = Widgets.Record(
         widgetId = 7,
         habitId = habit.id,
@@ -46,6 +50,9 @@ class WidgetTest {
         value = value,
         skip = skip,
         unloggedIsSuccess = unloggedIsSuccess,
+        score = score,
+        currentStreak = currentStreak,
+        history = history,
     )
 
     private fun boolHabit() = Habit(id = 1, name = "Meditate")
@@ -335,6 +342,136 @@ class WidgetTest {
         assertTrue(Widgets.decode(Widgets.encode(kept))!!.unloggedIsSuccess)
         val notKept = record(waterHabit(), unloggedIsSuccess = false)
         assertFalse(Widgets.decode(Widgets.encode(notKept))!!.unloggedIsSuccess)
+    }
+
+    /* ---------- the stats widget's cached figures ---------- */
+
+    @Test
+    fun `a record written before the stats fields existed still reads`() {
+        // Fourteen fields is what every widget on a phone that upgrades to
+        // this build holds; the reader indexes positionally and must fall
+        // back for the three it cannot find rather than throw running off the
+        // end, or drop the record for want of fields it can supply a
+        // fail-safe default for.
+        val fourteen = Widgets.encode(record(boolHabit())).split('|').take(14).joinToString("|")
+        val back = Widgets.decode(fourteen)
+        assertNotNull(back)
+        assertEquals(0.0, back!!.score, 0.0)
+        assertEquals(0, back.currentStreak)
+        assertEquals("", back.history)
+        // And the fields that already existed still parse.
+        assertEquals(7, back.widgetId)
+        assertFalse(back.unloggedIsSuccess)
+    }
+
+    @Test
+    fun `score, currentStreak and history survive a round trip with non-default values`() {
+        // A fixture holding a field's default compares equal to itself and
+        // passes with the field dropped entirely — this repo's most-shipped
+        // test defect — so these are set away from their defaults on purpose.
+        val original = record(
+            waterHabit(),
+            score = 0.42,
+            currentStreak = 7,
+            history = "2026-08-14:1,2026-08-15:2,2026-08-16:s",
+        )
+        val back = Widgets.decode(Widgets.encode(original))!!
+        assertEquals(0.42, back.score, 0.0)
+        assertEquals(7, back.currentStreak)
+        assertEquals("2026-08-14:1,2026-08-15:2,2026-08-16:s", back.history)
+    }
+
+    @Test
+    fun `a malformed history token is skipped, not fatal`() {
+        val decoded = Widgets.decodeHistory("2026-09-10:1,rubbish,2026-09-08:s")
+        assertEquals(2, decoded.size)
+        assertEquals(1.0, decoded["2026-09-10"]!!.first!!, 0.0)
+        assertFalse(decoded["2026-09-10"]!!.second)
+        assertNull(decoded["2026-09-08"]!!.first)
+        assertTrue("a skip token carries no value", decoded["2026-09-08"]!!.second)
+    }
+
+    @Test
+    fun `a junk score or currentStreak token does not drop the record`() {
+        val good = Widgets.encode(record(boolHabit(), unloggedIsSuccess = true))
+        val junked = good.split('|').toMutableList().also { it[14] = "abc" }.joinToString("|")
+        val back = Widgets.decode(junked)
+        assertNotNull("a junk token must not drop the whole record", back)
+        assertEquals(0.0, back!!.score, 0.0)
+        // Everything else, before and after the junk field, is intact.
+        assertEquals(7, back.widgetId)
+        assertTrue(back.unloggedIsSuccess)
+    }
+
+    /* ---------- the strip's resolution ---------- */
+
+    @Test
+    fun `stripStates over a stale record is honest about today`() {
+        // A record dated yesterday, answered, with history covering the three
+        // days before that.
+        val stale = record(
+            boolHabit(),
+            date = yesterday,
+            value = Sentinels.YES,
+            history = "2026-08-12:0,2026-08-13:2,2026-08-14:s",
+        )
+        val strip = Widgets.stripStates(stale, today, columns = 5)
+        assertEquals(
+            listOf(
+                "2026-08-12" to Grid.DayState.NO,
+                "2026-08-13" to Grid.DayState.DONE,
+                "2026-08-14" to Grid.DayState.SKIPPED,
+                yesterday to Grid.DayState.DONE,
+                // Today itself is honestly unknown on a stale record — the
+                // widget has not heard about it, and painting it from
+                // yesterday's answer would be a second claim about a day
+                // nobody has touched.
+                today to Grid.DayState.UNKNOWN,
+            ),
+            strip,
+        )
+    }
+
+    @Test
+    fun `stripStates reads the record's own value for the record's own date, not history`() {
+        // `WidgetSync.noteAnswer` and the checkmark widget's own tap keep
+        // `value`/`skip` current; a stale `history` entry for the SAME date
+        // must lose, or an answer given elsewhere on the phone would not
+        // show on the strip until the next refresh.
+        val rec = record(
+            boolHabit(),
+            date = yesterday,
+            value = Sentinels.YES,
+            history = "$yesterday:0",
+        )
+        val strip = Widgets.stripStates(rec, today, columns = 2)
+        assertEquals(yesterday to Grid.DayState.DONE, strip[0])
+    }
+
+    @Test
+    fun `stripDays holds its thresholds exactly, not the constant`() {
+        assertEquals(3, Widgets.stripDays(129))
+        assertEquals(4, Widgets.stripDays(130))
+        assertEquals(4, Widgets.stripDays(169))
+        assertEquals(5, Widgets.stripDays(170))
+        assertEquals(5, Widgets.stripDays(209))
+        assertEquals(6, Widgets.stripDays(210))
+        assertEquals(6, Widgets.stripDays(249))
+        assertEquals(7, Widgets.stripDays(250))
+    }
+
+    @Test
+    fun `refreshedOrGone carries the stats figures from the habit`() {
+        val stale = record(waterHabit(), score = 0.0, currentStreak = 0)
+        val habit = waterHabit().copy(score = 0.42, currentStreak = 7)
+        val fresh = Widgets.refreshedOrGone(stale, habit, today)
+        assertEquals(0.42, fresh.score, 0.0)
+        assertEquals(7, fresh.currentStreak)
+        // `WidgetSync.refreshFrom` drops a refresh that changed nothing
+        // (`.takeIf { it != record }`); if this copy were missing, a
+        // figures-only refresh would be indistinguishable from no refresh at
+        // all, and the widget would draw zeros forever.
+        assertNotEquals(stale, fresh)
     }
 
     /* ---------- what the cell says ---------- */
