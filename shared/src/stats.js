@@ -493,6 +493,19 @@ function dayCredit(habit, entry, unlogged = UNLOGGED_DEFAULT, mayCredit = true) 
  */
 export function computeScores(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
                               creditFrom = undefined) {
+  return scoresOver(habit, entryMap, boundedRange(start, end), unlogged, creditFrom);
+}
+
+/**
+ * The private core behind `computeScores`, over an already-clamped `dates`
+ * array rather than `start, end`. Not exported and given no `dates` parameter
+ * of its own on the exported function either — #219's shape: the clamp stays
+ * reachable only through the `boundedRange` call in the wrapper above (and in
+ * `computeStats` / `summaryStats`, which share one walk across every pass), so
+ * no caller outside this file can hand a pass an unclamped range.
+ */
+function scoresOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
+                    creditFrom = undefined) {
   const num = Math.max(1, habit.freq_numerator || 1);
   const den = Math.max(1, habit.freq_denominator || 1);
 
@@ -500,8 +513,6 @@ export function computeScores(habit, entryMap, start, end, unlogged = UNLOGGED_D
   // 3/7, and a daily habit is 1.
   const frequency = num / den;
   const alpha = Math.pow(0.5, Math.sqrt(frequency) / 13);
-
-  const dates = boundedRange(start, end);
 
   // Credit per day, with skips recorded as null so they can be excluded from
   // the window rather than counted as failures.
@@ -567,19 +578,26 @@ export function computeScores(habit, entryMap, start, end, unlogged = UNLOGGED_D
  * `isCompleted` and daily habits behave precisely as they always have.
  *
  * @param {string} [creditFrom] see `answeredBy`.
+ * @param {string[]} dates already-clamped, oldest first. `onPaceSeries` is
+ *   private (#219) and takes this in place of `start, end` for exactly the
+ *   clamp reason the old comment here used to make: `dateRange` allocates one
+ *   element per day, so a single entry dated in the distant past — trivially
+ *   planted through an import — would otherwise spin for hundreds of
+ *   thousands of iterations and block the event loop for every user of the
+ *   process. The clamp itself now lives at every caller (`computeStreaks`,
+ *   `computeMissRuns`, and `computeStats`/`summaryStats` sharing one walk),
+ *   each of which builds or reuses an already-clamped range (a `boundedRange`
+ *   call over `start, end`) and hands it in; because this function is not
+ *   exported and has no `dates` parameter reachable from outside `stats.js`,
+ *   there is no second way to reach it with an unclamped range.
  * @returns {{date: string, ok: boolean|null}[]} `null` on a skipped day, which
  *   is transparent: it neither starts, extends nor breaks a run.
  */
-function onPaceSeries(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
+function onPaceSeries(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
                       creditFrom = undefined) {
   const num = Math.max(1, Number(habit.freq_numerator) || 1);
   const den = Math.max(1, Number(habit.freq_denominator) || 1);
 
-  // Clamp here rather than at each call site. dateRange allocates one element
-  // per day, so a single entry dated in the distant past — trivially planted
-  // through an import — would otherwise spin for hundreds of thousands of
-  // iterations and block the event loop for every user of the process.
-  const dates = boundedRange(start, end);
   const done = dates.map(
     (date) => isCompleted(habit, entryMap.get(date), unlogged, answeredBy(date, creditFrom))
   );
@@ -621,20 +639,27 @@ function onPaceSeries(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
 /* ---------- streaks ---------- */
 
 /**
- * Contiguous runs of being on pace. Skipped days bridge a streak rather than
- * breaking it (Loop treats a skip as "this day didn't happen").
+ * Contiguous runs of being on pace, folded from an on-pace SERIES rather than
+ * walking `entryMap` itself (#219). Splitting the fold from the build
+ * is what lets `computeStats` build the series once and hand the SAME object
+ * to this and to `missRunsFrom` — `computeStreaks` below still builds its own
+ * series for a direct caller, but `computeStats` calls this directly with a
+ * series it already has.
+ *
+ * Skipped days bridge a streak rather than breaking it (Loop treats a skip as
+ * "this day didn't happen").
  *
  * Note this counts CALENDAR days, including the off-days of a non-daily
  * habit: a 3×/week habit kept for a month is a 30-day streak, not a 12-day
  * one. That is what people mean by "I have kept this up for a month", and it
  * keeps the number comparable with a daily habit's.
  *
- * @param {string} [creditFrom] see `answeredBy`. A route that scans streaks
- *   itself — both editions' `/overview`, for `bestStreak` — has to pass this or
- *   it serves a figure the rest of the same payload disagrees with (#223).
+ * Neither this nor `missRunsFrom` may mutate `series` — both only read it,
+ * and both may be handed the identical object in the same call.
+ *
+ * @param {{date: string, ok: boolean|null}[]} series see `onPaceSeries`.
  */
-export function computeStreaks(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
-                               creditFrom = undefined) {
+function streaksFrom(series) {
   const streaks = [];
   let runStart = null;
   let runEnd = null;
@@ -647,7 +672,7 @@ export function computeStreaks(habit, entryMap, start, end, unlogged = UNLOGGED_
   let runSkips = 0;
   let pendingSkips = 0;
 
-  for (const { date, ok } of onPaceSeries(habit, entryMap, start, end, unlogged, creditFrom)) {
+  for (const { date, ok } of series) {
     if (ok === null) { // skip: neither extends nor breaks
       if (runStart !== null) pendingSkips++;
       continue;
@@ -678,6 +703,25 @@ export function computeStreaks(habit, entryMap, start, end, unlogged = UNLOGGED_
   return streaks;
 }
 
+/**
+ * @param {string} [creditFrom] see `answeredBy`. A route that scans streaks
+ *   itself — both editions' `/overview`, for `bestStreak` — has to pass this or
+ *   it serves a figure the rest of the same payload disagrees with (#223).
+ */
+export function computeStreaks(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
+                               creditFrom = undefined) {
+  // Clamp here rather than at each call site. `dateRange` allocates one
+  // element per day, so a single entry dated in the distant past — trivially
+  // planted through an import — would otherwise spin for hundreds of
+  // thousands of iterations and block the event loop for every user of the
+  // process. `onPaceSeries` is private and takes an already-clamped `dates`
+  // rather than `start, end` (#219), which is what makes this the only place
+  // the clamp can be escaped from — and it cannot, because nothing outside
+  // `stats.js` can reach `onPaceSeries` directly.
+  const dates = boundedRange(start, end);
+  return streaksFrom(onPaceSeries(habit, entryMap, dates, unlogged, creditFrom));
+}
+
 export function currentStreak(streaks, endDate) {
   if (!streaks.length) return 0;
   const last = streaks[streaks.length - 1];
@@ -694,18 +738,21 @@ export function bestStreak(streaks) {
 
 /**
  * Miss runs: contiguous stretches of failure, the mirror image of
- * `computeStreaks`.
+ * `streaksFrom`, folded from the SAME kind of on-pace series (#219) —
+ * see the note on `streaksFrom` for why the fold is split from the build and
+ * why neither may mutate `series`.
  *
  * Skips are transparent here for the same reason they bridge a streak — a day
  * that "didn't happen" is not a failure to come back from.
+ *
+ * @param {{date: string, ok: boolean|null}[]} series see `onPaceSeries`.
  */
-export function computeMissRuns(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
-                                creditFrom = undefined) {
+function missRunsFrom(series) {
   const runs = [];
   let runStart = null;
   let runEnd = null;
 
-  for (const { date, ok } of onPaceSeries(habit, entryMap, start, end, unlogged, creditFrom)) {
+  for (const { date, ok } of series) {
     if (ok === null) continue;
 
     if (!ok) {
@@ -736,6 +783,14 @@ export function computeMissRuns(habit, entryMap, start, end, unlogged = UNLOGGED
     });
   }
   return runs;
+}
+
+export function computeMissRuns(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
+                                creditFrom = undefined) {
+  // Same clamp as `computeStreaks`, above — see the comment on its `dates`
+  // line for why it is built here rather than inside `onPaceSeries`.
+  const dates = boundedRange(start, end);
+  return missRunsFrom(onPaceSeries(habit, entryMap, dates, unlogged, creditFrom));
 }
 
 /**
@@ -867,20 +922,16 @@ export function computeSurvival(streaks, end, thresholds = SURVIVAL_THRESHOLDS) 
 }
 
 /**
- * The three resilience figures together.
+ * The three resilience figures together, from `streaks` and `missRuns`
+ * already computed — split from `computeResilience` (#219) so
+ * `computeStats` can hand it the SAME `streaks` and `missRuns` it built from
+ * one shared on-pace series, rather than this recomputing miss runs from a
+ * second series built with identical arguments.
  *
  * They answer one question that neither streaks nor the score curve does:
  * when this habit fails, what happens next?
  */
-export function computeResilience(habit, entryMap, streaks, start, end,
-                                  unlogged = UNLOGGED_DEFAULT, creditFrom = undefined) {
-  // This used to refuse to run for anything but a daily habit, because a miss
-  // run meant "a day it was not done" and a 3×/week habit has four of those
-  // every week — a perfectly-kept habit reported as lapsing continuously.
-  // `onPaceSeries` fixed the premise rather than the symptom: a miss is now a
-  // day the habit fell BELOW ITS RATE, which is a real failure for any
-  // frequency, so there is nothing left to suppress.
-  const missRuns = computeMissRuns(habit, entryMap, start, end, unlogged, creditFrom);
+function resilienceFrom(streaks, missRuns, end) {
   return {
     // Retained: the response shape is public, and the detail view still guards
     // on it. Nothing sets it false any more.
@@ -892,6 +943,18 @@ export function computeResilience(habit, entryMap, streaks, start, end,
     // costs nothing now that the runs are computed.
     worstLapse: missRuns.reduce((max, r) => Math.max(max, r.length), 0),
   };
+}
+
+export function computeResilience(habit, entryMap, streaks, start, end,
+                                  unlogged = UNLOGGED_DEFAULT, creditFrom = undefined) {
+  // This used to refuse to run for anything but a daily habit, because a miss
+  // run meant "a day it was not done" and a 3×/week habit has four of those
+  // every week — a perfectly-kept habit reported as lapsing continuously.
+  // `onPaceSeries` fixed the premise rather than the symptom: a miss is now a
+  // day the habit fell BELOW ITS RATE, which is a real failure for any
+  // frequency, so there is nothing left to suppress.
+  const missRuns = computeMissRuns(habit, entryMap, start, end, unlogged, creditFrom);
+  return resilienceFrom(streaks, missRuns, end);
 }
 
 /* ---------- history aggregation ---------- */
@@ -937,6 +1000,18 @@ const BUCKETERS = {
 export function computeHistory(habit, entryMap, start, end, granularity = 'day',
                                weekStart = 'monday', unlogged = UNLOGGED_DEFAULT,
                                creditFrom = undefined) {
+  return historyOver(habit, entryMap, boundedRange(start, end), granularity, weekStart,
+    unlogged, creditFrom);
+}
+
+/**
+ * The private core behind `computeHistory` — see the note on `scoresOver`
+ * for why it takes `dates` and is not exported.
+ * @param {'monday'|'sunday'} [weekStart]
+ */
+function historyOver(habit, entryMap, dates, granularity = 'day',
+                     weekStart = 'monday', unlogged = UNLOGGED_DEFAULT,
+                     creditFrom = undefined) {
   // `Object.hasOwn`, because `granularity` is a query parameter and
   // `BUCKETERS['valueOf']` is an inherited function: truthy, so `??` never
   // reaches the default, and calling it unbound throws instead of bucketing
@@ -946,7 +1021,7 @@ export function computeHistory(habit, entryMap, start, end, granularity = 'day',
     : BUCKETERS.day;
   const buckets = new Map();
 
-  for (const date of boundedRange(start, end)) {
+  for (const date of dates) {
     const key = bucketOf(date, weekStart);
     if (!buckets.has(key)) {
       buckets.set(key, { bucket: key, completed: 0, total: 0, value: 0, skipped: 0 });
@@ -985,9 +1060,18 @@ export function computeHistory(habit, entryMap, start, end, granularity = 'day',
  */
 export function computeWeekdayByMonth(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
                                       creditFrom = undefined) {
+  return weekdayByMonthOver(habit, entryMap, boundedRange(start, end), unlogged, creditFrom);
+}
+
+/**
+ * The private core behind `computeWeekdayByMonth` — see the note on
+ * `scoresOver` for why it takes `dates` and is not exported.
+ */
+function weekdayByMonthOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
+                            creditFrom = undefined) {
   const byMonth = new Map();
 
-  for (const date of boundedRange(start, end)) {
+  for (const date of dates) {
     const value = entryMap.get(date);
     const done = isCompleted(habit, value, unlogged, answeredBy(date, creditFrom));
     // A skip is "this day didn't happen", so it must not count against the
@@ -1022,6 +1106,15 @@ export function computeWeekdayByMonth(habit, entryMap, start, end, unlogged = UN
  */
 export function computeWeekdays(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
                                 creditFrom = undefined) {
+  return weekdaysOver(habit, entryMap, boundedRange(start, end), unlogged, creditFrom);
+}
+
+/**
+ * The private core behind `computeWeekdays` — see the note on `scoresOver`
+ * for why it takes `dates` and is not exported.
+ */
+function weekdaysOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
+                      creditFrom = undefined) {
   const days = Array.from({ length: 7 }, (_, i) => ({
     weekday: i,
     completed: 0,
@@ -1029,7 +1122,7 @@ export function computeWeekdays(habit, entryMap, start, end, unlogged = UNLOGGED
     value: 0,
   }));
 
-  for (const date of boundedRange(start, end)) {
+  for (const date of dates) {
     const value = entryMap.get(date);
     const done = isCompleted(habit, value, unlogged, answeredBy(date, creditFrom));
     if (done === null) continue;
@@ -1059,9 +1152,19 @@ export function computeWeekdays(habit, entryMap, start, end, unlogged = UNLOGGED
  */
 export function computeFrequency(habit, entryMap, start, end, weekStart = 'monday',
                                  unlogged = UNLOGGED_DEFAULT, creditFrom = undefined) {
+  return frequencyOver(habit, entryMap, boundedRange(start, end), weekStart, unlogged, creditFrom);
+}
+
+/**
+ * The private core behind `computeFrequency` — see the note on `scoresOver`
+ * for why it takes `dates` and is not exported.
+ * @param {'monday'|'sunday'} [weekStart]
+ */
+function frequencyOver(habit, entryMap, dates, weekStart = 'monday',
+                       unlogged = UNLOGGED_DEFAULT, creditFrom = undefined) {
   const weekTotals = new Map();
 
-  for (const date of boundedRange(start, end)) {
+  for (const date of dates) {
     if (isCompleted(habit, entryMap.get(date), unlogged,
       answeredBy(date, creditFrom)) !== true) continue;
     const week = startOfWeek(date, weekStart);
@@ -1120,9 +1223,17 @@ function daysInMonth(month) {
  * @returns {Array<{month: string, answered: number, days: number}>} oldest first
  */
 export function computeCoverage(entryMap, start, end) {
+  return coverageOver(entryMap, boundedRange(start, end));
+}
+
+/**
+ * The private core behind `computeCoverage` — see the note on `scoresOver`
+ * for why it takes `dates` and is not exported.
+ */
+function coverageOver(entryMap, dates) {
   const months = new Map();
 
-  for (const date of boundedRange(start, end)) {
+  for (const date of dates) {
     const month = date.slice(0, 7);
     if (!months.has(month)) months.set(month, { month, answered: 0, days: 0 });
     const m = months.get(month);
@@ -1517,14 +1628,48 @@ export function computeStats(habit, entries,
                                coverage = true } = {}) {
   const { entryMap, from, creditFrom } = resolveWindow(entries, start, end);
 
+  // One walk shared by every pass below (#219), where master built it once
+  // PER PASS — `scoresOver`'s wrapper, `historyOver`'s, `weekdaysOver`'s,
+  // `weekdayByMonthOver`'s, `frequencyOver`'s and `coverageOver`'s each built
+  // their own clamped range over the identical `from, end` separately, on top
+  // of `computeStreaks` and `computeResilience`'s `computeMissRuns` each
+  // building their OWN `onPaceSeries` over that same window — eight walks and
+  // two series builds on master, for what is now one of each (#219 shares the
+  // series the way this `dates` line already shares the walk).
+  //
+  // Threaded rather than memoised, on purpose: a memo would hand ONE retained
+  // array to every reader across calls, and `dateRange`'s `out.pop()` trim
+  // mutates its own local array before returning it — safe here only because
+  // each call gets a fresh array and nothing downstream keeps it past this
+  // function returning. A per-user cache is also #191's eviction question
+  // again, which this change must not reopen.
+  //
+  // The clamp cannot be escaped through this sharing: every `*Over` function
+  // fed `dates` below, and `onPaceSeries` below that, is a MODULE-PRIVATE core
+  // with no exported counterpart and no `dates` parameter reachable from
+  // outside `stats.js` — so the one `boundedRange` call here (and the
+  // matching ones in `summaryStats` and `computeCategoryStats`) is the only
+  // place a range can be widened from. None of those cores may mutate
+  // `dates` — every one below `.map`s or `for…of`s it, never
+  // `.push`/`.pop`/`.sort`/`.splice`/`.reverse` or an index assignment.
+  const dates = boundedRange(from, end);
+
   // `creditFrom` goes to EVERY pass that reads `unlogged`, not only to the two
   // the issue measured. `dayCredit` and `isCompleted` state the same rule
   // deliberately — "or the score and the streak disagree about the very same
   // day" — and a history bar, a weekday rate or a times-per-week bucket
   // painting a day as kept that the streak beside it counts as missed is that
   // same disagreement one surface further out.
-  const scores = computeScores(habit, entryMap, from, end, unlogged, creditFrom);
-  const streaks = computeStreaks(habit, entryMap, from, end, unlogged, creditFrom);
+  const scores = scoresOver(habit, entryMap, dates, unlogged, creditFrom);
+
+  // Built ONCE (#219) and folded two ways: `computeStreaks` and
+  // `computeMissRuns`/`computeResilience` each used to build an identical
+  // `onPaceSeries` over the same `dates` a second time, for no reason but that
+  // the fold was inline inside them. `streaksFrom`/`missRunsFrom` only READ
+  // `onPace`; neither may mutate it, and both are handed the SAME object.
+  const onPace = onPaceSeries(habit, entryMap, dates, unlogged, creditFrom);
+  const streaks = streaksFrom(onPace);
+  const missRuns = missRunsFrom(onPace);
 
   // Bounded to the same [from, end] window every other figure in this payload
   // uses. Filtering the whole map counted entries outside the range — a
@@ -1542,12 +1687,11 @@ export function computeStats(habit, entries,
     currentStreak: currentStreak(streaks, end),
     bestStreak: bestStreak(streaks),
     totalCompleted,
-    history: computeHistory(habit, entryMap, from, end, granularity, weekStart, unlogged,
-      creditFrom),
-    weekdays: computeWeekdays(habit, entryMap, from, end, unlogged, creditFrom),
-    weekdayByMonth: computeWeekdayByMonth(habit, entryMap, from, end, unlogged, creditFrom),
-    frequency: computeFrequency(habit, entryMap, from, end, weekStart, unlogged, creditFrom),
-    resilience: computeResilience(habit, entryMap, streaks, from, end, unlogged, creditFrom),
+    history: historyOver(habit, entryMap, dates, granularity, weekStart, unlogged, creditFrom),
+    weekdays: weekdaysOver(habit, entryMap, dates, unlogged, creditFrom),
+    weekdayByMonth: weekdayByMonthOver(habit, entryMap, dates, unlogged, creditFrom),
+    frequency: frequencyOver(habit, entryMap, dates, weekStart, unlogged, creditFrom),
+    resilience: resilienceFrom(streaks, missRuns, end),
     // On the payload rather than passed into `computeAwards` as a second data
     // source. `awards.js`'s header states that every award is a reading of the
     // figures already here and that nothing is counted a second way; an entry
@@ -1558,7 +1702,7 @@ export function computeStats(habit, entries,
     //
     // ...and spread rather than assigned, so a caller that declined it gets no
     // key at all. See the note on the parameter.
-    ...(coverage ? { coverage: computeCoverage(entryMap, from, end) } : {}),
+    ...(coverage ? { coverage: coverageOver(entryMap, dates) } : {}),
   };
 }
 
@@ -1589,8 +1733,15 @@ export function summaryStats(habit, entries,
                                creditFrom: creditGiven } = {}) {
   const { entryMap, from, creditFrom } = resolveWindow(entries, start, end, creditGiven);
 
-  const scores = computeScores(habit, entryMap, from, end, unlogged, creditFrom);
-  const streaks = computeStreaks(habit, entryMap, from, end, unlogged, creditFrom);
+  // Same one-walk, one-series sharing as `computeStats` — see the comment
+  // there for why threading rather than a memo, and why the private `*Over`
+  // cores (and `onPaceSeries` beside them) are what keeps the clamp
+  // inescapable. `streaksFrom(onPaceSeries(...))` rather than the exported
+  // `computeStreaks`, so this walks the range and builds the series once each
+  // rather than a second time apiece inside that wrapper (#219).
+  const dates = boundedRange(from, end);
+  const scores = scoresOver(habit, entryMap, dates, unlogged, creditFrom);
+  const streaks = streaksFrom(onPaceSeries(habit, entryMap, dates, unlogged, creditFrom));
 
   return {
     score: scores.length ? scores[scores.length - 1].score : 0,
@@ -2098,8 +2249,30 @@ export function computeCategoryStats(categories, members,
         memberCredit)) {
         scoreAt.set(point.date, point.score);
       }
+      // Re-clamping `dates[0]` through `end` here would be what
+      // `computeMissRuns` used to walk, and it is identical to `dates` itself
+      // — for a REAL-day `start`, which is what both `/categories/stats`
+      // handlers guarantee (`queryDate` -> `assertDate` refuses anything
+      // `DATE_RE` merely shapes, `2017-00-05` included). That is NOT a
+      // property of `boundedRange` in general, and this is unreachability
+      // made explicit — the same pattern `shared/CLAUDE.md` uses for the
+      // year-padding hazard — rather than an invariant claimed to hold
+      // unconditionally: the clamp is a STRING comparison done before
+      // `dateRange` ever normalises, so a phantom `start` can pass the clamp
+      // and only then roll to a date EARLIER than `earliest`. For
+      // `start = '2017-00-05'`, `end = '2026-12-19'` (`earliest =
+      // '2016-12-11'`), `'2017-00-05' > '2016-12-11'` lexically, so the
+      // clamp does not fire and `dates[0]` normalises to `2016-12-05` — six
+      // days before `earliest`. Re-clamping THAT through `boundedRange`
+      // clamps it forward to `2016-12-11`, six days later — a shorter range
+      // than `dates` by exactly that much. Pinned as a stated non-identity in
+      // `stats.test.js`, with `assertDate` named as what keeps this route off
+      // that path. So this reads the axis this function already built for its
+      // bucket series instead of walking the identical range again per member —
+      // `computeScores` above keeps its own, wider, per-member walk
+      // (`[memberWarm, end]`), which is not this range and must not share it.
       rate = computeRecovery(
-        computeMissRuns(habit, entryMap, dates[0], end, unlogged, memberCredit), end
+        missRunsFrom(onPaceSeries(habit, entryMap, dates, unlogged, memberCredit)), end
       ).rate;
     }
 

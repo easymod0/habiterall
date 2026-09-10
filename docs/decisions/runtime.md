@@ -148,6 +148,15 @@ is worth reading beside this file — the rewrite it describes was constrained b
 DST and by a zone that deleted a calendar day, neither of which a language choice
 would have helped with.
 
+**#219 has since shipped, and it is not a step in the ranking above** — #198
+made one walk cheaper; #219 made `computeStats`, `summaryStats` and
+`computeCategoryStats` stop repeating the SAME walk (and, separately, the same
+`onPaceSeries` build) once per pass inside a single call. Measured on the same
+fixture `bench-overview.mjs` uses: `computeStats(coverage: true)` (the
+`/habits/:id/stats` shape) 1.77 -> 1.20 ms/habit, `summaryStats` (the
+`/overview` shape) 0.30 -> 0.22 ms/habit. `shared/CLAUDE.md`'s `dateRange`
+section has the mechanism.
+
 This is explicitly **not** a proposal to reimplement `computeStats` in SQL
 either — #196 rules that out for the same three-copies reason. A SQL
 implementation is a second implementation of the scoring model that the browser
