@@ -136,11 +136,35 @@ try {
     ck('a recovery figure is shown',
       labels.some((l) => /Back next day|No misses/.test(l)), labels.join(', '));
     ck('the longest lapse is shown', labels.includes('Longest lapse'), labels.join(', '));
+    ck('the average lapse is shown', labels.includes('Average lapse'), labels.join(', '));
 
     // The recovery tile is a percentage or an em dash — never NaN or "null".
     const rec = daily.tiles.find((t) => /Back next day|No misses/.test(t.label));
     ck('the recovery value is a percentage or a dash',
       /^(\d{1,3}%|—)$/.test(rec.value), rec.value);
+
+    // A one-decimal figure with a trailing "d", or an em dash — never NaN,
+    // an integer with no decimal, or "null".
+    const avg = daily.tiles.find((t) => t.label === 'Average lapse');
+    ck('the average lapse value is a one-decimal figure or a dash',
+      /^(\d+\.\dd|—)$/.test(avg.value), avg.value);
+
+    // Agreement with the payload the page was actually drawn from — the same
+    // `/api/habits/:id/stats` call `detail.js` made, read from the page so
+    // the id in the URL is the habit that is actually open. Both values are
+    // printed unconditionally: a comparison whose operands are not in the
+    // output is one a reader cannot check, and if this fixture habit happens
+    // to have `averageLength === null` the check would otherwise be vacuous.
+    const payloadAvg = await ev(
+      "(async function(){ var id=(location.hash.match(/#\\/habit\\/(\\d+)/)||[])[1];" +
+      " var s=await (await fetch('/api/habits/'+id+'/stats')).json();" +
+      ' return s.resilience.recovery.averageLength; })()'
+    );
+    const expectedTile = payloadAvg == null ? '—' : payloadAvg.toFixed(1) + 'd';
+    ck('the tile agrees with the stats payload',
+      avg.value === expectedTile,
+      'payload averageLength=' + JSON.stringify(payloadAvg) + ' (expects ' + expectedTile +
+      '), tile shows ' + avg.value);
 
     ck('both sections are present',
       daily.subheads.includes('How long lapses last') &&
@@ -188,12 +212,123 @@ try {
     ck('with real figures, not placeholders',
       !r.hints.some((h) => /NaN|undefined|null|Infinity/.test(h)),
       r.hints.join(' | '));
+
+    // The daily card checked above (Meditate) has a closed lapse, so its own
+    // shape check cannot tell "—" from a wrongly-rendered "0" — only a habit
+    // whose average is genuinely null can. This fixture (no closed lapse,
+    // shown for its streaks alone) is that one.
+    const avgTile = r.tiles.find((t) => t.label === 'Average lapse');
+    ck('its average lapse value is a one-decimal figure or a dash',
+      /^(\d+\.\dd|—)$/.test(avgTile?.value ?? ''), avgTile?.value ?? '(missing)');
+
+    // Agreement with the payload the page was actually drawn from, the same
+    // shape as the daily block above: fetch the same `/api/habits/:id/stats`
+    // call `detail.js` made, for the habit currently open (its id read out of
+    // the URL, not assumed).
+    const payloadAvg = await ev(
+      "(async function(){ var id=(location.hash.match(/#\\/habit\\/(\\d+)/)||[])[1];" +
+      " var s=await (await fetch('/api/habits/'+id+'/stats')).json();" +
+      ' return s.resilience.recovery.averageLength; })()'
+    );
+    const expectedTile = payloadAvg == null ? '—' : payloadAvg.toFixed(1) + 'd';
+    ck('the tile agrees with the stats payload',
+      avgTile?.value === expectedTile,
+      'payload averageLength=' + JSON.stringify(payloadAvg) + ' (expects ' + expectedTile +
+      '), tile shows ' + (avgTile?.value ?? '(missing)'));
+
+    // The shape check above accepts EITHER a figure or a dash, so on its own
+    // it cannot tell whether this fixture is still exercising the null
+    // branch or has quietly gained a closed lapse — without this, the null
+    // branch's coverage is luck rather than an assertion. State the
+    // denominator directly.
+    ck('and this habit is the one exercising the null case',
+      payloadAvg === null,
+      'payload averageLength=' + JSON.stringify(payloadAvg));
+
     checkedNonDaily = true;
     break;
   }
   if (!checkedNonDaily) {
     console.log('SKIP  no non-daily habit in the fixtures to check');
   }
+
+  /* ---------- average lapse: the DECISION, not merely its presence ---------- */
+
+  console.log('\n--- average lapse (mean vs median) ---');
+
+  // None of the standing fixtures can tell a mean from a median apart:
+  // Meditate misses every 9th day, so every lapse is exactly one day and
+  // mean = median = 1. Built here instead, at the end so it cannot perturb
+  // any assertion above — a habit created through the API lands last by
+  // `position`, so `open(0)` and the habit loops above are unaffected.
+  // Closed lapses [1, 1, 1, 1, 10]: mean 2.8, median 1, longest 10, rate 4/5.
+  const AVG_NAME = 'resiliencecheck average lapse';
+  const isoDate = (d) =>
+    d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
+  const daysAgo = (n) => {
+    const d = new Date();
+    d.setHours(12, 0, 0, 0);
+    d.setDate(d.getDate() - n);
+    return isoDate(d);
+  };
+
+  const createExpr =
+    "(async function(){ var res = await fetch('/api/habits', { method: 'POST'," +
+    " headers: { 'Content-Type': 'application/json' }," +
+    ' body: JSON.stringify({ name: ' + JSON.stringify(AVG_NAME) + ", type: 'boolean' }) });" +
+    " if (!res.ok) return { error: 'create failed: ' + res.status + ' ' + (await res.text()) };" +
+    ' var h = await res.json(); return { id: h.id }; })()';
+  const created = await ev(createExpr);
+  if (created.error) throw new Error(created.error);
+  const avgHabitId = created.id;
+
+  // x.x.x.x.x..........x, oldest day first at daysAgo(19), newest at
+  // daysAgo(0) — only the 'x' days get a PUT, a '.' day gets no row at all.
+  const PATTERN = 'x.x.x.x.x..........x';
+  for (let i = 0; i < PATTERN.length; i++) {
+    if (PATTERN[i] !== 'x') continue;
+    const date = daysAgo(PATTERN.length - 1 - i);
+    const putExpr =
+      "fetch('/api/habits/" + avgHabitId + '/entries/' + date + "', " +
+      "{ method: 'PUT', headers: { 'Content-Type': 'application/json' }," +
+      ' body: JSON.stringify({ value: 2 }) }).then(function(r){ return r.ok; })';
+    const ok = await ev(putExpr);
+    if (!ok) throw new Error('seeding ' + date + ' failed');
+  }
+
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate', { url: APP }, sessionId),
+    what: 'the dashboard, after seeding the average-lapse habit',
+  });
+  await sleep(400);
+
+  const findAvgIdx =
+    "[].slice.call(document.querySelectorAll('.habit-row .habit-name, .habit-row .name'))" +
+    '.findIndex(function(n){ return n.textContent.trim() === ' + JSON.stringify(AVG_NAME) + '; })';
+  const avgIdx = await ev(findAvgIdx);
+  ck('the average-lapse habit is on the dashboard', avgIdx >= 0, 'index ' + avgIdx);
+
+  if (avgIdx >= 0) {
+    await open(avgIdx);
+    const avgCard = await readCard();
+    ck('its card is present', avgCard.card === true, JSON.stringify(avgCard.order));
+
+    if (avgCard.card) {
+      const tileVal = (label) => avgCard.tiles.find((t) => t.label === label)?.value;
+      // Three literals, worth the twenty lines of setup: 2.8d fails under a
+      // median implementation (1.0d), under Math.round (3d), and if the
+      // tile were wired to worstLapse/longest instead (10d).
+      ck('Back next day is 80%', tileVal('Back next day') === '80%',
+        String(tileVal('Back next day')));
+      ck('Longest lapse is 10d', tileVal('Longest lapse') === '10d',
+        String(tileVal('Longest lapse')));
+      ck('Average lapse is 2.8d', tileVal('Average lapse') === '2.8d',
+        String(tileVal('Average lapse')));
+    }
+  }
+
+  await ev("fetch('/api/habits/" + avgHabitId + "', { method: 'DELETE' })");
 
   ck('no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 2).join(' | '));
 

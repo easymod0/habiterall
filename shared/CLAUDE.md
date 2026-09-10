@@ -564,6 +564,11 @@ related rules in the same code: an *ongoing* lapse is excluded from recovery
 rate (being mid-slip is not the same as having failed to recover) and reported
 as `openRun` instead; and a rate of `null` means "nothing has ever been
 missed", which is a different claim from 100% and must not render as a number.
+`recovery.averageLength` is the mean lapse length over that same closed set,
+and it follows `lastEnd`'s `null` convention rather than `longest`'s `0` —
+a maximum over an empty set is a meaningful 0, an average over one is
+undefined — and it is returned unrounded, the tile rounding it to one decimal
+the same way the tile above it rounds `rate`.
 
 **`weekStart` reaches every weekday axis, and for a long time it did not.**
 `startOfWeek` in stats.js has always honoured it, so the history and

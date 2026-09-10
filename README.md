@@ -202,6 +202,9 @@ you miss:
 
 - **Recovery rate** — of every lapse that ended, how often were you back the
   very next day?
+- **Average lapse** — the mean length of the lapses that ended, so a high
+  recovery rate beside a costly average tells you the lapses you don't bounce
+  back from are expensive.
 - **How long lapses last** — misses clustered at one day mean a habit that
   self-corrects; a fat tail means one that, once dropped, stays dropped.
 - **How far streaks get** — of all the streaks you started, what share reached
