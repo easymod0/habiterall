@@ -288,3 +288,33 @@ stop. `test/browser-fleet.mjs` is the script; the runner itself is shared.
 
 Your data is a single file at `data/habiterall.db` — back it up by copying it,
 or use `GET /api/export`.
+
+## Scheduled backups (issue #75)
+
+`backup.js`'s periodic job rides `notifier.js`'s existing one-minute tick
+(`startNotifier`'s `onTick` hook) rather than starting a second timer — the
+process gets one timer, full stop. That has a real consequence for
+`HABITERALL_NOTIFY=off`: with reminders off the tick used to not exist at all,
+which would have meant a configured backup silently never ran on an instance
+that had turned reminders off for an unrelated reason. `notifier.js`'s `start`
+now keeps the tick alive whenever a backup hook is present, feeding it
+`collect: () => []` so no reminder is ever considered — the tick runs for the
+backup's sake alone.
+
+`backup_status` holds one row and the date it records is the date the run
+**began**, not the date of the last attempt. The latter would be a write every
+tick — 1,440 a day for a job that runs once — and the run's start date is also
+exactly the dedupe key `dueBackup` needs: claim the day first, and a process
+killed mid-run leaves the honest `'running'` state behind rather than a stale
+`'ok'`.
+
+It is a table and not a setting on purpose, for the same reason
+`server_secrets` and `auth_credentials` are not: this is the server reporting
+on itself, never sent by the client and never carried by a backup — a backup
+destination inside a backup would be both a leak (the server's own filesystem
+layout) and a loop (restoring the file would restore the setting that named
+where to restore it from). `GET /api/backup/status` therefore answers with no
+directory path at all, only a basename for `file` — the operator chose the
+directory in their own compose file and does not need the app to hand it back,
+and disclosing a server filesystem path buys nothing on an edition whose
+password is optional.

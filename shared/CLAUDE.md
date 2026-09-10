@@ -13,6 +13,7 @@ Postgres one.
 | `src/validate.js` | every input rule for habits, entries, and dates |
 | `src/notify.js` | notification destinations, which reminders are due, what they say, and what a button means |
 | `src/notify-send.js` | delivering them, and the tick loop — network only through an injected `fetch` |
+| `src/backup.js` | the pure schedule and retention math for the scheduled backup |
 | `src/discord.js` | posting as a bot (the only way to get buttons) and handling a press |
 | `src/discord-gateway.js` | the WebSocket that receives presses, so no inbound port is needed |
 | `src/import.js` | parsers: habiterall JSON, Loop `.db`, Loop CSV |

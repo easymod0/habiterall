@@ -1857,6 +1857,20 @@ api.get('/notify/status', route(async (req, res) => {
   res.json({ channels: await deliveryStatus(uid(req)) });
 }));
 
+/**
+ * The API surface is identical in both editions by promise, and `enabled` is
+ * the field that carries the capability difference. Scheduled backups are
+ * personal-only for now because N accounts under RLS need a privileged
+ * per-account export path that deliberately steps outside the policies — a
+ * security-shaped change that wants its own review (issue #75). This route
+ * reads no table, so it needs no RLS policy, no grant, no migration and no
+ * tenancy-suite case, and `enabled: false` is a true statement about cloud,
+ * not a stub.
+ */
+api.get('/backup/status', route(async (req, res) => {
+  res.json({ enabled: false, schedule: null, keep: null, last: null });
+}));
+
 /* ---------- export ---------- */
 
 api.get('/export', route(async (req, res) => {

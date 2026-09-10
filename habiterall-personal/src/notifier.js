@@ -375,13 +375,30 @@ export async function sendTest(deps = {}) {
  * Start the reminder loop. Entry points only — importing this module must not
  * begin posting to somebody's Discord channel.
  *
- * @returns {{stop: () => void} | null} null when disabled
+ * `hooks.onTick` is the scheduled backup's join point (issue #75) onto this
+ * process's one timer — see `onTick` on `NotifyContext` in
+ * `@habiterall/shared/notify-send.js`. Reminders being off must not silently
+ * take the backup down with them: a backup hung purely off this tick would
+ * otherwise never run on an instance with `HABITERALL_NOTIFY=off`, which is a
+ * real coupling defect and not a nicety, so the tick still starts — with
+ * `collect: () => []` so no reminder is ever considered — whenever a hook is
+ * present, even with reminders disabled.
+ *
+ * @param {Record<string, string|undefined>} [env]
+ * @param {{onTick?: (instant: Date|number) => Promise<any>|any}} [hooks]
+ * @returns {{stop: () => void} | null} null only when disabled AND no hook
  */
-export function start(env = process.env) {
+export function start(env = process.env, hooks = {}) {
   const config = notifierConfig(env);
-  if (!config.enabled) {
+  if (!config.enabled && !hooks.onTick) {
     log.warn('notify.disabled', { reason: 'HABITERALL_NOTIFY=off' });
     return null;
+  }
+  if (!config.enabled) {
+    log.warn('notify.disabled_but_ticking', {
+      reason: 'HABITERALL_NOTIFY=off',
+      consequence: 'reminders are off; the tick keeps running for a scheduled job (backups)',
+    });
   }
 
   // Said once, at startup, because it is the difference between buttons and
@@ -389,13 +406,17 @@ export function start(env = process.env) {
   // The identical argument applies to ntfy: with no `app_url` its buttons have
   // nowhere to post back to, so an ntfy reminder still arrives but with none —
   // and nothing else says so, since `channelInteractive` otherwise has no
-  // caller at all.
-  log.info('notify.starting', {
-    mode: config.botToken ? 'bot' : 'webhook',
-    interval_ms: config.intervalMs,
-    app_url: config.appUrl || '(unset)',
-    ntfy_answers: channelInteractive('ntfy', {}, { appUrl: config.appUrl }) ? 'on' : 'off',
-  });
+  // caller at all. Only said when reminders are actually enabled — with them
+  // off, this describes a mode that is not running, right beside the line
+  // above that already said so.
+  if (config.enabled) {
+    log.info('notify.starting', {
+      mode: config.botToken ? 'bot' : 'webhook',
+      interval_ms: config.intervalMs,
+      app_url: config.appUrl || '(unset)',
+      ntfy_answers: channelInteractive('ntfy', {}, { appUrl: config.appUrl }) ? 'on' : 'off',
+    });
+  }
 
   // The gateway is only for receiving button presses, so it is opened only when
   // there is a bot to receive them with. Sending needs no socket.
@@ -416,27 +437,36 @@ export function start(env = process.env) {
     // Travels the same route `botToken` and `appUrl` already do: no reaching
     // into `process.env` from inside `shared/src` for it.
     signAnswer,
-    collect: (instant) => {
-      // Cheap, and it keeps the table from growing without bound in a
-      // long-lived install.
-      //
-      // Guarded, because it is HOUSEKEEPING and this is the first thing a tick
-      // does: an unguarded SQLITE_BUSY here threw out of `collect`, which is
-      // awaited before `runTick`'s per-account try, so a stray lock on the
-      // watermark table abandoned the whole tick before a single reminder had
-      // been considered. Cloud has always guarded its own `prune`; this was the
-      // asymmetry.
-      const cutoff = new Date(Number(instant) - KEEP_LOG_DAYS * 86_400_000)
-        .toISOString().slice(0, 10);
-      try {
-        q.prune.run(cutoff);
-      } catch (err) {
-        log.warn?.('notify.prune_failed', {}, err);
+    // With reminders off (`HABITERALL_NOTIFY=off`) but a hook present — the
+    // scheduled-backup case this function's own comment explains — `collect`
+    // is `() => []` so no reminder is ever considered; the tick keeps running
+    // purely so `hooks.onTick` gets called from it.
+    collect: config.enabled
+      ? (instant) => {
+        // Cheap, and it keeps the table from growing without bound in a
+        // long-lived install.
+        //
+        // Guarded, because it is HOUSEKEEPING and this is the first thing a tick
+        // does: an unguarded SQLITE_BUSY here threw out of `collect`, which is
+        // awaited before `runTick`'s per-account try, so a stray lock on the
+        // watermark table abandoned the whole tick before a single reminder had
+        // been considered. Cloud has always guarded its own `prune`; this was the
+        // asymmetry.
+        const cutoff = new Date(Number(instant) - KEEP_LOG_DAYS * 86_400_000)
+          .toISOString().slice(0, 10);
+        try {
+          q.prune.run(cutoff);
+        } catch (err) {
+          log.warn?.('notify.prune_failed', {}, err);
+        }
+        return collect(instant);
       }
-      return collect(instant);
-    },
+      : () => [],
     mark,
     recordOutcome,
+    // Passed through unchanged, whether reminders are on or off — see this
+    // function's own doc comment for why the tick has to keep running for it.
+    onTick: hooks.onTick,
   });
 
   return {

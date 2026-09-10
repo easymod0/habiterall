@@ -322,6 +322,14 @@ services:
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}                  # adds Yes / No / Skip buttons
       NTFY_ALLOWED_HOSTS: ${NTFY_ALLOWED_HOSTS:-}                # ntfy.sh; name your own to replace it
 
+      # Scheduled backups. Empty DIR is off. No new volume needed -- /data is
+      # already mounted below, so /data/backups lands in the same volume as
+      # the database; a separate mount is better for disaster recovery, since
+      # a volume that dies takes both with it.
+      HABITERALL_BACKUP_DIR: ${HABITERALL_BACKUP_DIR:-}          # e.g. /data/backups; empty is off
+      HABITERALL_BACKUP_SCHEDULE: ${HABITERALL_BACKUP_SCHEDULE:-}  # 03:00
+      HABITERALL_BACKUP_KEEP: ${HABITERALL_BACKUP_KEEP:-}          # 7
+
       # Limits and logging. Empty means the default, so these are here to make
       # the knob reachable from .env rather than to set anything — a variable
       # this file does not name never reaches the container at all.
@@ -463,6 +471,28 @@ DISCORD_BOT_TOKEN=
 #
 #   NTFY_ALLOWED_HOSTS=ntfy.sh,example.com/ntfy
 NTFY_ALLOWED_HOSTS=
+
+# ---- backups ----------------------------------------------------------------
+# A nightly JSON export, written by this process rather than pressed by
+# anyone. Empty DIR means the feature is off — nothing changes for an
+# existing install on upgrade.
+HABITERALL_BACKUP_DIR=
+
+# `HH:MM`, a daily local time on the CONTAINER's own clock (TZ, above), not
+# the browser's. A value that does not parse falls back to 03:00 and logs a
+# warning naming what it was given, rather than silently disabling backups.
+HABITERALL_BACKUP_SCHEDULE=03:00
+
+# How many dated backups to keep. The oldest beyond this count are deleted
+# after each successful run, and the deletion is logged. Only files named
+# habiterall-backup-YYYY-MM-DD.json are ever touched, so the directory can
+# safely hold anything else — the database itself, a note, another tool's
+# output.
+HABITERALL_BACKUP_KEEP=7
+
+# The file written is the very same JSON backup the in-app "Backup & Restore"
+# button produces, so it restores through the same import — see
+# https://github.com/easymod0/habiterall#scheduled-backups
 
 # ---- limits -----------------------------------------------------------------
 # Ceiling on a backup being restored.
@@ -1696,6 +1726,34 @@ marks* decides how the rows in the same file are read.
 > the `.db` alone can be missing recent writes — they are still in the
 > write-ahead log.
 
+### Scheduled backups
+
+**Personal edition only.** Three environment variables turn "the whole
+database, automated" into something that just happens, instead of a button
+someone has to remember to press:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HABITERALL_BACKUP_DIR` | empty (off) | Where the nightly backup is written. Empty means the feature is off — nothing changes for an existing install on upgrade |
+| `HABITERALL_BACKUP_SCHEDULE` | `03:00` | `HH:MM`, a daily local time on the **container's own clock** (`TZ`, above). A value that will not parse falls back to `03:00` and logs a warning naming what it was given, rather than silently turning backups off |
+| `HABITERALL_BACKUP_KEEP` | `7` | How many dated backups to keep. The oldest beyond this count are deleted after each successful run, and the deletion is logged |
+
+It writes once a day, at the scheduled minute, on the same one-minute timer the
+reminders already use — no second scheduler in the process. If the server was
+down at `03:00` and comes back at `05:00`, that day's backup still runs, late;
+it never runs twice in the same local day.
+
+The file is `habiterall-backup-<date>.json` — the very same JSON export the
+in-app **Backup & Restore** button produces (`GET /api/export`), so it restores
+through the same import. Retention only ever touches files matching that exact
+name, so the directory can safely hold anything else: the database itself, if
+you have also pointed it at `/data`, a note, another tool's output.
+
+The last outcome — when it last ran, whether it succeeded, and the error if it
+did not — shows as one line in the app's **Backup & Restore** dialog. A run that
+never finished (the process was killed mid-write) reads as a problem rather
+than as silence, and a failure never permanently disables the next attempt.
+
 Back up Authentik's database too, or you lose your user directory.
 
 ---
@@ -1790,6 +1848,9 @@ older syntax than the one the server accepts.
 | `HABITERALL_PUBLIC_URL` | — | This instance's address, so a Discord reminder can link back to it |
 | `DISCORD_BOT_TOKEN` | — | Enables the interactive Discord mode (buttons). Without it, Discord reminders are webhook text |
 | `NTFY_ALLOWED_HOSTS` | `ntfy.sh` | Which hosts an ntfy topic URL may name. Your server makes the request, so this is the whole guard — see [ntfy](#ntfy) for the entry syntax |
+| `HABITERALL_BACKUP_DIR` | empty (off) | Where a nightly JSON backup is written — see [Scheduled backups](#scheduled-backups) |
+| `HABITERALL_BACKUP_SCHEDULE` | `03:00` | `HH:MM`, on the container's own clock — see [Scheduled backups](#scheduled-backups) |
+| `HABITERALL_BACKUP_KEEP` | `7` | How many dated backups to keep — see [Scheduled backups](#scheduled-backups) |
 | `MAX_UPLOAD_MB` | `16` | Ceiling on a backup being restored |
 | `BIND_ADDR` | empty | Which interface the published port appears on. Empty is every interface; `127.0.0.1` restricts it to a proxy on this host. Not `0.0.0.0`, which is IPv4 only |
 | `NODE_ENV` | `production` in both images | `production` turns on HSTS. See [Turning the guards off](#turning-the-guards-off) before unsetting it |
@@ -2087,7 +2148,7 @@ It travels in the JSON backup. The Android app does not read it yet; see issue
 
 ## API
 
-26 endpoints, identical in both editions. Dates are local calendar dates
+27 endpoints, identical in both editions. Dates are local calendar dates
 (`YYYY-MM-DD`).
 
 <details>
@@ -2111,6 +2172,7 @@ It travels in the JSON backup. The Android app does not read it yet; see issue
 | `GET` `PUT` `DELETE` | `/settings` | User preferences |
 | `POST` | `/notify/test` | Send a test notification to each configured destination |
 | `GET` | `/notify/status` | How each destination's last reminder went |
+| `GET` | `/backup/status` | Whether scheduled backups are on, and how the last one went |
 | `GET` | `/export`, `/export.csv`, `/export-loop.db` | Backups |
 | `POST` | `/import` | Restore — body is the raw file (`?mode=merge\|replace`) |
 

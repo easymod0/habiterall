@@ -154,6 +154,37 @@ db.exec(`
     at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
   );
 
+  -- The scheduled JSON backup's last outcome (issue #75), so a nightly job
+  -- failing quietly in a log nobody reads has somewhere to be SEEN — the same
+  -- reasoning as notify_status just above.
+  --
+  -- Not in the settings table, deliberately. This is the server reporting on
+  -- itself, not a preference: it is never sent by the client and never
+  -- included in a backup (GET /api/export carries portableSettings(...), not
+  -- this) — a backup DESTINATION inside a backup would be both a leak and a
+  -- loop.
+  --
+  -- 'date' is the local date the run BEGAN, not the date of the last attempt:
+  -- the tick runs every minute, so a "last attempt" column would be a write
+  -- on every one of the 1,440 ticks a day, where this is one claim per day and
+  -- doubles as the dedupe key dueBackup (shared/src/backup.js) reads.
+  --
+  -- One row, because there is one account and one schedule; the CHECK pins it,
+  -- same as device_clock and auth_credentials above.
+  CREATE TABLE IF NOT EXISTS backup_status (
+    id     INTEGER PRIMARY KEY CHECK (id = 1),
+    date   TEXT    NOT NULL,
+    -- 'running' | 'ok' | 'error'
+    state  TEXT    NOT NULL,
+    error  TEXT    NOT NULL DEFAULT '',
+    -- basename only — never the directory, which is the operator's own
+    -- compose configuration and not this app's to disclose (see the route).
+    file   TEXT    NOT NULL DEFAULT '',
+    bytes  INTEGER,
+    pruned INTEGER NOT NULL DEFAULT 0,
+    at     TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+  );
+
   -- What the last client to check in said its clock was, for 'auto'.
   --
   -- Its own table for the same reason notify_status has one: this is an

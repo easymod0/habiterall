@@ -348,6 +348,7 @@ Several layers, and they catch different things:
 | The same, over SQLite | `npm run test:summarycache -w habiterall-personal` | nothing |
 | The same cache under a FORCED race | `npm run test:summaryrace -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
+| The scheduled backup, and what it prunes | `npm run test:backup -w habiterall-personal` | nothing |
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
 | Award inputs, from storage | `npm run test:awards -w habiterall-personal` | nothing |
 | Whose day a route judges by | `npm run test:callerday -w habiterall-personal` | nothing |
