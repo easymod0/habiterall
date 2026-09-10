@@ -3412,38 +3412,45 @@ test('boundedRange(dates[0], end) equals boundedRange(start, end) for a real-day
 
   // A PINNED NON-IDENTITY. The identity above is not a property of
   // `boundedRange` in general — the comment above `computeCategoryStats`'
-  // per-member miss-run read says so, and this is what backs that claim: the
-  // clamp is a STRING comparison done before `dateRange` ever normalises, so
-  // a `start` that is not a real day can pass the clamp and only then roll to
-  // a date EARLIER than `earliest`. `phantomEnd - MAX_RANGE_DAYS` is
-  // `'2016-12-11'`; `'2017-00-05'` compares greater than that lexically, so
-  // the clamp does not fire on the first call, and only `dateRange`'s
-  // rollover reveals it is really `'2016-12-05'` — six days before
-  // `earliest`. Re-clamping THAT string through `boundedRange` fires the
-  // clamp this time, landing on `'2016-12-11'`, so the two ranges genuinely
-  // differ by six days rather than agreeing as the real-day cases above do.
+  // per-member miss-run read says so, and this is what backs that claim.
+  //
+  // The witness is a `start` whose rollover lands BELOW year 0100, because
+  // `fromISO`'s domain is years 1-9999 and `new Date(99, …)` is 1999, not
+  // 0099 (the same 0-99 case `isRealDay` documents). `'0100-00-00'` rolls
+  // legitimately to `'0099-11-30'`, so `dates[0]` is a date the walk spelled
+  // correctly and `fromISO` cannot read back — re-clamping through it
+  // measures the distance to 1999 instead, which is past `end`, so the
+  // second call answers `[]` where the first answered 96 days.
+  //
+  // Deliberately NOT the clamp-escape witness this test was first written
+  // with (`'2017-00-05'` against an `end` of `'2026-12-19'`, which opened six
+  // days before `earliest`): that one was the lexical clamp's own defect and
+  // is fixed, so a fixture resting on it would have to change meaning the day
+  // the clamp did. This witness holds under either comparison — verified
+  // against both — because it is about what `fromISO` can READ, not about
+  // what the clamp compares.
   //
   // Neither edition's `/categories/stats` can hand `computeCategoryStats`
   // this `start`: both put it through `queryDate` -> `assertDate` first,
-  // which refuses `'2017-00-05'` outright. So this is a documented
+  // which refuses `'0100-00-00'` outright. So this is a documented
   // non-identity kept off the reachable path by that guard, not a live bug in
   // the shared axis — worth pinning directly rather than left as a narrower
   // claim someone could re-derive as a general one.
-  const phantomStart = '2017-00-05';
-  const phantomEnd = '2026-12-19';
+  const phantomStart = '0100-00-00';
+  const phantomEnd = '0100-03-05';
   const phantomDates = boundedRange(phantomStart, phantomEnd);
   const reclamped = boundedRange(phantomDates[0], phantomEnd);
 
   // The mutation proof for this test is changing `phantomStart` to the
-  // real-day '2017-01-05': the two ranges then agree (as the identity above
+  // real-day '0100-01-30': the two ranges then agree (as the identity above
   // says a real-day start must), so THIS assertion — not the literal pins
   // below it — is what has to fail, or the test would be pinning a specific
   // pair of dates without ever checking they are required to differ at all.
   assert.notDeepEqual(reclamped, phantomDates,
     'fixture must genuinely differ from its own re-clamp — otherwise this proves nothing');
-  assert.equal(phantomDates.length - reclamped.length, 6);
-  assert.equal(phantomDates[0], '2016-12-05');
-  assert.equal(reclamped[0], '2016-12-11');
+  assert.equal(phantomDates.length, 96);
+  assert.equal(phantomDates[0], '0099-11-30');
+  assert.equal(reclamped.length, 0);
 });
 
 test('computeCategoryStats reads a member\'s recovery rate off the shared axis, agreeing with an independent computeMissRuns/computeRecovery call', () => {
