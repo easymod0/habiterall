@@ -289,7 +289,12 @@ const sw = self;
 // running worker's cache, so without this bump a shell can hold the new
 // `habit-dialog.js` over a cache with no `icon-field.js` in it at all — a
 // module link error before `start()` runs, and so outside `#view-error`.
-const CACHE_VERSION = 'v30';
+// v31: a new EXPORT, not a new file — `weekdayMonthReserve` in `charts.js`
+// (#285), imported STATICALLY by `ui/detail.js`. Same v20 case again: a shell
+// can serve the new `ui/detail.js` over a cached old `charts.js` with no such
+// export, a module LINK error before `start()` runs and so outside
+// `#view-error`. No file added or removed, so `SHELL` is unchanged.
+const CACHE_VERSION = 'v31';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

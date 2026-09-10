@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 const {
   computeStreaks, currentStreak, bestStreak, computeHistory,
-  computeWeekdays, computeFrequency, computeScores, computeStats, summaryStats,
+  computeWeekdays, computeWeekdayByMonth, computeFrequency, computeScores, computeStats,
+  summaryStats, computeCoverage, computeResilience,
   computeCategoryStats, computeMissRuns, computeRecovery, SCORE_WARMUP_DAYS, creditAnchor,
   summariseMembers, summariseByCategory,
   isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, fromISO, MAX_RANGE_DAYS,
@@ -197,7 +199,7 @@ test('a range whose year predates 1000 is spelled with four digits at both ends'
 
 test('every date this file spells is the day it is, spelled YYYY-MM-DD', () => {
   // The whole stats model compares dates as strings — `from <= date <= end`,
-  // `start < earliest`, `boundedRange`'s clamp — which is correct and cheap
+  // `windowStart`'s `from < earliest` clamp — which is correct and cheap
   // only while every date is spelled 'YYYY-MM-DD'. An unpadded year is the one
   // way a real day can be spelled shorter: '999-12-31' sorts ABOVE '2016-...',
   // so a date a thousand years in the past reads as one in the future to every
@@ -843,6 +845,159 @@ test('boundedRange leaves ordinary ranges untouched', () => {
 
 test('boundedRange returns nothing when start is after end', () => {
   assert.deepEqual(boundedRange('2026-12-31', '2026-01-01'), []);
+});
+
+test('boundedRange clamps a start that sorts above the cap but LANDS below it', () => {
+  // The clamp used to be a lexical `start < earliest`, and a phantom start can
+  // sort one side of the boundary while parsing to the other. With an `end` of
+  // '2026-12-19' the boundary is '2016-12-11', and '2017-00-05' sorts ABOVE it
+  // (2017 > 2016) while month 00 rolls back into the previous December, so the
+  // walk opened on 2016-12-05 and the range came back 3667 days long — past
+  // the one bound this function exists to enforce, on the one input class its
+  // JSDoc says callers reading a start out of STORAGE must rely on it for.
+  //
+  // 3661 is written out rather than taken from `MAX_RANGE_DAYS`: a test that
+  // imports the constant it checks would pass just as happily against a cap
+  // that had quietly moved, and pins the name instead of the boundary.
+  const r = boundedRange('2017-00-05', '2026-12-19');
+  assert.equal(r.length, 3661, `expected the cap, got ${r.length} days`);
+  assert.equal(r[0], '2016-12-11', 'the range must open on the clamp boundary');
+  assert.equal(r.at(-1), '2026-12-19', 'the end date must be preserved');
+
+  // The same string, one component at a time, so a fix that special-cased
+  // month 00 rather than comparing the calendar does not pass. A month of 13
+  // rolls FORWARD, which shortens the range instead of widening it, and is
+  // why the old overrun was bounded by about a month rather than by nothing.
+  assert.equal(boundedRange('2016-13-05', '2026-12-19')[0], '2017-01-05');
+  assert.equal(boundedRange('2017-00-31', '2026-12-19')[0], '2016-12-31');
+
+  // The BOUNDARY itself, in real days and to the day, because the assertions
+  // above are satisfied by a clamp that fires one day late: a mutation to
+  // `span < -MAX_RANGE_DAYS - 1` passed every other case in this file, the
+  // generated sweep below included, since none of them lands on the exact
+  // boundary and the differential steps over it.
+  assert.equal(boundedRange('2016-12-11', '2026-12-19').length, 3661, 'exactly at the cap');
+  assert.equal(boundedRange('2016-12-12', '2026-12-19').length, 3660, 'one inside the cap');
+  const overBy1 = boundedRange('2016-12-10', '2026-12-19');
+  assert.equal(overBy1.length, 3661, 'one day past the cap must clamp to it');
+  assert.equal(overBy1[0], '2016-12-11');
+
+  // An `end` in year 0100 — `assertDate`'s own floor, so a route can ask for
+  // one — is why the boundary is held as a `Date` and never respelled. Spelled
+  // out it lands in year 0090, and `fromISO('0090-…')` is `new Date(90, …)`,
+  // which `Date` resolves to 1990 — so a clamp that compared against the
+  // RE-PARSED boundary answered [] for this ordinary nine-day range.
+  const low = boundedRange('0100-02-25', '0100-03-05');
+  assert.equal(low.length, 9);
+  assert.equal(low[0], '0100-02-25');
+});
+
+test('no start, real or phantom, makes boundedRange exceed its cap', () => {
+  // The shapes matter more than the count here. A generator that emitted only
+  // real days could not have seen the defect above at all, so this constructs,
+  // for each of eleven years: month 00 and month 13 (both rollover
+  // directions), day 00, day 31 in a 30-day and in a 28-day month, 02-30,
+  // day 99, and the real days either side of each boundary — against ends that
+  // include a leap day, a month end, a DST fall-back day, `assertDate`'s
+  // year-0100 floor and year 9999, and with starts BOTH before and after every
+  // end so the inverted window is covered too.
+  const two = (n) => String(n).padStart(2, '0');
+  const ends = ['2026-12-19', '2026-08-12', '2020-02-29', '2026-02-28', '2026-11-01',
+    '0100-03-05', '9999-12-31'];
+  const starts = [];
+  for (const y of [100, 999, 1000, 1969, 2011, 2016, 2017, 2026, 2027, 2036, 9999]) {
+    for (const m of [0, 1, 2, 4, 12, 13, 99]) {
+      for (const d of [0, 1, 5, 28, 29, 30, 31, 99]) {
+        starts.push(`${String(y).padStart(4, '0')}-${two(m)}-${two(d)}`);
+      }
+    }
+  }
+
+  // The generator is only as good as what it actually emitted, so the shapes
+  // are counted rather than trusted: an off-by-one in the loops above would
+  // otherwise leave this asserting the cap over real days alone.
+  const phantom = starts.filter((s) => !isRealDay(s));
+  assert.ok(starts.some((s) => isRealDay(s)), 'no real day was constructed');
+  assert.ok(phantom.length > 300, `only ${phantom.length} phantom starts`);
+  for (const shape of ['2017-00-05', '2016-13-05', '2026-02-30', '2026-04-31', '2026-02-31',
+    '2026-01-00', '2026-01-99']) {
+    assert.ok(starts.includes(shape), `the generator never emits ${shape}`);
+  }
+
+  let clamped = 0;
+  let unmeasurable = 0;
+  for (const end of ends) {
+    for (const start of starts) {
+      const r = boundedRange(start, end);
+      // The cap is the invariant, and it is asserted for every shape.
+      assert.ok(r.length <= 3661,
+        `boundedRange('${start}', '${end}') spanned ${r.length} days`);
+      if (r.length === 0) continue;
+      assert.equal(r.at(-1), end, `boundedRange('${start}', '${end}') lost its end`);
+      if (r.length === 3661) clamped += 1;
+
+      // The two SHAPE checks below are measured with `daysBetween`, which
+      // cannot read back a year in 0000-0099: a start of '0100-00-00' rolls
+      // legitimately to 0099-11-30, and `fromISO('0099-11-30')` is 1999. The
+      // walk is right and the ruler is not, so those ranges are counted rather
+      // than asserted over — and the count is asserted, because a gate that
+      // silently swallowed the whole sweep would leave this test pinning only
+      // the line above.
+      if (!isRealDay(r[0])) { unmeasurable += 1; continue; }
+      assert.equal(daysBetween(r[0], r.at(-1)), r.length - 1,
+        `boundedRange('${start}', '${end}') is not a contiguous run`);
+      assert.ok(daysBetween(end, r[0]) >= -3660,
+        `boundedRange('${start}', '${end}') opened ${daysBetween(end, r[0])} days out`);
+    }
+  }
+  // And the cap was actually REACHED — an invariant nothing ever tests at its
+  // boundary is satisfied by a function that returns [] for everything.
+  assert.ok(clamped > 50, `the cap was only reached ${clamped} times`);
+  assert.ok(unmeasurable < 40, `${unmeasurable} ranges opened below year 0100`);
+});
+
+test('boundedRange answers exactly as the lexical clamp did for every REAL day', () => {
+  // The differential half: the fix must move nothing any route can ask for.
+  // `assertDate` guards every route's own date, and every anchor taken out of
+  // storage is filtered through `isRealDay`/`earliestRealDay` before it gets
+  // here (#270), so "route-reachable" is "both ends are real days" — and over
+  // those the two comparisons are provably the same, since for canonically
+  // spelled four-digit years lexical order IS calendar order.
+  //
+  // The reference is the pre-fix expression written out here, not an import:
+  // this is the one test in the pair that must keep passing if the clamp is
+  // reverted, which is what makes it a differential rather than a second copy
+  // of the test above.
+  const lexical = (start, end) => {
+    const earliest = addDays(end, -MAX_RANGE_DAYS);
+    const from = start < earliest ? earliest : start;
+    if (daysBetween(from, end) < 0) return [];
+    return dateRange(from, end);
+  };
+
+  let pairs = 0;
+  for (const end of ['2026-12-19', '2020-02-29', '2026-11-01', '0100-03-05', '1000-01-01']) {
+    // Every day from just outside the cap to just past `end`, which is the
+    // whole of the boundary either side of where the clamp fires.
+    // Every day, not every seventh: stepping over the boundary is how an
+    // off-by-one in the clamp survives a sweep this wide.
+    let start = addDays(end, -3670);
+    for (let i = 0; i <= 3690; i += 1) {
+      if (isRealDay(start) && isRealDay(end)) {
+        pairs += 1;
+        const got = boundedRange(start, end);
+        const want = lexical(start, end);
+        assert.equal(got.length, want.length,
+          `boundedRange('${start}', '${end}') changed length`);
+        assert.deepEqual([got[0], got.at(-1)], [want[0], want.at(-1)],
+          `boundedRange('${start}', '${end}') changed its ends`);
+      }
+      start = addDays(start, 1);
+    }
+  }
+  // 18,454 on this tree. Asserted as a floor so a generator that quietly
+  // stopped emitting pairs cannot leave this test passing over nothing.
+  assert.ok(pairs > 18000, `only ${pairs} real-day pairs compared`);
 });
 
 test('an empty history scores zero', () => {
@@ -3016,4 +3171,537 @@ test('issue #223: summaryStats takes a LIFETIME credit date, because /overview h
   assert.deepEqual(summaryStats(habit, skipOnly223(), {
     end: END_223, creditFrom: creditAnchor(null, END_223),
   }), { score: 0.051922, currentStreak: 1 });
+});
+
+/* ---------- #219: one shared `dates` walk, one shared on-pace series ---------- */
+
+test('computeStats agrees, field for field, with each pass called independently over the shared window', () => {
+  // Non-daily (3/7), so `onPaceSeries`'s leniency window is live — a daily
+  // fixture reduces it to `isCompleted` regardless of what `dates` a core is
+  // handed, and so could not see a core wired to the wrong window at all.
+  //
+  // Two skips (07-01, bridging nothing yet, and 08-20), a 4-day lapse
+  // (08-05..08-08, value 9 against an at-most target of 5), and a window from
+  // 2026-07-01 to 2026-09-15 so `history` (many buckets already, even daily),
+  // `weekdayByMonth` and `coverage` all see more than one bucket — July and
+  // August are both entirely CONTAINED by the window, which is what
+  // `computeCoverage` requires to report a month at all.
+  //
+  // `unlogged: 'success'` on an at-most habit makes the fixture sensitive to
+  // `creditFrom`: every unanswered day between the 10th (the first STATED
+  // row) and `end` reads as a success only once credit has begun, so a core
+  // handed the wrong `creditFrom` moves `weekdays`/`history`/`resilience`
+  // rather than leaving them unchanged.
+  const habit = {
+    type: 'numerical', target_value: 5, target_type: 'at_most',
+    freq_numerator: 3, freq_denominator: 7,
+  };
+  const entries = [
+    { date: '2026-07-01', value: 0, status: 'skip' },
+    { date: '2026-07-10', value: 3, status: '' },
+    { date: '2026-08-05', value: 9, status: '' },
+    { date: '2026-08-06', value: 9, status: '' },
+    { date: '2026-08-07', value: 9, status: '' },
+    { date: '2026-08-08', value: 9, status: '' },
+    { date: '2026-08-20', value: 0, status: 'skip' },
+    { date: '2026-09-10', value: 2, status: '' },
+    { date: '2026-09-11', value: 2, status: '' },
+    { date: '2026-09-12', value: 2, status: '' },
+    { date: '2026-09-13', value: 2, status: '' },
+    { date: '2026-09-14', value: 2, status: '' },
+    { date: '2026-09-15', value: 2, status: '' },
+  ];
+  const end = '2026-09-15';
+  const opts = { end, granularity: 'week', weekStart: 'sunday', unlogged: 'success' };
+
+  // `from` and `creditFrom` as LITERALS rather than derived by importing
+  // `resolveWindow`/`creditAnchor`: `from` is the earliest row of ANY kind
+  // (the skip on the 1st opens the window), `creditFrom` is the earliest row
+  // that STATES a value (the 10th) — the two differ, which is what lets this
+  // test see a pass handed the wrong one of them.
+  const from = '2026-07-01';
+  const creditFrom = '2026-07-10';
+
+  const stats = computeStats(habit, entries, opts);
+
+  // Pin the window itself before trusting anything computed over it.
+  const months = new Set(stats.coverage.map((m) => m.month));
+  assert.deepEqual([...months].sort(), ['2026-07', '2026-08']);
+  assert.equal(stats.history.length > 1, true);
+  assert.equal(stats.weekdayByMonth.length, 3); // July, August, September
+
+  // The window built once, by hand, exactly as `resolveWindow` builds it —
+  // this is what an independent call below is computed OVER, not a second
+  // reading of `computeStats`'s own internals.
+  const entryMap = new Map(entries.map((e) => [e.date, { value: e.value, status: e.status }]));
+
+  assert.deepEqual(stats.scores,
+    computeScores(habit, entryMap, from, end, opts.unlogged, creditFrom));
+
+  const streaks = computeStreaks(habit, entryMap, from, end, opts.unlogged, creditFrom);
+  assert.deepEqual(stats.streaks, streaks);
+  assert.equal(stats.currentStreak, currentStreak(streaks, end));
+  assert.equal(stats.bestStreak, bestStreak(streaks));
+
+  assert.equal(stats.totalCompleted, [...entryMap.entries()].filter(
+    ([date, v]) => date >= from && date <= end && isCompleted(habit, v) === true
+  ).length);
+
+  assert.deepEqual(stats.history,
+    computeHistory(habit, entryMap, from, end, opts.granularity, opts.weekStart, opts.unlogged,
+      creditFrom));
+  assert.deepEqual(stats.weekdays,
+    computeWeekdays(habit, entryMap, from, end, opts.unlogged, creditFrom));
+  assert.deepEqual(stats.weekdayByMonth,
+    computeWeekdayByMonth(habit, entryMap, from, end, opts.unlogged, creditFrom));
+  assert.deepEqual(stats.frequency,
+    computeFrequency(habit, entryMap, from, end, opts.weekStart, opts.unlogged, creditFrom));
+  // This is also the "called on their own" check for #219's shared build:
+  // `computeResilience` independently rebuilds its own `missRuns` via
+  // `computeMissRuns` (both
+  // exported, both unchanged in signature), so this one assertion is what
+  // catches `computeStats`'s SHARED `missRuns` (folded once from `onPace` by
+  // `missRunsFrom` and handed to `resilienceFrom`) disagreeing with what
+  // `computeStreaks`/`computeMissRuns`/`computeResilience` compute for
+  // themselves over the identical window — a wrong `creditFrom` on the shared
+  // build, or the two folds being fed the wrong series, moves this field and
+  // nothing else pins it.
+  assert.deepEqual(stats.resilience,
+    computeResilience(habit, entryMap, streaks, from, end, opts.unlogged, creditFrom));
+  assert.deepEqual(stats.coverage, computeCoverage(entryMap, from, end));
+});
+
+test('computeStats and summaryStats each build the shared `dates` array with exactly one boundedRange( call, with its own inventory', () => {
+  // A source-text guard cannot see a renamed binding or an inverted
+  // comparison — it does not travel alone. The equivalence test above (a core
+  // wired to the wrong `dates`, or to the wrong `creditFrom`/`weekStart`/
+  // `granularity`, or a core that MUTATES the shared array) and the
+  // invocation-count test below (a pass invocation count, at the boundary)
+  // are its behavioural neighbours.
+  const src = readFileSync(new URL('../src/stats.js', import.meta.url), 'utf8');
+  const lines = src.split('\n');
+
+  // Every `boundedRange(` / `dateRange(` call site (or definition — this is
+  // a raw text scan, not a parser) in the whole file, with its line number.
+  // Printed and counted so an empty or short list cannot be read as "the
+  // guard found nothing wrong" when it might mean "the pattern stopped
+  // matching anything at all".
+  //
+  // COMMENT-ONLY lines are skipped (a trimmed line starting `//`, `*`, `/*`
+  // or `*/`) — a raw text scan cannot tell a call site from the identifier
+  // merely being spelled inside an explanatory comment, and this happened
+  // while #219 was being written: a comment added to `stats.js` explaining
+  // one of these very call sites spelled `boundedRange(` in prose and pushed
+  // this count from 14 to 16, failing this guard over a line whose code
+  // nobody had touched, and distorting that comment's wording to appease it.
+  // Skipping
+  // comment lines is a text-shape check (does the line's own code, not its
+  // prose, contain the call), not a parse — a `//` appearing after real code on
+  // the same line would still be scanned as code, which is the same tradeoff
+  // the rest of this guard already makes.
+  const isCommentLine = (line) => {
+    const trimmed = line.trim();
+    return trimmed.startsWith('//') || trimmed.startsWith('/*') ||
+      trimmed.startsWith('*') || trimmed.startsWith('*/');
+  };
+
+  const inventory = [];
+  lines.forEach((line, i) => {
+    if (isCommentLine(line)) return;
+    if (/\bboundedRange\(/.test(line)) inventory.push({ line: i + 1, text: line.trim() });
+    if (/\bdateRange\(/.test(line)) inventory.push({ line: i + 1, text: line.trim() });
+  });
+  console.log('boundedRange/dateRange inventory: every site in stats.js');
+  for (const site of inventory) console.log(`  ${site.line}: ${site.text}`);
+
+  // Pinned as a literal, over the whole file, and the breakdown below adds up
+  // to it rather than to 13 — an earlier version double-counted the
+  // `dateRange` call inside `boundedRange`'s own body as "already counted" in
+  // the two definitions, when it is a third, distinct line:
+  // `dateRange`'s own definition (1), `boundedRange`'s own definition (1),
+  // the one `dateRange(` call inside `boundedRange`'s body (1) — 3 so far —
+  // one `boundedRange(` call per `*Over` wrapper (`computeScores`,
+  // `computeHistory`, `computeWeekdayByMonth`, `computeWeekdays`,
+  // `computeFrequency`, `computeCoverage` — 6, running total 9), one each
+  // inside `computeStreaks` and `computeMissRuns` (2, running total 11), one
+  // each inside `computeStats` and `summaryStats` (2, running total 13), plus
+  // `computeCategoryStats`'s own for its bucket axis (1, total 14). Its
+  // per-member miss-run reading (#219) now shares that same axis via
+  // `missRunsFrom(onPaceSeries(...))` rather than calling `computeMissRuns`
+  // again, which is neither a `boundedRange(` nor a `dateRange(` text match,
+  // so it does not add to this count either way.
+  assert.equal(inventory.length, 14);
+
+  // This is text BETWEEN TWO DECLARATIONS, not a function body a parser
+  // extracted — so the slice for `computeStats` runs up to and INCLUDES
+  // `summaryStats`'s own JSDoc block (everything between its declaration
+  // marker and the one before it), and likewise for `summaryStats` up to the
+  // section comment. This is a raw text slice on purpose, not a parser — the
+  // sharp edge of that choice, named rather than hidden.
+  //
+  // What stops the extra JSDoc mattering is that the count below drops
+  // COMMENT-ONLY lines, exactly as the inventory above does and for the same
+  // reason: an earlier version counted raw matches, so a `boundedRange(`
+  // written in prose anywhere inside the slice — including in the JSDoc this
+  // slice over-reaches into — inflated the count and failed the guard over a
+  // line nobody had touched. Both halves of this test now ask the same
+  // question of a line ("does its CODE call this", not "does it mention it"),
+  // which is what keeps the two consistent when one of them is edited.
+  // `bodyBetween` now also answers the SLICE's own start line, in the whole
+  // file, so the complement below can print an absolute line number rather
+  // than an offset into a substring nobody sees.
+  const bodyBetween = (startMarker, endMarker) => {
+    const start = src.indexOf(startMarker);
+    assert.notEqual(start, -1, `marker not found: ${startMarker}`);
+    const end = endMarker === null ? src.length : src.indexOf(endMarker, start);
+    assert.notEqual(end, -1, `marker not found after start: ${endMarker}`);
+    return { body: src.slice(start, end), startLine: src.slice(0, start).split('\n').length };
+  };
+
+  const countBoundedRangeCalls = (body) => body.split('\n')
+    .filter((line) => !isCommentLine(line))
+    .reduce((n, line) => n + (line.match(/\bboundedRange\(/g) ?? []).length, 0);
+
+  const computeStatsSlice = bodyBetween(
+    'export function computeStats(', 'export function summaryStats(');
+  const summaryStatsSlice = bodyBetween(
+    'export function summaryStats(', '/* ---------- comparing categories ---------- */');
+
+  assert.equal(countBoundedRangeCalls(computeStatsSlice.body), 1);
+  assert.equal(countBoundedRangeCalls(summaryStatsSlice.body), 1);
+
+  // THE COMPLEMENT. Counting `boundedRange(` text pins that the source spells
+  // one call; it does not pin that the function PERFORMS one walk. The way
+  // this regresses in practice is not by adding a second `boundedRange(` at
+  // these two sites — it is by calling an EXPORTED PASS WRAPPER
+  // (`computeScores`, `computeHistory`, …) instead of its private core
+  // (`scoresOver`, `historyOver`, …): the wrapper builds its own `dates` via
+  // its OWN `boundedRange(` call, which lives at the wrapper's definition and
+  // is already counted once in the inventory of 14 above — so restoring six
+  // of the eight walks #219 eliminated does not move either count above by
+  // even one. The missing denominator is "which functions must NOT be called
+  // here", so that is what this half asserts, directly, over the same two
+  // text slices.
+  //
+  // `currentStreak(` and `bestStreak(` are deliberately absent from this
+  // list — neither is a pass, both take an already-built `streaks` array —
+  // and so are the private cores/folds `computeStats`/`summaryStats` MUST
+  // call instead (`scoresOver`, `onPaceSeries`, `streaksFrom`, `missRunsFrom`,
+  // `resilienceFrom`, `historyOver`, `weekdaysOver`, `weekdayByMonthOver`,
+  // `frequencyOver`, `coverageOver`). None of those private names can trip
+  // this regex by accident: `\bcomputeStreaks\(` requires an OPEN PAREN
+  // immediately after the word `computeStreaks`, and `streaksFrom(`,
+  // `computeStats(` and `computeCategoryStats(` none of them have that
+  // character in that position — the next character is `F`, `(` only after
+  // `Stats`, and `C`, respectively — so the pattern cannot mistake a private
+  // core or the two functions being scanned for the export it is looking for.
+  const EXPORTED_PASSES = [
+    'computeScores', 'computeStreaks', 'computeMissRuns', 'computeResilience',
+    'computeHistory', 'computeWeekdays', 'computeWeekdayByMonth',
+    'computeFrequency', 'computeCoverage',
+  ];
+
+  // THE DENOMINATOR FOR THAT LIST, derived from the file rather than trusted.
+  // Without this the half of the guard below that asserts "zero exported
+  // passes are called here" is an empty offender list with nothing behind it:
+  // a name misspelled in the array above silently stops covering that pass
+  // forever, and a TENTH pass added later is not in the array at all, so
+  // `computeStats` could call its wrapper, walk twice, and fail nothing but
+  // the inventory literal — whose obvious and correct fix (a new wrapper
+  // really does add a `boundedRange(` site, so bump 14 to 15) then lands the
+  // regression green. That is this guard's own founding defect arriving
+  // through the one door it did not watch, and `shared/CLAUDE.md` states the
+  // rule it breaks: check that a guard SEES the sites it claims, because an
+  // empty offender list means nothing until the denominator is known.
+  //
+  // A "pass that walks" is derivable: an exported function containing a
+  // `boundedRange(` call of its own. That yields eight of the nine directly.
+  // `computeResilience` is the ninth and is deliberately not derivable this
+  // way — it walks TRANSITIVELY, through `computeMissRuns`, and holds no
+  // `boundedRange` call itself — so it is named here as the one exception
+  // rather than quietly missing from the comparison.
+  const TRANSITIVE_PASSES = ['computeResilience'];
+  const ENTRY_POINTS = ['computeStats', 'summaryStats', 'computeCategoryStats'];
+
+  const exportedNames = new Set();
+  const walkers = new Set();
+  let enclosing = null;
+  lines.forEach((line) => {
+    const declared = /^(export )?function (\w+)\s*\(/.exec(line);
+    if (declared) {
+      enclosing = declared[1] ? declared[2] : null;
+      if (enclosing) exportedNames.add(enclosing);
+    }
+    if (isCommentLine(line)) return;
+    if (enclosing && /\bboundedRange\s*\(/.test(line)) walkers.add(enclosing);
+  });
+
+  // `boundedRange` matches its own declaration line; it IS the clamp, not a
+  // pass over it. The three entry points hold the shared walk this whole
+  // change is about, which is the one call each is supposed to have.
+  const derived = [...walkers]
+    .filter((n) => n !== 'boundedRange' && !ENTRY_POINTS.includes(n))
+    .sort();
+  console.log(`exported passes derived from the file: ${derived.join(', ')}`);
+  assert.deepEqual(derived,
+    EXPORTED_PASSES.filter((n) => !TRANSITIVE_PASSES.includes(n)).sort(),
+    'the hand-written EXPORTED_PASSES list no longer matches the exported ' +
+    'functions that actually walk — a pass was added, removed or misspelled');
+
+  // And every name in the list is really an exported function here, which is
+  // what a typo in the array fails on rather than passing vacuously.
+  for (const name of EXPORTED_PASSES) {
+    assert.equal(exportedNames.has(name), true,
+      `EXPORTED_PASSES names ${name}, which is not an exported function in ` +
+      `stats.js — the guard has silently stopped covering it`);
+  }
+
+  // Same comment-line filter as the inventory and the bounded-range count
+  // above, for the same reason: a raw text scan cannot tell a call site from
+  // one of these names merely being spelled in a comment, and several of them
+  // legitimately are, right in this file's own JSDoc.
+  // Scanned over the JOINED body with `\s*` between the name and its `(`,
+  // not line by line, and that is the whole point rather than a detail.
+  // #184's guard matched a statement's name followed directly by `.run(`, so
+  // `(yielding ? insertEntryIfAbsent : insertEntry)\n  .run(...)` was not a
+  // weak match but NO match, and the one write path with no behavioural case
+  // beside it read as clean. A per-line scan here has exactly that hole:
+  // `weekdays: computeWeekdays\n  (habit, entryMap, from, end, ...)` restores
+  // a walk and matches nothing, because the name and its `(` are never on one
+  // line — and `\s*` cannot help a matcher that was handed one line at a
+  // time. This was checked rather than reasoned: the per-line version of this
+  // scan passed against that exact mutation.
+  //
+  // Comment lines are BLANKED rather than dropped, so the joined text keeps
+  // one entry per source line and a match's line number is still the real
+  // one. (Dropping them would shift every number after the first comment.)
+  //
+  // What no text scan can close is an alias — `const pass = computeWeekdays;
+  // pass(...)`. Nobody writes that here, and the derived denominator above
+  // plus the behavioural neighbours are what stand behind this guard for the
+  // shapes text cannot see.
+  const findCallsOf = (body, startLine, names) => {
+    const blanked = body.split('\n').map((line) => (isCommentLine(line) ? '' : line));
+    const joined = blanked.join('\n');
+    const lineOf = (index) => startLine + (joined.slice(0, index).match(/\n/g) ?? []).length;
+
+    const found = [];
+    for (const name of names) {
+      const re = new RegExp(`\\b${name}\\s*\\(`, 'g');
+      let m;
+      while ((m = re.exec(joined)) !== null) {
+        const line = lineOf(m.index);
+        found.push({ line, name, text: blanked[line - startLine].trim() });
+      }
+    }
+    return found.sort((a, b) => a.line - b.line);
+  };
+
+  for (const [label, slice] of [
+    ['computeStats', computeStatsSlice], ['summaryStats', summaryStatsSlice],
+  ]) {
+    const offenders = findCallsOf(slice.body, slice.startLine, EXPORTED_PASSES);
+    // Printed unconditionally, exactly as the inventory above is: an empty
+    // offender list means nothing until the reader can see what it was
+    // checked against.
+    console.log(`${label}: exported-pass calls found (expect none)`);
+    for (const o of offenders) console.log(`  ${o.line}: ${o.name}( — ${o.text}`);
+    assert.equal(offenders.length, 0,
+      `${label} must call zero exported pass wrappers; found ` +
+      `${offenders.map((o) => `${o.name}@${o.line}`).join(', ')}`);
+  }
+
+  // `computeCategoryStats` has a DELIBERATE asymmetry between its two
+  // per-member passes, and until now neither half of it was pinned:
+  //  - per-member MISS RUNS must call `computeMissRuns(` zero times. They
+  //    read `missRunsFrom(onPaceSeries(habit, entryMap, dates, ...))`
+  //    instead, sharing the same bucket-axis `dates` this function already
+  //    built for its own series — the fold #219 added.
+  //  - per-member SCORES must call `computeScores(` exactly once. That call
+  //    runs over `[memberWarm, end]`, a DIFFERENT and WIDER per-member
+  //    warm-up window than `dates`, so it deliberately keeps its own walk —
+  //    sharing `dates` with it would change every member's score. Pinning it
+  //    at exactly one, not merely "at least one", is what stops a future
+  //    "consistency" cleanup from folding this call into the shared axis the
+  //    way the miss-run call was folded — that would be the bug, not a fix,
+  //    and this row is the guard against it.
+  const computeCategoryStatsSlice = bodyBetween(
+    'export function computeCategoryStats(', null);
+
+  const missRunCalls = findCallsOf(
+    computeCategoryStatsSlice.body, computeCategoryStatsSlice.startLine, ['computeMissRuns']);
+  console.log('computeCategoryStats: computeMissRuns( calls found (expect none)');
+  for (const o of missRunCalls) console.log(`  ${o.line}: ${o.text}`);
+  assert.equal(missRunCalls.length, 0,
+    `computeCategoryStats must call computeMissRuns( zero times; found at ` +
+    `${missRunCalls.map((o) => o.line).join(', ')}`);
+
+  const scoreCalls = findCallsOf(
+    computeCategoryStatsSlice.body, computeCategoryStatsSlice.startLine, ['computeScores']);
+  console.log('computeCategoryStats: computeScores( calls found (expect exactly 1)');
+  for (const o of scoreCalls) console.log(`  ${o.line}: ${o.text}`);
+  assert.equal(scoreCalls.length, 1,
+    `computeCategoryStats must call computeScores( exactly once; found ${scoreCalls.length} ` +
+    `at ${scoreCalls.map((o) => o.line).join(', ')}`);
+});
+
+test('pass invocations counted at the boundary — a counting `freq_denominator` getter', () => {
+  // `habit.freq_denominator` is read at exactly two sites in stats.js — once
+  // per `computeScores`/`scoresOver` call and once per `onPaceSeries` call —
+  // and nowhere else in the file, in awards.js or in summary-cache.js. A
+  // counting getter therefore counts PASS INVOCATIONS exactly, insensitive to
+  // every per-day internal.
+  //
+  // On master, `computeStats` built the on-pace series TWICE — once via the
+  // exported `computeStreaks`, once via `computeResilience`'s
+  // `computeMissRuns` — so the count was 3: scores + onPace-via-streaks +
+  // onPace-via-missRuns. #219 shares that one series (built once, folded
+  // into `streaks` and `missRuns` by `streaksFrom` / `missRunsFrom`), so the
+  // third `onPaceSeries` call is gone and the count is
+  // now 2 — scores + the one shared onPace build. `summaryStats` never built
+  // the series twice (it only ever needed `streaks`), so its count stays 2
+  // unchanged throughout.
+  const countingHabit = (overrides = {}) => {
+    let reads = 0;
+    const habit = {
+      type: 'boolean', target_value: 0, target_type: 'at_least',
+      freq_numerator: 1,
+      ...overrides,
+    };
+    Object.defineProperty(habit, 'freq_denominator', {
+      get() { reads++; return 1; },
+      set() {},
+      enumerable: true,
+    });
+    return { habit, count: () => reads };
+  };
+
+  const entries = [
+    { date: '2026-08-10', value: YES }, { date: '2026-08-11', value: YES },
+    { date: '2026-08-12', value: YES },
+  ];
+  const end = '2026-08-12';
+
+  const stats = countingHabit();
+  computeStats(stats.habit, entries, { end });
+  assert.equal(stats.count(), 2);
+
+  const summary = countingHabit();
+  summaryStats(summary.habit, entries, { end });
+  assert.equal(summary.count(), 2);
+});
+
+/* ---------- #219: computeCategoryStats shares its axis walk with its
+   per-member miss runs ---------- */
+
+test('boundedRange(dates[0], end) equals boundedRange(start, end) for a real-day start, including when the clamp fires — and genuinely does not for a phantom one', () => {
+  // This is the claim `computeCategoryStats` relies on to read its per-member
+  // miss runs off the same `dates` it already built for the bucket axis,
+  // rather than re-walking `boundedRange(dates[0], end)`: for a REAL-day
+  // `start`, `dates[0]` already came out of the same clamp, so re-clamping it
+  // is a no-op. Asserted directly rather than assumed — and, below, shown to
+  // be exactly that narrow a claim rather than a general property of
+  // `boundedRange`.
+  const end = '2026-09-15';
+
+  // An ordinary window, nowhere near the clamp.
+  const start = '2026-07-01';
+  const dates = boundedRange(start, end);
+  assert.deepEqual(boundedRange(dates[0], end), boundedRange(start, end));
+
+  // And a `start` far enough back that MAX_RANGE_DAYS actually truncates it —
+  // "the clamp is a no-op on an already-clamped start" is meaningless unless
+  // some case here really clamped. `start` is 26+ years back, well past
+  // MAX_RANGE_DAYS' ten years.
+  const farStart = '2000-01-01';
+  const clampedDates = boundedRange(farStart, end);
+  assert.notEqual(clampedDates[0], farStart, 'fixture does not actually clamp — test proves nothing');
+  assert.deepEqual(boundedRange(clampedDates[0], end), boundedRange(farStart, end));
+
+  // A PINNED NON-IDENTITY. The identity above is not a property of
+  // `boundedRange` in general — the comment above `computeCategoryStats`'
+  // per-member miss-run read says so, and this is what backs that claim.
+  //
+  // The witness is a `start` whose rollover lands BELOW year 0100, because
+  // `fromISO`'s domain is years 1-9999 and `new Date(99, …)` is 1999, not
+  // 0099 (the same 0-99 case `isRealDay` documents). `'0100-00-00'` rolls
+  // legitimately to `'0099-11-30'`, so `dates[0]` is a date the walk spelled
+  // correctly and `fromISO` cannot read back — re-clamping through it
+  // measures the distance to 1999 instead, which is past `end`, so the
+  // second call answers `[]` where the first answered 96 days.
+  //
+  // Deliberately NOT the clamp-escape witness this test was first written
+  // with (`'2017-00-05'` against an `end` of `'2026-12-19'`, which opened six
+  // days before `earliest`): that one was the lexical clamp's own defect and
+  // is fixed, so a fixture resting on it would have to change meaning the day
+  // the clamp did. This witness holds under either comparison — verified
+  // against both — because it is about what `fromISO` can READ, not about
+  // what the clamp compares.
+  //
+  // Neither edition's `/categories/stats` can hand `computeCategoryStats`
+  // this `start`: both put it through `queryDate` -> `assertDate` first,
+  // which refuses `'0100-00-00'` outright. So this is a documented
+  // non-identity kept off the reachable path by that guard, not a live bug in
+  // the shared axis — worth pinning directly rather than left as a narrower
+  // claim someone could re-derive as a general one.
+  const phantomStart = '0100-00-00';
+  const phantomEnd = '0100-03-05';
+  const phantomDates = boundedRange(phantomStart, phantomEnd);
+  const reclamped = boundedRange(phantomDates[0], phantomEnd);
+
+  // The mutation proof for this test is changing `phantomStart` to the
+  // real-day '0100-01-30': the two ranges then agree (as the identity above
+  // says a real-day start must), so THIS assertion — not the literal pins
+  // below it — is what has to fail, or the test would be pinning a specific
+  // pair of dates without ever checking they are required to differ at all.
+  assert.notDeepEqual(reclamped, phantomDates,
+    'fixture must genuinely differ from its own re-clamp — otherwise this proves nothing');
+  assert.equal(phantomDates.length, 96);
+  assert.equal(phantomDates[0], '0099-11-30');
+  assert.equal(reclamped.length, 0);
+});
+
+test('computeCategoryStats reads a member\'s recovery rate off the shared axis, agreeing with an independent computeMissRuns/computeRecovery call', () => {
+  // Daily (1/1), so `onPaceSeries` has no leniency window to blur the effect
+  // of which days are IN the walked range — the thing this test needs to be
+  // sensitive to. One stated day (the 3rd) closes a two-day miss run
+  // (the 1st-2nd) and opens a second, still-open one (the 4th-5th) that runs
+  // to `end`.
+  const habit = {
+    type: 'boolean', target_value: 0, target_type: 'at_least',
+    freq_numerator: 1, freq_denominator: 1, category_id: 1,
+  };
+  const entries = [{ date: '2026-01-03', value: YES, status: '' }];
+  const start = '2026-01-01';
+  const end = '2026-01-05';
+
+  const result = computeCategoryStats(CATS, [{ habit, entries }], { start, end });
+  const health = result.categories.find((c) => c.id === 1);
+
+  // A category of one member reports that member's own rate as its mean —
+  // `recoveryRate` is exactly what this test needs to reach.
+  const entryMap = new Map(entries.map((e) => [e.date, { value: e.value, status: e.status }]));
+  const dates = boundedRange(start, end);
+  // `memberCredit` here: the habit's only stated row (the 3rd) is also its
+  // lifetime first stated answer, and it falls inside `[start, end]`, so
+  // `windowStart` (private, and not reached from a test) would return it
+  // unchanged — spelled as the literal it resolves to rather than by
+  // importing that function.
+  const memberCredit = '2026-01-03';
+  const expected = computeRecovery(
+    computeMissRuns(habit, entryMap, dates[0], end, UNLOGGED_DEFAULT, memberCredit), end
+  ).rate;
+
+  assert.equal(health.recoveryRate, 0, 'fixture must not already read 1 — the mutation would prove nothing');
+  assert.equal(health.recoveryRate, expected);
+
+  // Prove the fixture is actually sensitive to which day opens the range:
+  // dropping the 1st turns the closed 1st-2nd run into a one-day 2nd-only
+  // run, which DOES count as a recovery, moving the rate from 0 to 1. This is
+  // the same move the mutation proof (handing the miss-runs core
+  // `dates.slice(1)`) makes inside `computeCategoryStats` itself.
+  const droppedFirstDay = computeRecovery(
+    computeMissRuns(habit, entryMap, dates[1], end, UNLOGGED_DEFAULT, memberCredit), end
+  ).rate;
+  assert.equal(droppedFirstDay, 1, 'dropping the first day does not move the rate — fixture is insensitive');
 });

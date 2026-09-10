@@ -814,6 +814,50 @@ function handleGridKey(e, svg, cell, onPick, weekStart = 'monday') {
   }
 }
 
+// `weekdayMonthChart`'s own furniture, hoisted to module scope so there is
+// exactly one declaration of the gutter arithmetic — read by the chart's own
+// `pad` below AND by `ui/detail.js`, which must hand `columnsForWidth` this
+// chart's own reserve rather than the shared 46px default. Two declarations of
+// this arithmetic is the "two rules for one question" shape; one export both
+// sides can read is the point.
+const WM_ROW_LABEL_SIZE = 10.5;
+const WM_ROW_LABEL_GAP = 8;
+const WM_PAD_RIGHT = 12;
+
+// The row captions are `Intl`'s short weekday names, and those are `Mon` in
+// English, `niedz.` in Polish, `domingo` in pt-PT and `Jumamosi` in sw-KE. A
+// fixed 42px gutter fitted the first two and clipped the others mid-word —
+// measured in Chrome, pt-PT rendered `omingo`, `egunda`, `ábado`.
+//
+// So the gutter is sized from the labels rather than the labels chosen to fit
+// the gutter. `narrow` would fit everywhere and is what this deliberately
+// does NOT use: S/S and T/T are ambiguous and this axis is the whole point of
+// the chart. 42 stays the floor, so nothing narrows in the common case.
+/** The measured row-label gutter `weekdayMonthChart` draws with, at `width`. */
+const weekdayMonthGutter = (width) =>
+  gutterFor(weekdayNames('short'), WM_ROW_LABEL_SIZE, 42, WM_ROW_LABEL_GAP,
+            width * 0.32);
+
+/**
+ * Everything `weekdayMonthChart` spends on furniture that is not the plot
+ * area at `width` — its measured row-label gutter plus its right pad. This is
+ * what `columnsForWidth`'s `reserved` argument means for THIS chart: the
+ * shared 46px default is `scoreChart`'s and `historyChart`'s own fixed
+ * `pad.left + pad.right`, and it is wrong here because this chart's `pad.left`
+ * is measured and ranges 42–103px rather than sitting at a fixed 34.
+ *
+ * Read by the chart's own `pad` below, so the two can never disagree, and by
+ * `ui/detail.js`'s `weekdayByMonth` card, which must pass this to
+ * `windowedChart`'s `reserved` — handing `columnsForWidth` the shared default
+ * instead computes a column count for a plot area wider than this chart
+ * actually draws into, and `colW` (`Math.min(72, w / shown.length)`) falls
+ * below `MIN_SLOT.circle`, the very floor `columnsForWidth` exists to
+ * enforce.
+ */
+export function weekdayMonthReserve(width) {
+  return weekdayMonthGutter(width) + WM_PAD_RIGHT;
+}
+
 /**
  * Weekday consistency month by month: columns are months, rows are weekdays,
  * circle size and opacity are the completion rate.
@@ -829,21 +873,10 @@ function handleGridKey(e, svg, cell, onPick, weekStart = 'monday') {
 export function weekdayMonthChart(months, color,
                                   { width = 720, weekStart = 'monday' } = {}) {
   const rowH = 26;
-  const ROW_LABEL_SIZE = 10.5;
-  const ROW_LABEL_GAP = 8;
-  // The row captions are `Intl`'s short weekday names, and those are `Mon` in
-  // English, `niedz.` in Polish, `domingo` in pt-PT and `Jumamosi` in sw-KE. A
-  // fixed 42px gutter fitted the first two and clipped the others mid-word —
-  // measured in Chrome, pt-PT rendered `omingo`, `egunda`, `ábado`.
-  //
-  // So the gutter is sized from the labels rather than the labels chosen to fit
-  // the gutter. `narrow` would fit everywhere and is what this deliberately
-  // does NOT use: S/S and T/T are ambiguous and this axis is the whole point of
-  // the chart. 42 stays the floor, so nothing narrows in the common case.
   const rowLabels = weekdayNames('short');
   const pad = {
-    top: 30, right: 12, bottom: 8,
-    left: gutterFor(rowLabels, ROW_LABEL_SIZE, 42, ROW_LABEL_GAP, width * 0.32),
+    top: 30, right: WM_PAD_RIGHT, bottom: 8,
+    left: weekdayMonthGutter(width),
   };
   const height = pad.top + 7 * rowH + pad.bottom;
 
@@ -881,8 +914,8 @@ export function weekdayMonthChart(months, color,
   const order = weekOrder(weekStart);
   for (let d = 0; d < 7; d++) {
     svg.appendChild(el('text', {
-      x: pad.left - ROW_LABEL_GAP, y: pad.top + d * rowH + rowH / 2 + 4,
-      'text-anchor': 'end', 'font-size': ROW_LABEL_SIZE, fill: dim,
+      x: pad.left - WM_ROW_LABEL_GAP, y: pad.top + d * rowH + rowH / 2 + 4,
+      'text-anchor': 'end', 'font-size': WM_ROW_LABEL_SIZE, fill: dim,
       // The unambiguous name, for a reader who cannot tell two abbreviations
       // apart and for a screen reader.
     }, SHORT[d]));

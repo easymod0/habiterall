@@ -226,6 +226,55 @@ each fails differently — a version with any four of them still ships the bug:
   `replayable()` write on any network error, the 10s timeout included, while a
   GET is never pre-empted.
 
+  **The picker's own clear is `clearCategoryIfChosen`, and it is EXPLICIT
+  (issue #323).** `renderCategorySelect` no longer falls a non-empty unknown
+  `select.value` to "(none)" for any caller — it PRESERVES it behind
+  `(current category)` on every path, because a list that has not caught up
+  and an authoritative read from a device where the category was genuinely
+  deleted are indistinguishable to it, and only the second may ever clear the
+  habit's category. That leaves exactly two reasons a picker can be pointed at
+  an id `state.categories` no longer has, and only one deliberate clear
+  answers both: stale-or-not-caught-up must PRESERVE (the placeholder is the
+  whole of what protects it), and deliberately-removed must CLEAR — and the
+  only signal that tells them apart is "this handler just deleted this
+  category itself", which is not something a repaint can know on its own.
+  `clearCategoryIfChosen` is that signal, called by the ✕ delete handler in
+  both of its branches, before either one's repaint. There is exactly one
+  `DELETE /categories/:id` call site in the whole web UI
+  (`ui/habit-dialog.js`), so one call is all the WRITE needs.
+
+  **But one call site is not one path, and what the clear covers is the
+  CONTROL AS IT STANDS when that DELETE settles — not every dialog that will
+  later be opened.** Two orderings still reach `saveHabit` with a doomed id,
+  and both are worth knowing before adding a second clear that would answer
+  neither.
+
+  The first is PRE-EXISTING and #323 did not move it: offline, press ✕ on a
+  category, cancel, then open a DIFFERENT habit that was also in it. The
+  queued branch calls `categoryHint` rather than `announce()`, so no reload
+  has run and `state.habits` still carries the old `category_id` — so
+  `openDialog` renders it PINNED, which preserved an unknown id before #323
+  exactly as it does now, and the habit's own edit is dropped on replay. The
+  clear cannot help: it ran, correctly, against a control that was showing
+  something else at the time.
+
+  The second is #323's own accepted cost, and it is the deleted-ELSEWHERE half
+  of the same failure. An authoritative read lands (another device deleted the
+  category; `load()` installs the list without it), the picker PRESERVES it —
+  which is the whole point — and then this device's next write goes to the
+  outbox, needing no prior outage. That queued `PUT /habits/:id` carries the
+  doomed id, answers 400 on replay, and the whole edit is dropped behind the
+  same toast naming neither the habit nor the field. Before #323 that ordering
+  queued `category_id: null` and replayed 200, losing only a category the
+  server had already cleared. So the trade is stated plainly: a silent
+  uncategorisation on every Save became a loud refusal ONLINE and a lost edit
+  OFFLINE, and the online path is the ordinary one. It is a chosen cost, not
+  an oversight — `resolveCategoryId` is the authority on whether an id
+  resolves, and a pre-queue guard in `saveHabit` would be a second answer to
+  that question, in the browser, where the cold-deep-link case
+  (`state.categories === []`) has to stay allowed. Do not add one without
+  deciding that separately.
+
 **And the ticket is only half of what `load()` owed this field: the OTHER half
 is telling the dialog when its assignment DID land.** The five above are about
 a stale writer losing; this is about the newest writer being invisible to a
@@ -1329,6 +1378,28 @@ and `windowedChart` in `ui/components.js` adds the ‹ Earlier / Later ›
 controls. Paging
 strides by one less than the window so a column of context is shared between
 screens — `test/window.test.js` asserts no column is ever strandable.
+
+**`columnsForWidth`'s `reserved` is the CALLER's own non-plot width, and a
+chart whose gutter is MEASURED must pass its own (#285).** The `46` default is
+not a general-purpose figure — it is `scoreChart`'s and `historyChart`'s own
+literal `pad.left + pad.right`, which is why those two callers pass nothing.
+`weekdayMonthChart` measures its `pad.left` from the account's localised short
+weekday names instead of using a fixed one, so it is the one caller that
+passes its own figure — `weekdayMonthReserve(width)` (`charts.js`), read by
+both the chart's own `pad` and by `ui/detail.js` — rather than the shared
+default. Handing `columnsForWidth` a reserve narrower than the chart's real
+gutter computes a column count for a plot area wider than that chart actually
+has, and the per-column width it ends up with falls below `MIN_SLOT` — the
+very floor the function exists to enforce. `frequencyChart` is the trap this
+generalises to: it calls `gutterFor` too and still takes the shared default,
+because its `windowedChart` capacity (`density: 60`) is a vertical ROW count,
+and a horizontal gutter cannot constrain how many rows fit — a chart calling
+`gutterFor` is not by itself a reason to pass `reserved`. Do not widen the
+shared default for one caller's sake instead of giving that caller its own
+figure: a reverted `Math.max(46, …)` version of this did, and it cost `score`
+and `history` about 30% of their columns at every width, at every locale, to
+fix a defect neither chart had. See `docs/decisions/dashboard-and-detail.md`
+(#285) for the measured figures.
 
 **Connectivity needs more than the `online` event.** That event tracks the
 network interface, not the server, so a restarted server left the app stuck

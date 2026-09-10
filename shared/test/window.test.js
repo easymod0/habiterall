@@ -33,6 +33,19 @@ test('an explicit pixel figure overrides the named densities', () => {
   assert.equal(columnsForWidth(446, 100, 46), 4);
 });
 
+test('reserved is subtracted exactly, which is the whole of #285', () => {
+  // Literals, both, so the test states the two answers the bug is the
+  // difference between: `weekdayMonthChart`'s own gutter (78, a real pt-PT
+  // figure) against the shared default (46) it used to be handed instead.
+  assert.equal(columnsForWidth(328, 'circle', 78), 11);
+  assert.equal(columnsForWidth(328, 'circle', 46), 12);
+
+  // A caller passing 0 (a chart with no axis furniture to reserve for) must
+  // not be silently handed the 46 default — `reserved = 46` in the signature
+  // is a DEFAULT for an absent argument, not a fallback for a falsy one.
+  assert.equal(columnsForWidth(468, 'circle', 0), 21);
+});
+
 test('an unknown density name falls back rather than throwing', () => {
   assert.equal(columnsForWidth(500, 'nonsense'), columnsForWidth(500, 'bar'));
   // BUCKETERS-style prototype trap: '__proto__' is truthy on a plain lookup.

@@ -33,7 +33,20 @@ export const MIN_SLOT = {
  *
  * @param {number} width      usable pixels for the plot area
  * @param {keyof typeof MIN_SLOT|number} density  a MIN_SLOT key, or a pixel figure
- * @param {number} [reserved] axis labels and padding to subtract
+ * @param {number} [reserved] what the CALLER's chart spends on furniture that
+ *   is not the plot area — axis labels, padding — and NOT a guess: the `46`
+ *   default is `scoreChart`'s and `historyChart`'s own `pad.left + pad.right`
+ *   (34 + 12), which is why those two callers pass nothing. A caller whose
+ *   chart MEASURES its own gutter instead of using a fixed one must pass ITS
+ *   own figure — `weekdayMonthReserve` (`charts.js`) is the one that does,
+ *   because `weekdayMonthChart`'s row-label gutter runs 42–103px depending on
+ *   the account's locale. Get this wrong and the count is computed for a plot
+ *   area wider than the chart actually draws into, so the per-column width
+ *   the chart ends up with falls below `MIN_SLOT` — the very floor this
+ *   function exists to enforce. Do not widen this default for one caller's
+ *   sake (`Math.max(46, ...)` charges every OTHER caller too); do not make it
+ *   required either — a cached old caller under `shellFirst` would then hand
+ *   this `NaN` columns.
  * @returns {number} at least 1
  */
 export function columnsForWidth(width, density = 'bar', reserved = 46) {

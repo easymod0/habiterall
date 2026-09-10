@@ -3656,6 +3656,160 @@ try {
     `pressed ${JSON.stringify(pressedO.name)}, `
     + `landed at ${pressedO.landedAt} in ${JSON.stringify(pressedO.order)}`);
 
+  /* ---------- p: a category deleted elsewhere must not silently reset the
+     open dialog's picker to (none) (issue #323) ----------
+   *
+   * `renderCategorySelect` used to fall a non-empty, unrecognised `want` back
+   * to '' for every caller except `openDialog`'s own synchronous first
+   * render — so a background reload reaching this dialog after ANOTHER
+   * device deleted the very category it has open (the same delivery
+   * mechanism block `o` above uses for a reorder, one paragraph up) silently
+   * swapped the picker to "(none)" with nothing on screen saying so, and a
+   * plain Save then recorded an uncategorisation nobody asked for. The fix
+   * generalises the preserve to every path and moves the one deliberate
+   * CLEAR to the ✕ delete handler (`clearCategoryIfChosen`) — this block is
+   * the read-elsewhere half of that. No ✕ press happens here at all: the
+   * category is removed with a raw fetch against the API, standing in for
+   * another device or tab exactly as block `o`'s reorder does, so what is
+   * under test is the picker's reaction to a read it did not initiate, never
+   * the handler's own clear, which the existing delete-success assertion
+   * above ("the open form itself falls back to (none) when its own category
+   * is deleted") already covers — and which, after this fix, is green
+   * BECAUSE of that explicit clear rather than because of the fallback this
+   * block is about.
+   *
+   * Mutation target: put the `pinned` gate back on `renderCategorySelect`'s
+   * placeholder condition and restore
+   * `select.value = (known || pinned) ? want : ''`. Assertion 1 below must
+   * FAIL, naming an empty value where a placeholder id was expected, and
+   * assertion 2 must FAIL because the save succeeds and the dialog closes
+   * instead of being refused.
+   */
+  console.log('\n--- p: a category deleted elsewhere is preserved behind the placeholder, not silently cleared ---');
+
+  const pCategory = await ev(`(async()=>{
+    const r = await fetch('/api/categories', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Zzz P Category', color: '#123456' }) });
+    return r.json();
+  })()`);
+  const pHabit = await ev(`(async()=>{
+    const r = await fetch('/api/habits', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Zzz P Habit', type: 'boolean',
+        category_id: ${JSON.stringify(pCategory.id)}, color: '#111111' }) });
+    return r.json();
+  })()`);
+  ck('p sanity: the fixture habit carries the fixture category to start',
+    pHabit.category_id === pCategory.id, JSON.stringify(pHabit));
+
+  // A fresh navigation, joined, so the dialog `o` left open and the fixtures
+  // just created via the API both land on a page that actually knows about
+  // them.
+  await reloadAndWaitFor(ev,
+    `[...document.querySelectorAll('#grid .habit-row .habit-name')].some(n => n.textContent.trim() === 'Zzz P Habit')`,
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'a fresh dashboard showing the p fixture habit',
+    });
+  await openHabitByName('Zzz P Habit');
+
+  const beforeP = await selectedCategoryOption();
+  ck('p sanity: the open dialog shows the fixture category selected',
+    beforeP.text === 'Zzz P Category', JSON.stringify(beforeP));
+
+  // The other device: no ✕ press, just the DELETE itself, followed by the
+  // 'reload' a reconnect or another tab's write would emit —
+  // `dashboard.load()` answers it unconditionally (`ui/dashboard.js`), fetches
+  // the account's categories fresh, and installs them with `emit('categories')`,
+  // which `init()`'s listener in this file answers for the OPEN dialog.
+  await ev(`(async()=>{
+    await fetch('/api/categories/${pCategory.id}', { method: 'DELETE' });
+    (await import('/shared/ui/store.js')).emit('reload');
+    return true;
+  })()`);
+
+  // The store moving is what this block is downstream of, so it is the
+  // predicate — not the DOM, which is the thing under test, and not a sleep.
+  await waitUntil(ev, `(async()=>{
+    const s = (await import('/shared/ui/store.js')).state;
+    return !s.categories.some(c => String(c.id) === ${JSON.stringify(String(pCategory.id))});
+  })()`, { what: 'the deleted category to leave the store after the background reload' });
+
+  const afterDeleteP = await ev(`(()=>{
+    const select = document.querySelector('#habit-form [name=category_id]');
+    const opt = select.selectedOptions[0];
+    return { value: select.value, text: opt ? opt.textContent : null };
+  })()`);
+  ck('p: THE assertion 1: the picker still holds the deleted category, behind the placeholder',
+    afterDeleteP.value === String(pCategory.id) && afterDeleteP.text === '(current category)',
+    JSON.stringify(afterDeleteP));
+
+  // A second, distinctive field the save changes on purpose. `category_id` is
+  // already null server-side by now (ON DELETE SET NULL) whether or not the
+  // save below is refused, so it cannot be what tells a refused save apart
+  // from one that landed — `color` can, and is set to something neither the
+  // fixture's own value nor a default so a fixture comparing equal to itself
+  // cannot pass with the write silently let through.
+  const P_NEW_COLOR = '#abcdef';
+  await ev(`(()=>{
+    document.querySelector('#habit-form [name=color]').value = ${JSON.stringify(P_NEW_COLOR)};
+    document.getElementById('habit-form').requestSubmit();
+    return true;
+  })()`);
+  await waitUntil(ev, `document.getElementById('toast').textContent.includes('category not found')`,
+    { what: 'the refused save to report "category not found"' });
+
+  // Read AFTER the wait above, not before it — the dialog's open state is
+  // only meaningful once the loud refusal has actually landed.
+  const afterSubmitP = await ev(`(()=>({
+    open: document.getElementById('habit-dialog').open,
+    toast: document.getElementById('toast').textContent,
+  }))()`);
+  ck('p: THE assertion 2: the save is refused, loudly, and the dialog is left open',
+    afterSubmitP.open === true && afterSubmitP.toast.includes('category not found'),
+    JSON.stringify(afterSubmitP));
+
+  const afterServerP = await ev(`(async()=>{
+    const list = await (await fetch('/api/habits')).json();
+    return list.find(h => h.id === ${pHabit.id}) ?? null;
+  })()`);
+  ck('p: THE assertion 3: the refused save did not reach the server',
+    !!afterServerP && afterServerP.color === '#111111',
+    JSON.stringify(afterServerP));
+
+  // A CANCEL, so nothing behind the dialog is rebuilding — see the map of
+  // `dialog.open === false` waits a few hundred lines up for why this one
+  // needs no further join.
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the p fixture dialog to close before the guard check reopens one' });
+
+  // p: THE assertion 4, for the `want !== ''` guard specifically (mutation
+  // target: `if (!known)` in place of `if (want !== '' && !known)`). "New
+  // habit" opens uncategorised, so `want` is '' on purpose here — unlike `n`'s
+  // own New-habit dialog, which happens to start on '' but is never asked
+  // this question. Ungated, `renderCategorySelect` cannot tell that blank
+  // apart from an id it does not recognise and appends a SECOND option valued
+  // '' beside the real (none) option — this is what catches that, since none
+  // of the checks above ever look at how many blank options the control
+  // holds, only at what is SELECTED.
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the New-habit dialog to open for the (none)-duplication guard' });
+  const noneOptionsP = await ev(`(()=>{
+    const select = document.querySelector('#habit-form [name=category_id]');
+    const blanks = [...select.options].filter(o => o.value === '');
+    return { count: blanks.length, texts: blanks.map(o => o.textContent) };
+  })()`);
+  ck('p: THE assertion 4: the (none) option is never duplicated for an unrecognised empty want',
+    noneOptionsP.count === 1 && noneOptionsP.texts[0] === '(none)',
+    JSON.stringify(noneOptionsP));
+
+  await ev(`document.getElementById('dialog-cancel').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the dialog to close at the end of p' });
+
   console.log(fails ? `\n${fails} CHECK(S) FAILED` : '\nALL CATEGORY CHECKS PASSED');
 } catch (e) {
   console.log('ERROR:', e.message);

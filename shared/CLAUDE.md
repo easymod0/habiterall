@@ -224,6 +224,39 @@ aggregation in `stats.js` already uses `boundedRange`; keep it that way, because
 the unbounded `dateRange` on a distant-past entry turns one request into
 ~700,000 iterations on a single-threaded server.
 
+**`boundedRange`'s clamp compares two `Date`s, and that is the one comparison
+in this file that is deliberately not lexical.** It was
+`start < earliest`, and a phantom `start` can sort one side of that boundary
+while landing on the other: `2017-00-05` is lexically ABOVE an `earliest` of
+`2016-12-11` (2017 > 2016) while month 00 rolls back into the previous
+December, so the walk opened six days early and the range came back **3667**
+days — the cap escaped on exactly the input class the function's JSDoc tells a
+caller reading a start out of STORAGE to rely on it for. It is the argument and
+not the output that cannot be trusted, which is the same reasoning
+`dateRange`'s past-end trim already carries about `end`. Not reachable through
+a route today (`assertDate` guards route dates, `isRealDay`/`earliestRealDay`
+guard all six stored anchors — #270), and the overrun was ~one month at worst
+because month 13 rolls the other way; the guarantee is what was broken.
+The two DATES are compared, and neither their spellings nor the elapsed SPAN
+between them — both of those were written first and each is wrong, which is why
+they are named here rather than left to be re-derived. Comparing against a
+RE-PARSED `earliest` fails because `earliest` is a string this file spelled and
+`fromISO` cannot read every one of them back: an `end` of `0100-03-05` (year
+0100 is `assertDate`'s floor) puts the boundary in year 0090, which parses as
+**1990**, and clamping through it answered `[]` for nine ordinary year-0100
+ranges. Comparing the elapsed span against the cap fails for a subtler reason
+and only a zone finds it: `daysBetween` counts elapsed 24-hour spans while
+`setDate` takes CALENDAR steps, so under `Pacific/Apia`, which deleted
+2011-12-30 outright, 3,660 calendar steps back from 2020-02-29 land on
+2010-02-21 while the elapsed distance to 2010-02-20 is exactly −3,660 — the
+span test keeps a start the calendar boundary clamps. The whole of
+`stats.test.js` passes under that version; `test/timezones.test.js`, which
+re-runs the literals in a child process under a fixed `TZ`, is the only thing
+that catches it. So the boundary is built by the same calendar walk it always
+was, kept as a `Date`, and spelled only on the branch that returns it.
+Clamping a phantom start is not REFUSING one — where a window may open stays
+the caller's question, which is #303.
+
 **`dateRange` walks one local-time `Date` with `setDate`, never an epoch
 integer.** It used to re-derive every day from a string — two `fromISO` calls
 and a `toISO` per element — measured at 92% of `computeScores`' total time;
@@ -254,21 +287,44 @@ That makes `dateRange` the one place in the file that spells a date without
 calling `toISO`, so a test compares every element against `toISO` directly —
 every other assertion in that suite is a literal and would pin the wrong half.
 
-**Building the list is still the largest single line item, and the reason is no
-longer how it is built.** One `computeStats` calls `boundedRange` **eight
-times** on the identical window — once each in `computeScores`, `computeHistory`,
-`computeWeekdays`, `computeWeekdayByMonth`, `computeFrequency` and
-`computeCoverage`, and once per `onPaceSeries`, which `computeStreaks` and
-`computeMissRuns` each build separately. `/habits/:id/stats` is the only route
-left that calls `computeStats`, and pays for all eight; `coverage` still
-defaults to **true** there. `/overview` no longer calls `computeStats` at
-all — it calls `summaryStats`, which walks the window **twice**, instrumented
-and counted rather than read off the two call sites it makes: once in
-`computeScores` and once in `computeStreaks`'s `onPaceSeries`. Sharing one
-walk, and one `onPaceSeries`, inside `computeStats` is worth more than any
-further tuning of the loop; it is filed rather than done because it changes
-signatures or adds a cache, and it stays filed regardless of what `/overview`
-calls, because `/habits/:id/stats` still needs every one of the eight.
+**Building the list is one walk now, not eight, and building `onPaceSeries` is
+one build, not two (#219).** One `computeStats` call used to call
+`boundedRange` on the identical window eight times — once each in
+`computeScores`, `computeHistory`, `computeWeekdays`, `computeWeekdayByMonth`,
+`computeFrequency` and `computeCoverage`, and once per `onPaceSeries`, which
+`computeStreaks` and `computeMissRuns` each built separately — and built
+`onPaceSeries` itself twice for exactly that reason. `/habits/:id/stats`, the
+only route left calling `computeStats`, paid for all eight walks every time,
+`coverage` defaulting to **true** there. `summaryStats`, what `/overview` calls
+instead, walked the window twice for the same reason (`computeScores` and
+`computeStreaks`'s `onPaceSeries`). Both now walk once and build the series
+once, and `computeCategoryStats` now shares its own bucket-axis walk with the
+`computeMissRuns` call it runs per member — its per-member `computeScores` call
+keeps its own walk on purpose, because that one runs over a different,
+per-member warm-up window and sharing it would change scores.
+
+The shape is module-private `*Over(dates)` cores behind exported wrappers whose
+signatures did **not** change: `computeStats` / `summaryStats` /
+`computeCategoryStats` each build one clamped `dates = boundedRange(from, end)`
+and hand it to every core that needs it, while every exported pass — still
+called the old way by `summary-cache.js` and every test — builds its own
+`dates` and delegates to its core, unchanged in behaviour. This was chosen over
+a memo or a cache: `dateRange` trims its own array during the past-end walk, so
+a memo handing one retained array to many callers across calls is a hazard, and
+a cache is #191's eviction question, which this change does not re-open. The
+reason the cores are private is the one a future reader most needs: not being
+exported, and taking no optional `dates` parameter, means nothing outside
+`stats.js` can hand a pass an unclamped range — the `boundedRange` clamp stays
+reachable only through the wrappers and through the three entry points
+themselves, which is what makes it structurally inescapable rather than merely
+followed by convention.
+
+Measured on the same 1,464-row fixture, before -> after: `computeStats`
+(`coverage: true`, the `/habits/:id/stats` shape) 1.77 -> 1.20 ms/habit (-32%);
+`computeStats` (`coverage: false`) 1.65 -> 1.16 ms/habit (-30%); `summaryStats`
+(the `/overview` shape) 0.30 -> 0.22 ms/habit (-27%); `boundedRange` walks per
+`computeStats(coverage: true)` call, 8 -> 1; `onPaceSeries` builds per
+`computeStats` call, 2 -> 1.
 
 **One thing changed meaning with that rewrite, deliberately: the FIRST
 element.** The old walk pushed the string it was handed before normalising
@@ -284,7 +340,7 @@ the list is a contiguous run of days that happened, spelled one way.
 
 **A date is a real day spelled `YYYY-MM-DD`, and the padding is not
 cosmetic.** The whole stats model compares dates as strings — `from <= date <=
-end`, `start < earliest`, `boundedRange`'s clamp — which is correct and cheap
+end`, `windowStart`'s `from < earliest` clamp — which is correct and cheap
 only while every date has four year digits, two month digits and two day
 digits. `999-12-31` sorts ABOVE `2016-…`, so a day a thousand years in the past
 reads as one in the future to every comparison in the file. `toISO` pads all
@@ -638,13 +694,21 @@ every other arm is a PARTIAL comparator returning `0` on a tie, relying on
 tiebreak, since the incoming order is already `ORDER BY position, id`, a better
 fallback than `id` alone.
 
-**`recently missed` sorts by the end of the habit's last miss run
-(`computeMissRuns`), most recent first, and "never missed" and "missed longer
-ago than the window reaches" are the SAME answer** — the window is
+**`recently missed` sorts by the end of the habit's last miss run, most recent
+first, and "never missed" and "missed longer ago than the window reaches" are
+the SAME answer** — the window is
 `SCORE_WARMUP_DAYS` (400 days), so a habit that last missed 500 days ago sorts
 as never-missed. That is a real, accepted limitation, not an oversight: a wider
 window would cost every ordinary request to serve the rare account with a
 years-old habit.
+
+The figure comes from `missRunsFrom` over the series `summaryStats` has
+already built, never from `computeMissRuns` — that wrapper would rebuild both
+the walk and the on-pace series, which is exactly the duplicate #219 removed
+from `computeStats` and which this opt-in pass would otherwise reintroduce on
+the one route that asks for it. So `lastMiss` costs the run-detection fold and
+nothing more, and a sorted dashboard is cheaper than it was when this pass was
+first written against the eight-walk shape.
 
 **A habit with NO entries at all is not "never missed" under this sort — under
 the account's default `unlogged: 'miss'`, it sorts as missed TODAY, and that
