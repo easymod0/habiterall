@@ -188,6 +188,24 @@ each fails differently — a version with any four of them still ships the bug:
   `replayable()` write on any network error, the 10s timeout included, while a
   GET is never pre-empted.
 
+  **The picker's own clear is `clearCategoryIfChosen`, and it is EXPLICIT
+  (issue #323).** `renderCategorySelect` no longer falls a non-empty unknown
+  `select.value` to "(none)" for any caller — it PRESERVES it behind
+  `(current category)` on every path, because a list that has not caught up
+  and an authoritative read from a device where the category was genuinely
+  deleted are indistinguishable to it, and only the second may ever clear the
+  habit's category. That leaves exactly two reasons a picker can be pointed at
+  an id `state.categories` no longer has, and only one deliberate clear
+  answers both: stale-or-not-caught-up must PRESERVE (the placeholder is the
+  whole of what protects it), and deliberately-removed must CLEAR — and the
+  only signal that tells them apart is "this handler just deleted this
+  category itself", which is not something a repaint can know on its own.
+  `clearCategoryIfChosen` is that signal, called by the ✕ delete handler in
+  both of its branches, before either one's repaint. It is the ONE place this
+  needs saying: there is exactly one `DELETE /categories/:id` call site in the
+  whole web UI (`ui/habit-dialog.js`), so one explicit clear is complete
+  coverage of "deliberately removed" rather than a first case of several.
+
 **And the ticket is only half of what `load()` owed this field: the OTHER half
 is telling the dialog when its assignment DID land.** The five above are about
 a stale writer losing; this is about the newest writer being invisible to a

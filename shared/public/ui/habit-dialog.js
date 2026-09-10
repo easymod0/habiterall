@@ -249,6 +249,35 @@ function currentCategoryId() {
 }
 
 /**
+ * The one deliberate clear (issue #323): if the control is currently pointed
+ * at ID, blank it. This is the only signal that tells "this category was
+ * removed ON PURPOSE" apart from "this read of the account's categories has
+ * not caught up yet" — `renderCategorySelect` below no longer tells those two
+ * apart on its own, so whichever handler actually did the removing has to say
+ * so itself, before it repaints.
+ *
+ * It has to run BEFORE `repaintCategories()` / `refreshCategoryPicker()`:
+ * called with no argument, `renderCategorySelect` now PRESERVES a non-empty
+ * `select.value` it does not recognise behind the `(current category)`
+ * placeholder — which is exactly right for a list that has simply not caught
+ * up, and exactly wrong for an id the caller knows for a fact is gone. Run
+ * this first and the value it reads is already `''`, so the repaint that
+ * follows finds nothing to preserve.
+ *
+ * It reads `select.value` at CALL time rather than a value captured earlier,
+ * and that is what makes it safe across an `await`: `form.category_id` is one
+ * persistent element reused across every open, so "which dialog is open" is
+ * answered by reading it right now — exactly as `renderCategorySelect(undefined)`
+ * does — never by a ternary computed before the request went out, which is
+ * the exact defect `refreshCategoryPicker`'s own doc comment records this file
+ * having shipped twice.
+ */
+function clearCategoryIfChosen(id) {
+  const select = form.category_id;
+  if (select.value === String(id)) select.value = '';
+}
+
+/**
  * Rebuild the `<select>` from `state.categories`, keeping WANTED selected if
  * it still exists — a delete elsewhere in the account can remove the very
  * category this form had chosen.
@@ -268,8 +297,19 @@ function currentCategoryId() {
  * not belt-and-braces alongside that refetch, it is what saves a device that
  * never gets an answer.
  *
- * The placeholder below is for a real, EXPLICIT id only — `wanted` itself,
- * never the `select.value` fallback. `wanted === null` is its own answer
+ * The placeholder is now for ANY non-empty unknown value, not only a pinned
+ * one (issue #323): whether `want` arrived pinned (`openDialog`'s own render)
+ * or was read back off `select.value` (every other caller, below), a category
+ * this account no longer recognises must be kept behind
+ * `(current category)` rather than silently dropped to "(none)" — a list
+ * that has not caught up (this device's own `refreshCategoryPicker`, still in
+ * flight) and an authoritative read from a device where the category was
+ * genuinely deleted look identical to this function, and neither may
+ * uncategorise the habit on Save without the user having done anything. The
+ * ONE path that wants the picker actually cleared — the ✕ delete handler —
+ * does that itself, explicitly, through `clearCategoryIfChosen`, before ever
+ * calling back in here; this function no longer clears anything on its own.
+ * `wanted === null` is its own answer
  * ("this form has no category, stated": `openDialog` passes it for every
  * uncategorised habit and every create) and must still be free to land on
  * "(none)"; only `wanted === undefined` falls back to whatever the control
@@ -330,13 +370,26 @@ function renderCategorySelect(wanted) {
   // that loop could not find, so there is nothing here to label it with but a
   // neutral placeholder — a real name arrives, if it exists, the moment
   // `state.categories` does and this function runs again.
-  if (pinned && !known) {
+  //
+  // `want !== ''` is load bearing, not decoration: `''` is the (none) option's
+  // OWN value, and without this guard a stated `wanted === null` or an
+  // untouched-and-empty control (both of which reach here with `want === ''`)
+  // would append a SECOND option valued `''` and labelled
+  // "(current category)" — a duplicate (none) sitting in the dropdown.
+  if (want !== '' && !known) {
     const placeholder = document.createElement('option');
     placeholder.value = want;
     placeholder.textContent = '(current category)';
     select.append(placeholder);
   }
-  select.value = (known || pinned) ? want : '';
+  // Unconditional now, and safe BECAUSE of the placeholder above: after the
+  // loop and the placeholder, `want` is always one of the options actually
+  // present on the control — `''` (the (none) option), a known id (from the
+  // loop), or an unknown non-empty id (the placeholder just appended). That is
+  // what makes the old `(known || pinned) ? want : ''` redundant rather than
+  // merely replaceable — there is no longer a `want` this could land on that
+  // was not just given an option to be.
+  select.value = want;
 }
 
 /** The manage list: one row per category, ↑/↓ to reorder, ✎ for rename+recolour, ✕ to delete. */
@@ -501,16 +554,34 @@ function renderCategoryManage() {
         try {
           await api(`/categories/${c.id}`, { method: 'DELETE' });
           // ON DELETE SET NULL (db.js): its habits survive, uncategorised. If
-          // this form was pointed at the category just removed, it follows
-          // that back to "(none)" so Save cannot submit an id that no longer
-          // exists — and it does so with NO argument, because the refetched
-          // list is what answers this rather than anything captured here. A
-          // deleted id is not in the list, so `known` is false and the
-          // control falls to "(none)" on its own; any OTHER id still is, and
-          // is kept. This used to compute the answer eagerly instead
-          // (`form.category_id.value === String(c.id) ? null : …`), which was
-          // right about the outcome and wrong about the timing — see
-          // `refreshCategoryPicker`.
+          // this form was pointed at the category just removed, Save must not
+          // be left free to submit an id that no longer exists — but since
+          // issue #323 that is no longer something `refreshCategoryPicker`'s
+          // repaint does on its own: `renderCategorySelect` now PRESERVES an
+          // unrecognised `select.value` behind the "(current category)"
+          // placeholder on every path, precisely so a list that has not
+          // caught up elsewhere never silently uncategorises a habit. So the
+          // clear has to be explicit here, and it is: `clearCategoryIfChosen`
+          // reads the live control and blanks it if and only if it is still
+          // pointed at the category THIS press just deleted, before the
+          // repaint gets a chance to preserve it. It is not the eager
+          // capture this used to be wrong about
+          // (`form.category_id.value === String(c.id) ? null : …`, right about
+          // the outcome and wrong about the TIMING) — it reads the control
+          // AFTER the `await`, which is what makes it safe if this dialog has
+          // moved on to a different habit or been reused by the time the
+          // DELETE answers: a stale click can never blank a control it no
+          // longer describes.
+          //
+          // There is still a window, and it is accepted rather than closed: a
+          // user who reopens the dropdown and re-picks THIS category between
+          // this DELETE's reply and `refreshCategoryPicker`'s own GET landing
+          // gets it preserved behind the placeholder, and a loud
+          // "category not found" refusal on Save. That is the outcome issue
+          // #323 restores, not a regression — the alternative is a second
+          // clear after the repaint, which would leave a stale
+          // "(current category)" option sitting selectable in the dropdown.
+          clearCategoryIfChosen(c.id);
           await refreshCategoryPicker();
           announce();
         } catch (err) {
@@ -547,9 +618,23 @@ function renderCategoryManage() {
           // 10s `AbortSignal.timeout` included, while a GET is never
           // pre-empted and can still be answered from the network or from the
           // service worker's cache.
+          //
+          // The clear is explicit here too, and for the same reason as the
+          // success branch above (issue #323): it used to be a consequence of
+          // the row leaving `state.categories` — a deleted id was not in the
+          // list any more, so the old fallback blanked the control as a side
+          // effect of the filter below. That side effect is gone now that
+          // `renderCategorySelect` preserves an unrecognised value instead of
+          // dropping it, so without a call of its own the filter would still
+          // empty `state.categories` of the row while leaving the picker
+          // itself pointed at the id `saveHabit` must not be allowed to
+          // submit. This is the branch the WHOLE dropped-whole-habit-edit
+          // protection described above hangs on, so it may never be left to
+          // a fallback that no longer exists.
           if (err.queued) {
             ++state.categoryReadSeq;
             state.categories = state.categories.filter((x) => x.id !== c.id);
+            clearCategoryIfChosen(c.id);
             repaintCategories();
           }
           categoryHint(err.message, !err.queued);
