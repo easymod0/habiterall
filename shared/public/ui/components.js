@@ -163,11 +163,16 @@ export function cardInnerWidth(container) {
  *   — the day strip caps `columnsForWidth`'s answer by the account's
  *   `gridDays`, which is a preference this component has no business reading.
  *   Everything else about the paging is unchanged, including the clamp.
+ * @param {number} [opts.reserved]  what the chart about to be rendered spends
+ *   on furniture that is not the plot area, forwarded to `columnsForWidth`.
+ *   Ignored when `capacity` is given. `undefined` falls through to
+ *   `columnsForWidth`'s own default, which is what keeps this graceful under
+ *   `shellFirst` in both stale-shell directions.
  */
 export function windowedChart(opts) {
   const { card: host, key, items, density, width, render, labelOf, redraw } = opts;
 
-  const capacity = opts.capacity ?? columnsForWidth(width, density);
+  const capacity = opts.capacity ?? columnsForWidth(width, density, opts.reserved);
   const win = windowSlice(items, capacity, state.chartOffsets[key] ?? 0);
   // Write the clamped value back, so paging past an end does not leave a
   // stale offset that shifts the window on the next render.

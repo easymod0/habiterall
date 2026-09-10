@@ -1629,3 +1629,194 @@ a wider margin papers over every under-classified script at once and hides the
 next one the way these two were hidden. `columnsForWidth`'s default `reserved`
 was not touched, and the stride is still **#285**, which wants a decision rather
 than a number.
+
+## `columnsForWidth`'s reserve must come from the caller's own gutter (#285)
+
+#285 named two things and only one of them is a code change. Part 1 is the
+caption stride the sections above kept deferring to it; it is decided here,
+in prose, with no diff. Part 2 is `columnsForWidth`'s `reserved` argument
+handing `weekdayMonthChart` a column count for a plot area wider than the one
+it actually draws into — a real defect, fixed below.
+
+**Part 1: the greedy caption walk stays exactly as it is on master, and no
+code changed for it.** `weekdayMonthChart`'s caption placement (`charts.js`,
+the `CAPTION_GAP` / `drawn` / `lastRight` block) drops whichever caption
+collides with the last one DRAWN, reserving the last column first and filling
+in leftward — a variable gap along the axis, because the collision a long
+month name causes is not the same width as the collision a short one causes.
+The alternative, tried and reverted, was a constant stride: size `every` from
+the single WIDEST caption in the set and apply it to all twelve columns, so
+one long month name thins the whole axis rather than only the columns near it.
+Measured, that reversion cost: th-TH 12 captions down to 6 at 328px, ru-RU 12
+down to 6 at 390px, ja-JP and ko-KR 11 down to 6, el-GR 11 down to 6 at 358px,
+ml-IN and si-LK 5 down to 3, bn-IN 4 down to 3. #131's own objection to the
+greedy walk — that a variable gap is "an axis you have to count along" — is
+noted and overruled here: an axis you can count along at all beats one with
+half its months missing, and the variable gap is accepted as the lesser cost.
+
+**Part 2 is the fix.** `columnsForWidth(width, density, reserved = 46)`
+(`shared/public/ui/window.js`) answers how many columns of at least
+`MIN_SLOT[density]` pixels fit once `reserved` — the caller's own non-plot
+furniture — is subtracted. The `46` default is not a guess: it is
+`scoreChart`'s and `historyChart`'s own `pad.left + pad.right` (34 + 12), which
+is why those two callers pass nothing. `weekdayMonthChart`'s `pad.left` is
+never one of those fixed numbers — it is `gutterFor(weekdayNames('short'),
+10.5, 42, 8, width * 0.32)`, measured from the account's own localised short
+weekday names, floored at 42px and reaching 103px — so handing the shared
+default to `columnsForWidth` for that card computed a column count for a plot
+area 8–69px wider than the chart actually draws into, and `colW`
+(`Math.min(72, w / shown.length)` in `weekdayMonthChart`) came out below
+`MIN_SLOT.circle` (22) — the exact floor `columnsForWidth` exists to enforce.
+That range is `reserve − 46`, not `gutter − 46`, and the two are eleven pixels
+apart because the reserve carries `pad.right` as well: 8px in en-US (54 − 46)
+and 69px in bn-IN (115 − 46), whose 103px gutter is reachable at any
+`chartWidth ≥ 322px`, the width above which the `width * 0.32` ceiling stops
+binding it. An earlier draft of this paragraph differenced a gutter against a
+reserve and said 57px, which contradicted the 54px/115px figures given below
+it.
+The fix hoists the three furniture constants `weekdayMonthChart` used to
+declare function-locally to module scope in `charts.js` and adds one exported
+`weekdayMonthReserve(width)`, read by both the chart's own `pad` and by
+`ui/detail.js`'s `weekdayByMonth` card, which now passes
+`reserved: weekdayMonthReserve(chartWidth)` to `windowedChart`. There is
+exactly one declaration of the gutter arithmetic; the chart renders
+byte-identically to master in every locale, because nothing about the drawn
+geometry moved — only what `columnsForWidth` is told about it did.
+
+**The measured widths-under-`MIN_SLOT` sweep, over `gutterFor` and
+`columnsForWidth` at widths 320–1440, one run per locale under `LC_ALL`,
+counting widths where `min(72, (width - gutter - 12) /
+columnsForWidth(width, 'circle', 46)) < 22`:** en-US (short weekday gutter
+42px) 408 of 1121 widths, in 8px bands, one per column count — `332-339,
+354-361, 376-383, 398-405, …`; ja-JP (42px) the same 408, same bands; th-TH
+(49px) 764; and hi-IN (58px), pt-PT (66px), ne-NP (73px), lv-LV (74px), fa-IR
+(78px), ar-EG (78px) and bn-IN (103px) all **1121 of 1121 — every width
+measured.** With the reserve taken from the chart's own gutter
+(`weekdayMonthReserve`), **0 widths, in all ten locales.** So this is not a
+locale-only defect — en-US is wrong at 408 of 1121 widths on its own — but
+seven of the ten sweep locales are wrong at *every* width, which is what makes
+a locale-overridden browser assertion (`capacitycheck.mjs`, below) robust
+rather than fragile: pt-PT was picked for it because its 66px gutter puts
+every width the suite tries under the floor on the unfixed wiring.
+
+**Three-way capacity table, measured on this tree (columns; `score` /
+`history` / `frequency` are locale-independent, `weekdayByMonth` is shown at
+its master figure, its reverted-PR figure, and this PR's figure per locale):**
+
+- `score`: master 46 gives 47 / 52 / 57 / 112 / 232 columns at 328 / 360 / 390
+  / 720 / 1440px. The reverted `Math.max(46, ceil(width*0.32) + 12)` gives 35
+  / 38 / 42 / 79 / 161 — a cut of roughly 30% at every width. This PR gives
+  back master's own 47 / 52 / 57 / 112 / 232, unchanged, because `score`'s
+  reserve stays the fixed 46 it always was.
+- `history`: master 28 / 31 / 34 / 67 / 139; reverted 21 / 23 / 25 / 47 / 96;
+  this PR 28 / 31 / 34 / 67 / 139 — the same recovery, for the same reason.
+- `frequency`: master 4 / 5 / 5 / 11 / 23; reverted 3 / 3 / 4 / 7 / 16; this PR
+  4 / 5 / 5 / 11 / 23 — its reserve was never touched by either version, see
+  below.
+- `weekdayByMonth`: master 12 / 14 / 15 / 30 / 63; reverted 9 / 10 / 11 / 21 /
+  43 — fewer than THIS PR gives, and not because the reversion under-reserved
+  but because it over-reserved even here: `Math.max(46, ceil(width*0.32) + 12)`
+  is 117 / 128 / 137 / 243 / 473px at those five widths, against this chart's
+  real reserve of 54px in en-US and 115px in bn-IN, its widest measured. So
+  the reversion was wrong in the same direction for all four charts — it
+  charged three of them a reserve they had no gutter for, and charged the
+  fourth roughly twice the one it does. This PR, per locale: en-US 12 / 13 / 15 / 30 / 63,
+  pt-PT 11 / 12 / 14 / 29 / 61, hi-IN 11 / 13 / 14 / 29 / 62, th-TH 12 / 13 /
+  14 / 29 / 62 — never more than master, and only ever fewer by the 0–2
+  columns whose `colW` had fallen under 22px.
+
+So three charts keep every column master gave them, and only `weekdayByMonth`
+gives any up — never more than it has to, because the reserve is always ≥ 54
+and the new count can only be smaller than or equal to master's.
+
+**Measured in a real Chrome at pt-PT (`capacitycheck.mjs`), the four
+viewports' `chartWidth` and what each drew.** The card's `<svg>` `width`
+attribute reads 320px at a 360px viewport, 332 at 390, 694 at 768 and 1026 at
+1440. Under the UNFIXED wiring (`reserved` left at the shared 46 default) the
+chart drew columns at `colW` = 20.17 / 19.54 / 21.24 / 21.55px respectively —
+below the 22px `MIN_SLOT.circle` floor at all four. With the per-caller
+reserve, `colW` = 22.00 / 23.09 / 22.00 / 22.05, drawing 11 / 11 / 28 / 43
+columns of the 50 seeded month buckets — never the full 50, so the assertion
+that the pitch clears the floor is never vacuous: the window stayed
+capacity-limited at every viewport, including 1440px.
+
+**Why the default stays 46 rather than widening.** It is `scoreChart`'s and
+`historyChart`'s own `pad.left + pad.right`, restated nowhere else, and it is
+a default rather than a required parameter deliberately: a REQUIRED `reserved`
+would hand a cached old caller under `shellFirst` — one still calling
+`columnsForWidth(width, density)` with no third argument — `NaN` columns
+instead of the 46 it was written against. The reverted change widened the
+shared default itself to `Math.max(46, ceil(width*0.32) + 12)`, which exceeds
+46 above ~106px and so charged `score`, `history` and `frequency` a reserve
+sized for `weekdayMonthChart`'s benefit at every width — the ~30% cut in the
+first bullet of the table above. This fix instead gives the one caller whose
+gutter is measured its OWN figure, and leaves the shared default exactly as it
+was for the three callers it was already right for.
+
+**The `frequencyChart` correction: the issue is wrong that it needs a wider
+reserve, and its numbers do not move.** `frequencyChart` does call `gutterFor`
+(its own `pad.left`), so it looks like the same shape as `weekdayByMonth` — but
+its `windowedChart` capacity is `density: 60`, a VERTICAL row count (months
+per row; see the comment above `buildFrequencyCard` in `ui/detail.js`), and a
+horizontal gutter cannot constrain how many rows fit. `ui/detail.js`'s
+`frequency` call site carries a comment naming #285 and stating this
+plainly, deliberately with no `reserved:` argument, so the next reader does
+not re-derive the issue's claim.
+
+**The `weekcheck.mjs` correction: the issue is wrong that nothing in CI would
+have caught this.** `weekcheck.mjs` is in `SCRIPT_SUITES` in
+`shared/test/locales.mjs`, which `npm run test:locales` runs under ten
+`LC_ALL`s including `pt_PT.UTF-8` and `hi_IN.UTF-8` — two of the seven locales
+above that are wrong at every width on the unfixed wiring, both of which
+distinguish the old reserve from the new one. `shared/test/window.test.js` is
+in that sweep's `SUITES` too. So `weekcheck.mjs` was always a legitimate home
+for the rendered-geometry half of this defect, and CI already ran it in a
+discriminating locale before this fix landed; what CI could not have caught is
+that nobody had yet asked `weekcheck.mjs` the RIGHT question about it.
+
+**Why there are two test halves, and what each one cannot see.**
+`weekcheck.mjs`'s new `#285` block (offline, a fake DOM, ten-locale sweep)
+proves `weekdayMonthReserve` is a CORRECT reserve for the chart it describes —
+Check A that the drawn pitch clears 22px, Check B that the reserve equals the
+chart's own rendered `pad.left + 12` so the two can never drift apart, Check C
+that the window drew every column it claims so neither check is vacuous. It
+cannot prove `ui/detail.js` ever calls `weekdayMonthReserve`, or that
+`windowedChart` forwards what it is handed to `columnsForWidth` — neither
+`detail.js`'s card builders nor `components.js`'s `windowedChart` are
+reachable from a fake DOM. `capacitycheck.mjs` (a real server, a real Chrome,
+`pt-PT` locale override) is the wiring half: it proves the pitch clears the
+floor on the actual rendered "Weekday consistency" card, reached by clicking
+into a seeded habit rather than by calling `weekdayMonthChart` directly.
+
+Mutation M6 is the recorded evidence that the split is not redundant:
+dropping `windowedChart`'s forwarding of `opts.reserved` back to
+`columnsForWidth(width, density)` with no third argument fails
+`capacitycheck` at all four viewports, naming the pitch — and leaves
+`weekcheck.mjs` and `window.test.js` **both still passing**, because neither
+suite ever calls `windowedChart` at all. A fake-DOM suite that pins the
+DECISION cannot see a caller that stops using it.
+
+Two more mutations sharpen what each check inside `weekcheck.mjs` actually
+covers, found by running them rather than by predicting them. Mutation M2 —
+`weekdayMonthChart`'s `pad.left` hardcoded to the literal `42` instead of
+`weekdayMonthGutter(width)`, with `weekdayMonthReserve` itself untouched —
+fails Check B (the reserve no longer equals the rendered `pad.left + 12`) in
+every locale whose gutter exceeds 42px, and **never fails Check A**: `n` is
+computed from the untouched, correct reserve, and a `pad.left` forced smaller
+than that reserve only ever WIDENS the plot area for that fixed `n`, so
+`colW` cannot drop below the floor. An earlier prediction said Check A would
+fail too; it does not, and Check B is the only one of the three that can see a
+reserve/chart drift at all. Mutation M3 — `weekdayMonthReserve` returns a
+constant `46` — fails `npm run test:locales` in **all ten** locales the sweep
+runs, not only the seven whose gutter exceeds 42px: en-US and ja-JP also carry
+8px bad bands at some of the nine widths `weekcheck.mjs` tests, from the sweep
+above, so a reserve stuck at 46 is wrong there too, just not at every width.
+
+**The `CACHE_VERSION` bump.** `weekdayMonthReserve` is a new EXPORT from
+`charts.js`, not a new file, and `shellFirst` is stale-while-revalidate: a
+running worker can serve the new `ui/detail.js`, which now statically imports
+`weekdayMonthReserve`, over a cached OLD `charts.js` with no such export — a
+module link error before `start()` runs, outside `#view-error`, exactly the
+v20 case this rule already covers. `CACHE_VERSION` moves `'v30'` → `'v31'` in
+`shared/public/sw.js`; `SHELL` itself is unchanged, since no file was added or
+removed.

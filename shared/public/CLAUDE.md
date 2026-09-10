@@ -1292,6 +1292,28 @@ controls. Paging
 strides by one less than the window so a column of context is shared between
 screens — `test/window.test.js` asserts no column is ever strandable.
 
+**`columnsForWidth`'s `reserved` is the CALLER's own non-plot width, and a
+chart whose gutter is MEASURED must pass its own (#285).** The `46` default is
+not a general-purpose figure — it is `scoreChart`'s and `historyChart`'s own
+literal `pad.left + pad.right`, which is why those two callers pass nothing.
+`weekdayMonthChart` measures its `pad.left` from the account's localised short
+weekday names instead of using a fixed one, so it is the one caller that
+passes its own figure — `weekdayMonthReserve(width)` (`charts.js`), read by
+both the chart's own `pad` and by `ui/detail.js` — rather than the shared
+default. Handing `columnsForWidth` a reserve narrower than the chart's real
+gutter computes a column count for a plot area wider than that chart actually
+has, and the per-column width it ends up with falls below `MIN_SLOT` — the
+very floor the function exists to enforce. `frequencyChart` is the trap this
+generalises to: it calls `gutterFor` too and still takes the shared default,
+because its `windowedChart` capacity (`density: 60`) is a vertical ROW count,
+and a horizontal gutter cannot constrain how many rows fit — a chart calling
+`gutterFor` is not by itself a reason to pass `reserved`. Do not widen the
+shared default for one caller's sake instead of giving that caller its own
+figure: a reverted `Math.max(46, …)` version of this did, and it cost `score`
+and `history` about 30% of their columns at every width, at every locale, to
+fix a defect neither chart had. See `docs/decisions/dashboard-and-detail.md`
+(#285) for the measured figures.
+
 **Connectivity needs more than the `online` event.** That event tracks the
 network interface, not the server, so a restarted server left the app stuck
 offline until a manual reload. `watchConnectivity` also re-probes on

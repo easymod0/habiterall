@@ -9,6 +9,7 @@
 import {
   calendarChart, frequencyChart, historyChart, MIN_STREAK, missDistributionChart,
   scoreChart, shade, streakChart, streakDates, survivalChart, weekdayChart, weekdayMonthChart,
+  weekdayMonthReserve,
 } from '/shared/charts.js';
 import { formatAmount } from '/shared/ui/amount.js';
 import { api } from '/shared/ui/api.js';
@@ -1594,6 +1595,15 @@ function buildWeekdayMonthsCard({ habit, stats, color, chartWidth }) {
     key: 'weekdayByMonth',
     items: stats.weekdayByMonth,
     density: 'circle',
+    // This chart's own row-label gutter is MEASURED from the localised short
+    // weekday names and runs 42–103px, not the shared default's fixed 46 —
+    // `scoreChart`'s and `historyChart`'s own `pad.left + pad.right`. Handing
+    // `columnsForWidth` the default claimed columns whose `colW`
+    // (`Math.min(72, w / shown.length)`) fell below `MIN_SLOT.circle` in seven
+    // of ten sweep locales at every width, and in en-US at 408 of 1121 widths
+    // measured (#285). The reserve has to come from the gutter this chart is
+    // about to draw with.
+    reserved: weekdayMonthReserve(chartWidth),
     width: chartWidth,
     labelOf: (m) => formatStamp(m.month),
     redraw: () => open(habit.id),
@@ -1619,6 +1629,11 @@ function buildFrequencyCard({ habit, stats, color, chartWidth }) {
     key: 'frequency',
     items: stats.frequency,
     density: 60,   // ~12 rows on a typical card
+    // No `reserved` here, deliberately (#285). `frequencyChart` calls
+    // `gutterFor` too, but this card's capacity is a VERTICAL row count —
+    // months per row, per the comment on `buildFrequencyCard` above — and a
+    // horizontal gutter cannot constrain how many rows fit. The 46 default is
+    // left alone on purpose; this chart's numbers do not move.
     width: chartWidth,
     labelOf: (m) => formatStamp(m.month),
     redraw: () => open(habit.id),
