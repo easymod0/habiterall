@@ -1,0 +1,108 @@
+# Native stats for one habit, and the second chart implementation it would create (#171)
+
+Moved out of #171, filed because #145 (open: a stats widget for one habit and
+an overview widget for all of them) raised the question of a native stats
+screen and should not be the place it gets answered. Nothing here is loaded
+automatically. It has three separable parts, and only two of them are work —
+the third is the recommendation this file exists to record.
+
+Every other screen in the native client is Compose — `ArchiveScreen`,
+`DayGrid`, `HabitFormScreen`, `HabitList`, `ReorderScreen`, `SettingsScreen`,
+`SignInScreen`. Stats and the calendar are the exception: tapping a habit
+opens `WebScreen`, the app's one long-lived WebView, on `#/habit/:id`.
+
+## 1. A stale comment, worth fixing whatever this concludes
+
+`android-native/app/build.gradle.kts:134-135`, beside the `androidx.browser`
+dependency, still reads (checked against the tree this record was written
+against):
+
+> Stats and the calendar are the server's own web UI, shown in a **Custom
+> Tab** so there is one implementation of the charts rather than two.
+
+**The Custom Tab is no longer how Stats works.** `MainActivity.openInBrowser`
+says so in as many words — it is kept only for a user who wants the site in
+their own browser, with their own extensions and password manager. Stats is
+`WebScreen`, in-app, since the warm-WebView change. The dependency comment
+describes a container that path stopped using, and anyone reading it to find
+the recorded decision finds a wrong one. Correcting it to name `WebScreen` is
+five minutes of work and needs no decision — it is the one part of this issue
+that was unambiguously worth doing on its own, independent of what the rest of
+this record concludes.
+
+## 2. `Api.stats(habitId)` — the prerequisite shared with #145
+
+**`Api.kt` has no stats call at all**, confirmed against the tree: `overview`,
+`habits`, `entries`, `setEntry`, `setReminder`, `createHabit`, `updateHabit`,
+`reorderHabits`, `settings` — nothing reaches `/habits/:id/stats`.
+
+Either a native stats screen or #145's widget needs, first:
+
+- `Api.stats(habitId)` and a Kotlin model for what it returns;
+- the cache-the-answer decision made concrete: which fields are stored,
+  where, and how staleness is marked;
+- score and streak formatting, with the avoided-habit inversion applied once.
+
+That is roughly 150 lines and it is the entire architectural content shared
+between this issue and #145. It should be built once, by whichever lands
+first, and #145 is much the smaller of the two — so in practice #145 should
+carry it and a native stats screen, if ever built, should inherit it.
+
+**`computeScores` must not be mirrored**, and this is the temptation the
+prerequisite creates. Loop's `0.5^(sqrt(frequency)/13)` decay is pinned at
+days 13, 30 and 60 (`shared/CLAUDE.md`, `must-stay-fixed.md`). The root rule
+is that a client mirrors a rule only if it must work offline, and the answer
+here is the one #145 reaches: cache the ANSWER from `GET /habits/:id/stats`,
+not the rule. A native screen makes the mirror tempting in a way the current
+WebView does not, and that temptation should be refused in a comment at the
+fetch site, not in an issue.
+
+## 3. The native screen itself — "a bounded summary, or nothing"
+
+The cheap win has already been taken, which is why building the rest is not
+obviously worth it:
+
+- **The WebView is warm.** One instance for the life of the activity, laid
+  out and measured from the moment the server is known, invisible rather than
+  absent. The renderer process, TLS, the shell and the service worker are all
+  paid before the tap.
+- **Habit to habit is not a page load at all.** `#/habit/42` to `#/habit/43`
+  is a fragment change on a parsed document, handled by `routes.js` as a
+  same-document navigation — the payoff for the fragment routing chosen for
+  this client.
+
+`WebScreen.kt`'s header comment records the stutter the warm-WebView change
+removed and why `about:blank` was chosen over pre-loading the dashboard.
+
+**What a native screen would genuinely buy:** it works offline (the WebView
+does not, beyond what the service worker cached, and the app is otherwise
+offline-first); it is testable in-process (Compose UI tests reach nothing
+inside `WebScreen`); it is consistent with every other screen; and Compose
+can draw on a `Canvas`, unlike `RemoteViews`.
+
+**What it costs is the whole issue: a second implementation of the charts,
+drifting invisibly.** `charts.js` is over 1,400 lines exporting ten chart
+functions; `ui/detail.js` draws nine cards (`DETAIL_CARDS`: strength,
+calendar, streaks, resilience, awards, history, weekdays, weekdayMonths,
+frequency), and each would need a native equivalent or a written-down
+omission. A Kotlin copy is worse than the ~1,750 lines of frontend that
+drifted across the two editions before being merged back (`CLAUDE.md`),
+because it cannot be merged back the same way: there is no shared module a
+Compose chart and an SVG chart can both live in. The two are different
+rendering technologies on the same data, not two copies of the same file.
+
+## The recommendation
+
+**A bounded summary, or nothing.** Not a full native stats screen — the cost
+above is real and does not shrink — and not simply closing the question
+either, because the WebView's genuine gaps (offline, testability,
+consistency) are real too. The affordable middle is a small, native-drawn
+summary (score, current streak, best streak — the same fields #145's widget
+already needs) that reads the cached answer from `Api.stats`, with the full
+chart set staying in `WebScreen` for whoever opens the detail view. That
+keeps `charts.js` and `ui/detail.js` as the one implementation of the nine
+cards, and spends the Compose investment only on the numbers cheap enough to
+duplicate without inheriting the chart-drift risk.
+
+Building `Api.stats` for #145 first, and reusing it here rather than
+inventing a second cache shape, is what makes that affordable at all.
