@@ -520,4 +520,115 @@ the call site. The JDK's own `com.sun.net.httpserver.HttpServer` would be the
 dependency-free alternative, if pulling in OkHttp's test artifact is ever
 worth avoiding.
 
+**`Widgets.encodeHistory` had no test, and a KDoc claimed one that did not
+exist — this repo's most-shipped defect, worked in full.** The function was
+correct. What was missing was a test reaching it: grep the test tree at the
+time of review and the only line naming `encodeHistory` was a KDoc comment in
+`StatsWidgetTest.kt` claiming `WidgetTest` pinned it. It did not. Every strip
+test in that file hand-wrote a `history` literal, and the one test that
+reached the real encoder (`refreshedOrGone carries the stats figures from the
+habit`) used a habit with no entries at all, so `history` came out `""`
+regardless of what the encoder did with a gap. Twelve strip tests passed. The
+mutation that survives this gap is the one the root `CLAUDE.md` names —
+collapsing `unknown` into `no`:
+
+```kotlin
+// the surviving mutation
+else "$date:${habit.valueOn(date) ?: 0.0}"
+```
+
+An unanswered day then encodes as `date:0.0` instead of being left out of the
+string, decodes to a real `0.0`, and `Grid.dayStateOf` no longer short-circuits
+to `UNKNOWN` — it computes a state from that `0.0` the same as it would from a
+stated lapse. Measured on `avoidedHabit()` (`at_most`, target `2.0`, the
+fixture already used elsewhere in this suite): `0.0` is always `isMet` on an
+`at_most` habit — the smallest possible value against a nonnegative limit — so
+the mutated cell painted `DONE` (the habit's own colour, a "clean" day), not
+`NO`/`SLIP` as an inline read of "collapsing unknown into no" might suggest.
+That is the *other* direction root `CLAUDE.md` already names — "which spend
+identically on an at-least habit and oppositely on an at-most one" — false
+CREDIT on an at-most habit, a full-marks week manufactured for days nobody
+answered, rather than a false slip. The test that catches it does not need to
+predict the exact wrong colour, only that the cell must be
+`widget_cell_empty` and it is not: it fails either way. The fix was three
+tests directly on `encodeHistory` (a gap dropped, a stored zero kept, a skip
+encoded as `s`) plus one end-to-end render test building `history` through the
+real encoder rather than a literal, and the false KDoc claim was corrected
+once the claim became true. The lesson this restates rather than introduces:
+an inventory a guard or a comment claims is part of what has to be checked,
+and twelve green tests said nothing about the one path none of them reached.
+
+**`Record.figuresStale`, and why `record.date` alone could not answer
+"are the figures current".** `record.date` names the day the entry is about;
+`score` and `currentStreak` are the account's figures as of the last
+`/api/overview` fetch, and nothing kept those two in step. Two paths move
+`record.date` with no network at all — `Widgets.answered` (a notification
+button, its number pad, or the checkmark widget's own tap) and
+`WidgetSync.noteRefused` — and both left the figures exactly where the last
+fetch had put them. Named case: a morning sync returns `score = 0.30,
+currentStreak = 0` because yesterday was missed; at 09:00 the user presses
+Yes in the notification shade, which moves `record.date` to today with no
+fetch. `StatsWidget.render`'s old condition, `record.date != today`, then read
+false — "current" — while the strip's newest cell had just changed colour
+beside a note line asserting nothing was wrong, for up to six hours until the
+next heartbeat. The fix is a field, not a smarter read of the one that
+existed: `figuresStale` is set at both local-mutation sites and cleared only
+in `Widgets.refreshed`, the one place the figures are actually taken from a
+fetch. The note line's condition became `record.gone || record.date != today
+|| record.figuresStale`, and the `figuresStale`-only case gets its own
+sentence (`stats_figures_behind`) rather than the dated one, because naming a
+date would be a false claim when the day itself is not the stale part.
+
+**The ghost-kept fill, and why it lives beside `fill` rather than inside
+it.** `Widgets.markFor` already has an arm for `state == UNKNOWN &&
+habit.unloggedIsSuccess` — a ghost `✓`, because on such a habit an unanswered
+day already counts as kept, not merely unknown. `HabitWidget.fill` has no such
+arm; it did not need one, because the big cell carries that information in
+the glyph `markFor` draws beside it. The strip has no glyphs at all, so a
+strip built from plain `fill` painted that same day `widget_cell_empty` —
+named case: `show_as = "avoid"`, `at_most`, `target_value = 2`,
+`unlogged_is_success = true`, no entries in the last seven days, and
+`/overview` answering `score: 1.0, currentStreak: 7`. The widget drew "100%",
+"🔥 7" and seven empty cells: a full-marks week rendered as a blank one, beside
+a red cell for a day that really was a slip, teaching the reader that empty
+means "nothing happened". This is explicitly not the strip's already-accepted
+collapse (`UNKNOWN`, `SKIPPED` and a yes/no `NO` all read as empty) — a
+ghost-kept day is a fourth thing, on the other side of that line, and the
+model itself disagrees that the day is blank. The fix, `HabitWidget.stripFill`,
+draws the SAME faint alpha variant a numerical partial-credit day already
+uses — no new colour invented — and sits as a thin wrapper beside `fill`
+rather than a new arm inside it, specifically so the big cell's rendering and
+`HabitWidget`'s existing tests stay untouched; only `StatsWidget` calls it. A
+ghost-kept day and a numerical partial day now read identically on the strip,
+which is accepted as a smaller, deliberate loss next to a kept day painting as
+if nothing happened.
+
+**`gone` hides the figures as well as the strip, for the same reason the
+strip blanks itself.** The first cut of the stats widget blanked every strip
+cell for a `gone` record with a comment arguing that drawing the old strip
+beside "Removed" would be a second, contradicting claim about the same
+widget — but left the score percentage, the progress bar and the streak
+drawn from that same stale record, which is exactly the claim the comment
+just refused to make, on the other half of the layout. `refreshedOrGone`
+keeps a gone record's last figures in storage rather than zeroing them (the
+same reasoning as everywhere else in this file: a record quietly wiped is a
+record that cannot recover if the habit comes back), so `record.score` and
+`record.currentStreak` are still sitting there to be drawn. The fix hides
+`stats_score`, `stats_score_bar` and `stats_streak` under the same `gone`
+check the strip already uses, leaving only the name and the note line — what
+the checkmark widget already does with its one mark.
+
+**A known limitation, left alone rather than fixed here: an answer about a day
+OLDER than `record.date` does not repaint that day's cell on the strip
+either.** The asymmetry already written down for the checkmark widget's own
+cell (`Widgets.answered` ignores an answer about an older day, so the record
+is not rewound to paint a day that is over) reaches the strip the same way,
+because the strip's own-day cell reads `record.value`/`record.skip` and
+nothing else moves them for an older date. A reminder answered after midnight
+about yesterday, while the strip has already rolled to today, leaves
+yesterday's strip cell exactly as it was until the next `/overview` fetch
+lands. Self-healing, and no data is lost — the write itself still goes
+through the outbox to the correct date — so this is recorded rather than
+patched.
+
 

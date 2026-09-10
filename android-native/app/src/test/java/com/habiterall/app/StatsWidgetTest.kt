@@ -6,6 +6,7 @@ import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.Bundle
 import android.view.View
 import android.widget.ImageView
 import android.widget.ProgressBar
@@ -102,6 +103,8 @@ class StatsWidgetTest {
         score: Double = 0.0,
         currentStreak: Int = 0,
         history: String = "",
+        unloggedIsSuccess: Boolean = false,
+        figuresStale: Boolean = false,
     ) = Widgets.Record(
         widgetId = widgetId,
         habitId = habit.id,
@@ -119,6 +122,8 @@ class StatsWidgetTest {
         score = score,
         currentStreak = currentStreak,
         history = history,
+        unloggedIsSuccess = unloggedIsSuccess,
+        figuresStale = figuresStale,
     )
 
     /** `stats_cell_0` .. `stats_cell_6`, oldest to newest — the layout's own order. */
@@ -180,6 +185,27 @@ class StatsWidgetTest {
         assertEquals(View.GONE, freshNote.visibility)
     }
 
+    /* ---------- FIX 2: record.date == today is not "the figures are current" ---------- */
+
+    @Test
+    fun `figuresStale alone shows the note line, without naming a date`() {
+        // `record.date` is TODAY here — a local answer or refusal can move
+        // the strip with no fetch behind it, and `date != today` alone would
+        // have missed that entirely. The wiring test that matters: this is
+        // `StatsWidget.render`'s own condition, not `Widgets`' pure logic.
+        val rec = record(boolHabit(), date = today, value = Sentinels.YES, figuresStale = true)
+        val note = inflate(StatsWidget.render(context, rec, today, 3))
+            .findViewById<TextView>(R.id.stats_note)
+        assertEquals(View.VISIBLE, note.visibility)
+        assertEquals(
+            context.getString(R.string.stats_figures_behind),
+            note.text.toString(),
+        )
+        // The dated sentence must not appear here — the day is not stale,
+        // only the figures are, and naming a date would be a false claim.
+        assertFalse(note.text.toString().contains(today))
+    }
+
     /* ---------- the strip fits the widget's width ---------- */
 
     @Test
@@ -226,6 +252,67 @@ class StatsWidgetTest {
 
         assertEquals(0xFFDC2626.toInt(), tint(slipCell))
         assertEquals(android.graphics.Color.parseColor(habit.color), tint(cleanCell))
+    }
+
+    /* ---------- FIX 1: the real encoder, not a hand-written history literal ---------- */
+
+    @Test
+    fun `an unanswered day built through the real encoder is empty, not a stated slip`() {
+        // This is the test that would have caught the shipped defect: every
+        // other test in this class hand-writes `history`, so a collapse
+        // inside `Widgets.encodeHistory` itself — the `?: 0.0` mutation that
+        // turns a gap into a stated zero — could ship with all of them green.
+        val habit = avoidedHabit() // at_most, target 2 — 3.0 is a real slip
+            .copy(entries = mapOf(dayBefore to 3.0)) // nothing recorded `yesterday`: a gap
+        val history = Widgets.encodeHistory(habit, endDate = yesterday, days = 2)
+        val rec = record(habit, date = today, value = 0.0, history = history)
+
+        val view = inflate(StatsWidget.render(context, rec, today, columns = 3))
+        val empty = ContextCompat.getColor(context, R.color.widget_cell_empty)
+        val unansweredCell = view.findViewById<ImageView>(cellIds[1]) // yesterday: never answered
+
+        assertEquals(
+            "a day the encoder correctly left out of `history` must tint empty",
+            empty,
+            tint(unansweredCell),
+        )
+        assertNotEquals(
+            "an unanswered day must not paint as a stated slip",
+            0xFFDC2626.toInt(),
+            tint(unansweredCell),
+        )
+    }
+
+    /* ---------- FIX 3: a day the model counts as KEPT tints as empty ---------- */
+
+    @Test
+    fun `an unlogged-is-success habit ghost-tints an unanswered day on the strip`() {
+        val habit = avoidedHabit()
+        // No `history` at all: every day before `record.date` resolves
+        // UNKNOWN, and on this habit that is a KEPT day — the named input
+        // from finding 3, a full-marks week that must not read as a blank one.
+        val rec = record(habit, date = today, value = 0.0, unloggedIsSuccess = true)
+        val view = inflate(StatsWidget.render(context, rec, today, columns = 7))
+        val empty = ContextCompat.getColor(context, R.color.widget_cell_empty)
+        val ghostTint = (android.graphics.Color.parseColor(habit.color) and 0x00FFFFFF) or 0x59000000
+        (0..5).forEach {
+            val actual = tint(view.findViewById<ImageView>(cellIds[it]))
+            assertEquals("day $it must ghost-tint, not paint empty", ghostTint, actual)
+            assertNotEquals("a kept day must not read as a blank one", empty, actual)
+        }
+    }
+
+    @Test
+    fun `without unlogged-is-success an unanswered day is still empty`() {
+        // The arm must not apply unconditionally — the same habit, minus the
+        // flag, keeps the ordinary strip meaning for a day nobody answered.
+        val habit = avoidedHabit()
+        val rec = record(habit, date = today, value = 0.0, unloggedIsSuccess = false)
+        val view = inflate(StatsWidget.render(context, rec, today, columns = 7))
+        val empty = ContextCompat.getColor(context, R.color.widget_cell_empty)
+        (0..5).forEach {
+            assertEquals(empty, tint(view.findViewById<ImageView>(cellIds[it])))
+        }
     }
 
     /* ---------- distinct tap intents, the alarms' own bug class ---------- */
@@ -277,6 +364,23 @@ class StatsWidgetTest {
         // second, contradicting claim about the same widget.
         val empty = ContextCompat.getColor(context, R.color.widget_cell_empty)
         (0..2).forEach { assertEquals(empty, tint(view.findViewById<ImageView>(cellIds[it]))) }
+    }
+
+    /* ---------- FIX 4: gone hides the figures, not only the strip ---------- */
+
+    @Test
+    fun `gone hides the score text, the bar and the streak, leaving only the name and note`() {
+        val gone = record(waterHabit(), gone = true, score = 0.42, currentStreak = 7)
+        val goneView = inflate(StatsWidget.render(context, gone, today, 3))
+        assertEquals(View.GONE, goneView.findViewById<View>(R.id.stats_score).visibility)
+        assertEquals(View.GONE, goneView.findViewById<View>(R.id.stats_score_bar).visibility)
+        assertEquals(View.GONE, goneView.findViewById<View>(R.id.stats_streak).visibility)
+
+        val live = record(waterHabit(), gone = false, score = 0.42, currentStreak = 7)
+        val liveView = inflate(StatsWidget.render(context, live, today, 3))
+        assertEquals(View.VISIBLE, liveView.findViewById<View>(R.id.stats_score).visibility)
+        assertEquals(View.VISIBLE, liveView.findViewById<View>(R.id.stats_score_bar).visibility)
+        assertEquals(View.VISIBLE, liveView.findViewById<View>(R.id.stats_streak).visibility)
     }
 
     /* ---------- finding (a): each cell is shaded from ITS OWN day ---------- */
@@ -474,5 +578,24 @@ class StatsWidgetTest {
         } finally {
             server.shutdown()
         }
+    }
+
+    /* ---------- FIX 5: the resize path — the one thing only this provider hears ---------- */
+
+    @Test
+    fun `columnsFor reads the reported width, and falls back to the default for an absent or null bundle`() {
+        val wide = Bundle().apply { putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 250) }
+        assertEquals(7, StatsWidget.columnsFor(wide))
+
+        val narrow = Bundle().apply { putInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 130) }
+        assertEquals(4, StatsWidget.columnsFor(narrow))
+
+        // The literal 5 — `Widgets.stripDays(180)`, the provider XML's own
+        // `minWidth` — not `Widgets.MAX_STRIP_DAYS` or any other constant
+        // this test could import: a test that imports the constant it checks
+        // pins the name and nothing else.
+        val noKey = Bundle()
+        assertEquals(5, StatsWidget.columnsFor(noKey))
+        assertEquals(5, StatsWidget.columnsFor(null))
     }
 }

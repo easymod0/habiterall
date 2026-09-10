@@ -170,20 +170,46 @@ class StatsWidget : AppWidgetProvider() {
             // `DayGrid.kt` draws the app's own streak by: a habit with no
             // streak has nothing to report, and the widget claiming an
             // indicator the app itself withholds is the small inconsistency
-            // this repo treats as a defect.
+            // this repo treats as a defect. `gone` beats this the same way it
+            // beats everything else about the figures below.
             views.setViewVisibility(
                 R.id.stats_streak,
-                if (record.currentStreak > 0) android.view.View.VISIBLE else android.view.View.GONE,
+                if (!record.gone && record.currentStreak > 0) {
+                    android.view.View.VISIBLE
+                } else {
+                    android.view.View.GONE
+                },
             )
+            // The rest of a `gone` record's figures are stale in storage —
+            // `refreshedOrGone` leaves them rather than zeroing them, so the
+            // habit's LAST score is still sitting in `record.score` — and
+            // drawing them beside "Removed" would be exactly the second,
+            // contradicting claim the strip's own `gone` handling below
+            // already refuses to make. Only the name and the note line stay.
+            val goneVisibility = if (record.gone) android.view.View.GONE else android.view.View.VISIBLE
+            views.setViewVisibility(R.id.stats_score, goneVisibility)
+            views.setViewVisibility(R.id.stats_score_bar, goneVisibility)
 
-            // `gone` beats `stale` on the note line, the same precedent
-            // `HabitWidget.render` follows: a habit that has left the account
-            // is a stronger and more actionable claim than "these figures are
-            // a day old", and both cannot be shown in one line.
+            // `gone` beats `stale` beats `figuresStale` on the note line, the
+            // same precedent `HabitWidget.render` follows for `gone`: a habit
+            // that has left the account is a stronger and more actionable
+            // claim than "these figures are a day old", and only one line is
+            // there to say either. `record.date != today` is not the whole of
+            // "are the figures current" — it names the day the ENTRY is
+            // about, not when `score`/`currentStreak` were last fetched, and
+            // a local answer or refusal can move the strip with no network at
+            // all (`Widgets.answered`, `WidgetSync.noteRefused`). Without
+            // `figuresStale` the note line went on asserting "these figures
+            // are current" for up to six hours after exactly that happened,
+            // contradicting the strip cell sitting beside it.
             val stale = record.date != today
             views.setViewVisibility(
                 R.id.stats_note,
-                if (record.gone || stale) android.view.View.VISIBLE else android.view.View.GONE,
+                if (record.gone || stale || record.figuresStale) {
+                    android.view.View.VISIBLE
+                } else {
+                    android.view.View.GONE
+                },
             )
             if (record.gone) {
                 views.setTextViewText(R.id.stats_note, context.getString(R.string.widget_gone_short))
@@ -192,6 +218,12 @@ class StatsWidget : AppWidgetProvider() {
                     R.id.stats_note,
                     context.getString(R.string.stats_stale, record.date),
                 )
+            } else if (record.figuresStale) {
+                // The dated sentence would be a false claim here: the day is
+                // TODAY, it is only the score and streak that are behind, so
+                // the line says that instead of naming a date nothing is
+                // wrong with.
+                views.setTextViewText(R.id.stats_note, context.getString(R.string.stats_figures_behind))
             }
 
             val states = Widgets.stripStates(record, today, columns)
@@ -220,7 +252,12 @@ class StatsWidget : AppWidgetProvider() {
                     // go back to reading one day's number for every cell,
                     // which is the bug finding (a) named.
                     val value = if (date == record.date) record.value else history[date]?.first
-                    HabitWidget.fill(context, habit, record.color, state, value)
+                    // `stripFill`, not `fill` directly: the strip has no
+                    // glyphs, so it needs the ghost-kept arm `Widgets.markFor`
+                    // draws for the big cell with a `✓` instead — see the
+                    // KDoc on `HabitWidget.stripFill` for why that arm lives
+                    // beside `fill` rather than inside it.
+                    HabitWidget.stripFill(context, habit, record.color, state, value)
                 }
                 views.setInt(cellId, "setColorFilter", tint)
                 // `HabitWidget.describe` says WHAT a day was and stays right

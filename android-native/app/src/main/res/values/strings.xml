@@ -65,6 +65,13 @@
          current one (docs/decisions/android.md: the first version of that
          line was content-description only). -->
     <string name="stats_stale">As of %1$s</string>
+    <!-- `record.date` is the day the ENTRY is about, not when the score and
+         streak were last fetched: a local answer or a refused write can move
+         the strip with no network at all, which is what `figuresStale`
+         (`Widgets.Record`) tracks. Shown instead of `stats_stale` when the
+         record's own day IS today and only the figures are behind, so the
+         line does not name a date nothing is wrong with. -->
+    <string name="stats_figures_behind">Score updates on next sync</string>
     <!-- Spoken for `stats_root`, current record only (`widget_gone` covers a
          gone one). %1$s the habit's name, %2$d the score as a whole percent
          (already clamped to 0..100), %3$d the current streak. -->

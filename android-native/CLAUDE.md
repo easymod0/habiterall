@@ -404,11 +404,25 @@ to the next person; the refusal is written as a comment at the one place the
 figures are taken from the fetch (`Widgets.refreshed`), because that is the
 only thing that will stop them.
 
-**The figures are as of `record.date`, on a line a user can see.** Same rule as
-the checkmark cell's own note above, and the same precedent behind it: the
-first version of THAT put the explanation in `setContentDescription` alone
-("It has to be VISIBLE, not just described"), so a stats widget repeating that
-mistake would have been the identical bug on a second surface.
+**The figures are as of `record.date`, on a line a user can see — except
+`record.date` alone cannot answer "are they current".** Same rule as the
+checkmark cell's own note above, and the same precedent behind it: the first
+version of THAT put the explanation in `setContentDescription` alone ("It has
+to be VISIBLE, not just described"), so a stats widget repeating that mistake
+would have been the identical bug on a second surface. But `record.date` names
+the day the ENTRY is about, not when `score`/`currentStreak` were last
+fetched, and two paths move the day with no network at all —
+`Widgets.answered` (a notification button, its number pad, or the checkmark
+widget's own tap) and `WidgetSync.noteRefused`. A morning sync leaves the
+figures at yesterday's answer; a 9am tap in the shade moves the strip to
+today with no fetch behind it, and `record.date == today` then read as
+"everything here is current" for up to six hours, contradicting the strip
+cell sitting right beside it. `Record.figuresStale` is the second flag this
+needed: set wherever the strip moves without a fetch, cleared in
+`Widgets.refreshed` (a successful fetch is exactly what makes the figures
+current again), and shown as its own sentence (`stats_figures_behind`) rather
+than the dated one — naming a date would be a false claim when the day itself
+is not stale, only the score and streak are.
 
 **`redraw` and `armMidnight` used to be hard-coded to `HabitWidget` alone, and
 the worse of the two failure modes was not "never redrawn."** Both asked
@@ -432,13 +446,33 @@ widget and a checkmark widget for the same habit — would collapse onto one
 PendingIntent.
 
 **The strip is colour-only, and the collapse that comes with that is
-accepted.** At ~20dp a cell there is no room for `Widgets.markFor`'s glyphs, so
-`UNKNOWN`, `SKIPPED` and a yes/no `NO` all tint to `widget_cell_empty` and the
-strip does not tell them apart. That is accepted, not an oversight: it is a
-seven-day trend rather than a per-day answer, and the per-day answer is one tap
-away in the app. What the strip must not lose is the avoided-habit inversion —
-a clean day in the habit's own colour, a slip in red — which comes free from
-reusing `HabitWidget.fill` rather than writing a second one.
+accepted — except for a day the model counts as KEPT.** At ~20dp a cell there
+is no room for `Widgets.markFor`'s glyphs, so `UNKNOWN`, `SKIPPED` and a
+yes/no `NO` all tint to `widget_cell_empty` and the strip does not tell them
+apart. That is accepted, not an oversight: it is a seven-day trend rather than
+a per-day answer, and the per-day answer is one tap away in the app. What the
+strip must not lose is the avoided-habit inversion — a clean day in the
+habit's own colour, a slip in red — which comes free from reusing
+`HabitWidget.fill` rather than writing a second one. The one collapse that is
+NOT accepted is `unloggedIsSuccess`: `Widgets.markFor` already draws a ghost
+`✓` for `state == UNKNOWN && habit.unloggedIsSuccess` on the big cell, because
+on such a habit an unanswered day IS a kept one, not merely an unknown one. A
+strip with no glyph for that state read a full-marks week as a blank one,
+beside a red cell for a day that really was a slip. `HabitWidget.stripFill`
+carries the same arm as the faint alpha variant a numerical partial-credit day
+already uses — no new colour — and lives beside `fill` rather than inside it,
+so the big cell's rendering and its own tests stay untouched; only
+`StatsWidget` calls it. A ghost-kept day and a numerical partial day now read
+identically on the strip, which is a small, deliberate loss next to a kept day
+painting as if nothing happened.
+
+**`gone` hides the figures, not only the strip.** A gone record keeps its last
+`score`/`currentStreak` in storage (`refreshedOrGone` leaves them rather than
+zeroing them), and drawing them beside "Removed" would be exactly the second,
+contradicting claim the strip's own blanking already refuses to make — so the
+score text, the progress bar and the streak are all hidden when
+`record.gone`, leaving only the name and the note line, the same as the
+checkmark widget's own cell does with its one mark.
 
 **It follows the LAUNCHER's light/dark, never the account's `theme` setting.**
 `res/values-night/colors.xml` is the only `values-night` in the app and always

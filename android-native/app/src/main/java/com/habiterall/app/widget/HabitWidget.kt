@@ -436,6 +436,39 @@ class HabitWidget : AppWidgetProvider() {
         internal fun habitColor(hex: String): Int =
             runCatching { android.graphics.Color.parseColor(hex) }.getOrElse { 0xFF3B82F6.toInt() }
 
+        /**
+         * [fill], with one arm the STRIP alone gets to draw.
+         *
+         * `Widgets.markFor` already carries a ghost `✓` for `state ==
+         * UNKNOWN && habit.unloggedIsSuccess` — an unanswered day that this
+         * habit's rule already counts as kept, not merely unknown. The big
+         * checkmark cell says that with the glyph, but the strip HAS no
+         * glyphs (see the comment on `StatsWidget.render`), so on a strip
+         * built from plain [fill] that same day painted as `widget_cell_empty`
+         * — a full-marks week rendered as a blank one, beside a red cell for
+         * a day that really was a slip. This wrapper exists only so the big
+         * cell's rendering, and `HabitWidget`'s own tests, stay untouched:
+         * [fill] itself does not gain a case it did not have, this sits one
+         * layer above it and only `StatsWidget` calls it.
+         *
+         * The faint alpha variant a numerical partial-credit day already
+         * uses, not a new colour — a ghost-kept day and a numerical partial
+         * day now read identically on the strip, which is a small, deliberate
+         * loss next to a kept day painting as if nothing happened.
+         */
+        internal fun stripFill(
+            context: Context,
+            habit: Habit,
+            color: String,
+            state: Grid.DayState,
+            value: Double?,
+        ): Int =
+            if (state == Grid.DayState.UNKNOWN && habit.unloggedIsSuccess) {
+                (habitColor(color) and 0x00FFFFFF) or 0x59000000
+            } else {
+                fill(context, habit, color, state, value)
+            }
+
         internal fun describe(
             context: Context,
             record: Widgets.Record,

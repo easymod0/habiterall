@@ -95,6 +95,23 @@ object Widgets {
          * collapse the two).
          */
         val history: String = "",
+        /**
+         * Whether [score]/[currentStreak] are known to be behind the strip.
+         *
+         * [date] names the day the ENTRY is about; it does not say when the
+         * figures were last fetched, and two paths move the day with no
+         * network at all — [answered] and `WidgetSync.noteRefused`. Left
+         * unanswered, a local tap or refusal moved the strip forward while
+         * the score and streak stayed exactly what the last `/overview` fetch
+         * said, and `record.date == today` then read as "everything here is
+         * current" when only the strip was. Set wherever the strip moves
+         * without a fetch, cleared in [refreshed] — a successful fetch is
+         * exactly what makes the figures current again — and defaults to
+         * `false` so a record written before this field existed draws as
+         * current until it is told otherwise, same fail-safe direction as
+         * [unloggedIsSuccess].
+         */
+        val figuresStale: Boolean = false,
     ) {
         /**
          * Enough of a habit for the rules that decide a tap and its colour.
@@ -412,6 +429,9 @@ object Widgets {
         score = habit.score,
         currentStreak = habit.currentStreak,
         history = encodeHistory(habit, today, MAX_STRIP_DAYS),
+        // A successful fetch is exactly what makes the figures current
+        // again — see the KDoc on `Record.figuresStale`.
+        figuresStale = false,
     )
 
     /**
@@ -431,7 +451,10 @@ object Widgets {
      */
     fun answered(record: Record, date: String, value: Double?, skip: Boolean) =
         if (date < record.date) record else
-        record.copy(date = date, value = value, skip = skip)
+        // The strip has moved; the score and streak have not — nothing here
+        // re-fetched `/overview`, so `figuresStale` records that the two
+        // have parted ways until the next one does.
+        record.copy(date = date, value = value, skip = skip, figuresStale = true)
 
     /**
      * `widgetId|habitId|name|type|target|targetType|showAs|color|unit|date|value|skip`.
@@ -474,6 +497,10 @@ object Widgets {
         // Not `flatten`ed: `encodeHistory` builds this from dates and doubles
         // only, so it never contains `|`, `\n` or `\r` to strip.
         r.history,
+        // Field 17, same append-only rule as 14-16: a record written before
+        // this existed has seventeen fields and must still draw, reading
+        // `false` back — the strip's own currency, not the figures'.
+        if (r.figuresStale) "1" else "0",
     ).joinToString("|")
 
     /**
@@ -527,6 +554,12 @@ object Widgets {
             score = f.getOrNull(14)?.toDoubleOrNull() ?: 0.0,
             currentStreak = f.getOrNull(15)?.toIntOrNull() ?: 0,
             history = f.getOrNull(16) ?: "",
+            // Field 17. Absent means "not known to be behind" — the
+            // fail-safe direction, same reasoning as `unloggedIsSuccess`
+            // above: a record from before this field existed has no local
+            // answer this build cannot account for, so there is nothing to
+            // warn about yet.
+            figuresStale = f.getOrNull(17) == "1",
         )
     }
 

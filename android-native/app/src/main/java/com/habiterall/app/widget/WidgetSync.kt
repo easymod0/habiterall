@@ -125,7 +125,10 @@ object WidgetSync {
                 Settings(app).updateWidgets { records ->
                     records.map {
                         if (it.habitId == habitId && it.date == date) {
-                            it.copy(value = null, skip = false)
+                            // The strip moved back to unanswered with no
+                            // fetch behind it, exactly the same reason
+                            // `Widgets.answered` sets this flag.
+                            it.copy(value = null, skip = false, figuresStale = true)
                         } else {
                             it
                         }

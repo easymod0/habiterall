@@ -381,6 +381,38 @@ class WidgetTest {
         assertEquals("2026-08-14:1,2026-08-15:2,2026-08-16:s", back.history)
     }
 
+    /* ---------- encodeHistory itself: no test reached it before this ---------- */
+
+    @Test
+    fun `encodeHistory omits a gap date rather than defaulting it to zero`() {
+        // Answered on the newest and the oldest day of a 3-day window, with
+        // nothing recorded the day in between — the gap the encoder must
+        // leave OUT of the string, not fill with a stated zero. Asserting the
+        // exact literal is what a `date:0.0` token added for the gap fails.
+        val habit = waterHabit().copy(entries = mapOf(today to 2.0, "2026-08-14" to 8.0))
+        assertEquals(
+            "$today:2.0,2026-08-14:8.0",
+            Widgets.encodeHistory(habit, today, days = 3),
+        )
+    }
+
+    @Test
+    fun `encodeHistory encodes a stored lapse of zero, not an absent day`() {
+        // A real 0 the user recorded and a day nobody touched must not
+        // collapse into the same output — root CLAUDE.md's rule, one field
+        // deeper. This is the assertion that stops someone "fixing" the gap
+        // test above by dropping zero values outright instead of dropping
+        // only the ABSENT ones.
+        val habit = boolHabit().copy(entries = mapOf(today to 0.0))
+        assertEquals("$today:0.0", Widgets.encodeHistory(habit, today, days = 1))
+    }
+
+    @Test
+    fun `encodeHistory encodes a skip as the s token`() {
+        val habit = boolHabit().copy(skips = listOf(today))
+        assertEquals("$today:s", Widgets.encodeHistory(habit, today, days = 1))
+    }
+
     @Test
     fun `a malformed history token is skipped, not fatal`() {
         val decoded = Widgets.decodeHistory("2026-09-10:1,rubbish,2026-09-08:s")
@@ -472,6 +504,40 @@ class WidgetTest {
         // figures-only refresh would be indistinguishable from no refresh at
         // all, and the widget would draw zeros forever.
         assertNotEquals(stale, fresh)
+    }
+
+    /* ---------- figuresStale: record.date alone cannot answer freshness ---------- */
+
+    @Test
+    fun `a record written before figuresStale existed still reads`() {
+        // Seventeen fields is what every widget on a phone that upgrades to
+        // this build holds; an absent eighteenth field is not a claim that
+        // the figures are behind — the fail-safe direction, same as `gone`
+        // and `unloggedIsSuccess` before it.
+        val seventeen = Widgets.encode(record(boolHabit())).split('|').take(17).joinToString("|")
+        val back = Widgets.decode(seventeen)
+        assertNotNull(back)
+        assertFalse(
+            "an absent field is not a claim the figures are behind",
+            back!!.figuresStale,
+        )
+        // And everything that already existed still parses.
+        assertEquals(7, back.widgetId)
+    }
+
+    @Test
+    fun `answered marks the figures stale, refreshed clears it`() {
+        // The named path: a local answer moves the strip with no fetch
+        // behind it, so the score and streak beside it are exactly as old as
+        // they were before the tap.
+        val onToday = record(boolHabit(), value = Sentinels.YES)
+        val answered = Widgets.answered(onToday, today, Sentinels.UNSET, false)
+        assertTrue("a local answer must mark the figures stale", answered.figuresStale)
+
+        // A real fetch is what clears it again — `Widgets.refreshed` is the
+        // one place the figures are taken from the server, per its own KDoc.
+        val fetched = Widgets.refreshed(answered, boolHabit(), today)
+        assertFalse("a successful fetch must clear the stale flag", fetched.figuresStale)
     }
 
     /* ---------- what the cell says ---------- */
