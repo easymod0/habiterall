@@ -2070,25 +2070,32 @@ detail belongs.
 plain-SQL file a night, not a per-account export — but only once you turn it
 on. The dump needs a Postgres role that can **bypass row-level security** —
 superuser, or `BYPASSRLS` — because every tenant table here is
-`FORCE ROW LEVEL SECURITY`, which applies RLS to the table's OWNER too; the
-app's own restricted role cannot dump anything at all. The shipped compose
-files **deliberately do not give the app that credential**: the app not being
-able to change the schema, or read past row-level security, is part of this
-edition's security model. Turning scheduled backups on means adding
+`FORCE ROW LEVEL SECURITY`, which applies RLS to the table's OWNER too; this
+edition's restricted `DATABASE_URL` role cannot dump anything at all. It runs
+in the **`notifier` container** (#194), not `app` — see
+[the reminder scheduler](#both-editions-the-reminder-scheduler) for why the
+reminder tick lives there too — and the shipped compose files **deliberately
+do not give that container the credential either**: not holding it is part of
+this edition's security model. Turning scheduled backups on means adding
 `DATABASE_URL_ADMIN` — the same owner credential `migrate` already holds — to
-the app service yourself, knowingly: a compromise of the app process then
+the `notifier` service yourself, knowingly: a compromise of that process then
 reaches a credential that can rewrite the schema and read every tenant's rows,
-which is why this is opt-in rather than default. Until you add it, the app
-logs an error naming the missing credential and writes no backups — it does
-not fail silently and it never falls back to the restricted role. If you would
-rather the app never hold that credential at all, run `pg_dump` from outside
-the app on your own schedule instead (see `habiterall-cloud/SETUP.md`), or
-grant a dedicated least-privilege dump role in place of the owner credential —
-a **measured, verified** combination, not merely suggested: `NOSUPERUSER`,
-`BYPASSRLS`, `USAGE` on the schema, and `SELECT` on every table and every
-sequence dumps successfully — exit 0, expected rows present — and its output
-is identical to the superuser's own dump apart from pg_dump 17's per-run
-random `\restrict`/`\unrestrict` token, which differs between any two dumps
+which is why this is opt-in rather than default. Until you add it, the
+notifier logs an error naming the missing credential and writes no backups —
+it does not fail silently and it never falls back to the restricted role.
+`GET /api/backup/status` is still answered by the **app**, from the app's own
+environment, so `DATABASE_URL_ADMIN` on `notifier` alone runs backups
+correctly while ⚙ → Backup and restore reports them as off; add the same
+credential to `app` as well only if you want the dialog to agree with reality
+— the app itself never dumps. If you would rather neither container hold that
+credential at all, run `pg_dump` from outside the stack on your own schedule
+instead (see `habiterall-cloud/SETUP.md`), or grant a dedicated
+least-privilege dump role in place of the owner credential — a **measured,
+verified** combination, not merely suggested: `NOSUPERUSER`, `BYPASSRLS`,
+`USAGE` on the schema, and `SELECT` on every table and every sequence dumps
+successfully — exit 0, expected rows present — and its output is identical to
+the superuser's own dump apart from pg_dump 17's per-run random
+`\restrict`/`\unrestrict` token, which differs between any two dumps
 regardless of role; the exact `GRANT` statements are in
 `examples/cloud.env.example`. `pg_dump` also has to be **at least the
 server's own major version**, or it refuses to run —
@@ -2096,12 +2103,18 @@ the image ships one matched to the Postgres major in these compose files, so
 bumping the server's major means bumping the image's client too. There is no
 per-account restore, no point-in-time recovery and no replica here; see #240.
 
-Only **one replica** may own a `HABITERALL_BACKUP_DIR`. The no-overlap
+**Exactly one `notifier` container** may own a `HABITERALL_BACKUP_DIR` — and
+since #194 that is the stronger statement it sounds like, not merely the safe
+one: the notifier is the single container that runs the reminder tick, the
+Discord gateway and this dump, it is never `--scale`d, and it is not meant to
+run more than once (a Kubernetes Deployment needs
+`strategy: { type: Recreate }` for reasons that have nothing to do with
+backups; see [the reminder scheduler](#both-editions-the-reminder-scheduler)).
+Nothing here serialises the dump across processes even so: the no-overlap
 guarantee (a unique temporary filename per run) is per-process module state,
-not a lock on the directory, so two replicas pointed at the same volume will
-both dump and one will simply win the rename — not a corrupt file, but
-duplicated work. If you run more than one instance of the app, set
-`HABITERALL_BACKUP_DIR` on exactly one of them.
+not a lock on the directory, so two notifiers pointed at the same volume would
+still both dump and one would simply win the rename — not a corrupt file, but
+duplicated work.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -2258,7 +2271,9 @@ what the `/healthz` memo is sized against) and `PGSSL`.
 One variable is in no file at all: `PORT`, which is fixed inside the container
 by the image and the published mapping. `APP_PORT` is the host-side knob.
 
-Four more turn on the scheduled whole-database dump:
+Four more turn on the scheduled whole-database dump, read by the `notifier`
+container rather than `app` (#194 — see
+[the reminder scheduler](#both-editions-the-reminder-scheduler)):
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -2346,10 +2361,31 @@ none, it queries and stops. On-device reminders do not involve it at all.
 
 The bot token is read from the environment rather than the settings dialog on
 purpose: it can post to every channel the bot is in, so it is the operator's
-credential, not a user's. With it set, the server also opens one outbound
+credential, not a user's. With it set, the tick also opens one outbound
 WebSocket to Discord to receive button presses — **no inbound port, no public
 hostname, and nothing to forward**, which is what makes this work on a home
 network.
+
+**Cloud runs all of this in its own `notifier` container**, apart from `app`
+(#194) — the tick, the Discord gateway and [the scheduled
+backup](#scheduled-backups) all live there, so a fleet of `app` replicas
+shares none of them: before this split, every replica ran its own tick (N× the
+full account scan an interval, N× the per-account transactions on one pool)
+and opened its own gateway socket, so N replicas meant N sockets racing to
+answer the same button press. Run **exactly one** `notifier`, ever — it is not
+the service you scale, `app` is — and on Kubernetes the Deployment needs
+`strategy: { type: Recreate }`: the default `RollingUpdate` starts the new pod
+before terminating the old one, so even `replicas: 1` has a window with two
+gateways open, and Discord shows "This interaction failed" on the press the
+other one actually handled. `SESSION_SECRET` on `notifier` must be the **same
+value** the app has — this process signs the codes on ntfy's reminder buttons
+and the app's route verifies them, so a mismatch fails every ntfy button,
+silently. Its `restart: on-failure` (not `unless-stopped`) is deliberate too:
+with `HABITERALL_NOTIFY=off` and no backup directory configured, this
+container has nothing to run and its entry point exits 0 having said so, and
+`unless-stopped` would restart that forever. Personal has no equivalent
+container — one process, one user, no replicas to protect it from — so its
+tick stays exactly where it always was, inside `npm run start:personal`.
 
 ### Logs
 

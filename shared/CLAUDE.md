@@ -1214,6 +1214,24 @@ against 1440 minutes and never fires, with a correct-looking date beside it.
 `runTick` also *hands* the instant to `collect`, so the adapter cannot read a
 second clock a millisecond the other side of local midnight.
 
+**`startNotifier`'s timer is unref'd by DEFAULT, and `ctx.keepAlive` is the
+caller that has no server.** The unref was written when every caller started
+the tick inside a process that also called `app.listen` — there the server
+holds the event loop open and a ref'd interval would keep a drained one alive
+past its own exit. Cloud's tick moved into its own process (#194,
+`habiterall-cloud/src/notifier-entry.js`), which has no server, and the
+default made it run exactly ONE tick and exit 0 with no signal and no line.
+Configuration-dependent, which is the worst shape for it: a `DISCORD_BOT_TOKEN`
+opens a gateway WebSocket and a socket is ref'd, so bot deployments looked
+fine while webhook-only, ntfy-only and backup-only ones went quiet under a
+minute — measured at 40-45 s on a real Postgres with the shipped 60 s
+interval, fifteen seconds before the second tick was due, with
+`restart: on-failure` correctly declining to restart an exit 0. Personal must
+keep the default. `docs/decisions/reminders.md` has the measurement, and the
+two levels it is pinned at — a child process in `test/notify.test.js` for the
+option, and the cloud entry point's own suite for the wiring, because the
+flag being dropped from the ctx leaves every other suite green.
+
 **`SETTING_VALUES` rules are an array *or* a normaliser** — a URL and a timezone
 cannot be enumerated. That is also why an accepted setting may differ from what
 was sent, and why `ui/settings.js` waits for the server's answer.

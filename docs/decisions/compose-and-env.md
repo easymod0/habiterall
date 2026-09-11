@@ -119,4 +119,21 @@ that no README block prints — covers them without a second mechanism. Note wha
 lines, no header — to the empty string, and `README.includes('')` is true of
 every README there has ever been.
 
+**A service can hit the `extends` sequence-concatenation limit from INSIDE one
+file, not only across the two.** Splitting the reminder tick into its own
+`notifier` container (#194) meant adding a fourth service to
+`examples/docker-compose.cloud.yml`, and the obvious shape — `notifier`
+`extends: service: app`, since the two share `db` / `migrate` as
+`depends_on` — was rejected for the same reason `extends` already gets a
+restatement of `depends_on` in the checkout's own compose file: a mapping
+merges key by key, but `ports:` is a SEQUENCE, and a sequence is
+*concatenated*, never replaced. `notifier` extending `app` would have
+inherited `app`'s `ports: ['${BIND_ADDR:-}:${APP_PORT:-3100}:3000']` verbatim,
+and two containers publishing the same host port fight over the bind at
+startup — not a config-time error `docker compose config` would catch, a
+runtime one on `docker compose up`. So `notifier` is hand-written in the
+published file instead, and it is the checkout's own
+`habiterall-cloud/docker-compose.yml` that `extends: service: notifier` from
+it, the same as the other three services.
+
 
