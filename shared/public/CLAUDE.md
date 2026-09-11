@@ -571,13 +571,35 @@ hide) would invert unticking everything to everything shown, which is the one
 case `parseCardList`'s tests treat as the whole point of the change.
 
 **A legacy account is read tolerantly, and migrated only by a deliberate
-Done** — which is why a legacy account gets `recentDays` OFF until it presses
-Done, deliberately. Nothing writes the new shape on its behalf otherwise: not a boot, not a
-`GET`, nothing scheduled. An account that saved `['history','calendar']` before
-this shipped keeps meaning exactly that — those two on, every other card off —
-for as long as it never opens the settings dialog, because every card added
-after that save is invented later than the account's stored intent and there is
-nothing in a bare id list to say otherwise.
+Done.** Nothing writes the new shape on its behalf: not a boot, not a `GET`,
+nothing scheduled. An account that saved `['history','calendar']` before this
+shipped keeps meaning exactly that for as long as it never opens the settings
+dialog.
+
+**But "exactly that" is not "and nothing added since is visible", and for one
+release it was** (#297). A bare id list cannot say why an id is missing, and
+there are two reasons: somebody unticked it, or it had not shipped yet.
+Reading both as *hidden* made every card added after an account's last save
+invisible to it — with no surface at all, because a hidden card and a card
+that does not exist look identical. `recentDays` shipped that way and nobody
+noticed; the notes card would have shipped that way too, and it is the card
+whose entire purpose is that a note could not be read back. A fix that stays
+unreachable for the accounts that once cared enough to configure the page is
+not a fix.
+
+So `LEGACY_ERA_CARDS` (`shared/src/validate.js`) freezes `DETAIL_CARDS` as
+#174 left it — the ids a bare list could ever have named. An absent id of that
+era was unticked and stays off; an absent id outside it did not exist to tick
+and arrives **on**, which is the answer the object branch already gives the
+same question. Two reasons, told apart by the only evidence there is, instead
+of collapsed into the pessimistic one. `[]` is untouched and still means
+nothing visible: it is the one legacy value whose silence about a card is a
+statement rather than an accident, which is why the guard is `raw.length > 0`
+and not a bare default.
+
+That list is **frozen in time** — appending a new card's id to it would claim
+a value written before the object shape could have named it, turning that card
+off for every legacy account and reintroducing exactly this bug.
 
 Pressing **Done** rewrites it, *even with nothing else changed*, and that took a
 deliberate mechanism: `applyDraft` sends the keys whose draft differs from
