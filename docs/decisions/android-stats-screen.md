@@ -30,23 +30,27 @@ five minutes of work and needs no decision — it is the one part of this issue
 that was unambiguously worth doing on its own, independent of what the rest of
 this record concludes.
 
-## 2. `Api.stats(habitId)` — the prerequisite shared with #145
+## 2. `Api.stats(habitId)` — a prerequisite for the screen, and NOT one #145 shared
 
 **`Api.kt` has no stats call at all**, confirmed against the tree: `overview`,
 `habits`, `entries`, `setEntry`, `setReminder`, `createHabit`, `updateHabit`,
 `reorderHabits`, `settings` — nothing reaches `/habits/:id/stats`.
 
-Either a native stats screen or #145's widget needs, first:
+This section was originally written as *the prerequisite shared with #145* —
+roughly 150 lines (the call, a Kotlin model, the cache-the-answer decision
+made concrete, and score/streak formatting with the avoided-habit inversion
+applied once), to be built by whichever issue landed first. **#145 landed
+first and needed none of it.** Its widget shows a habit's score and current
+streak, and both already arrive on `/overview`'s own `Habit` model — so the
+widget stores the answer it was already being handed, and `Api.kt` still has
+no stats call. The shared prerequisite was not shared; it was a cost this
+record assumed and the cheaper surface disproved.
 
-- `Api.stats(habitId)` and a Kotlin model for what it returns;
-- the cache-the-answer decision made concrete: which fields are stored,
-  where, and how staleness is marked;
-- score and streak formatting, with the avoided-habit inversion applied once.
-
-That is roughly 150 lines and it is the entire architectural content shared
-between this issue and #145. It should be built once, by whichever lands
-first, and #145 is much the smaller of the two — so in practice #145 should
-carry it and a native stats screen, if ever built, should inherit it.
+What survives is the narrower claim. A native stats *screen* draws the survival
+curve, the miss distribution, the weekday spread and the award grid, and none
+of those is on `/overview` — so it would still need `Api.stats(habitId)` and a
+model for the rest of that payload. That work has no second issue to share it
+with now, which makes it cost of the screen rather than cost already paid.
 
 **`computeScores` must not be mirrored**, and this is the temptation the
 prerequisite creates. Loop's `0.5^(sqrt(frequency)/13)` decay is pinned at
@@ -130,8 +134,9 @@ rather than a second cache shape.
 this record does not answer.** #171 opens its own recommendation with "the
 first one gates the rest": *is the offline argument the real motivation?* If
 nobody has actually wanted stats offline, part 3 (the native screen) is cost
-without a benefit and the issue reduces to parts 1 and 2 above — the stale
-comment and the shared `Api.stats` prerequisite. #171 also leaves open
+without a benefit and the issue reduces to part 1 above — the stale comment,
+since part 2 turned out to be the screen's own cost rather than a shared
+one. #171 also leaves open
 whether a native summary replaces the tap target or sits above `WebScreen` as
 a new screen (the first changes the app's most-used path), whether
 `detailCards` gates the native tiles at all, and whether v1 draws a score

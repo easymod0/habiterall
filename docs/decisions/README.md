@@ -20,7 +20,7 @@ are already answered here, usually because they were the first thing tried.
 | `translations.md` | #144, open: the runtime-catalogue shape, why the server's own prose is the hard part, and the key-plus-data-vs-server-localises decision still to make |
 | `routing.md` | fragment routing, the deep-link flash, the WebView back stack |
 | `android.md` | notifications, snooze, the home-screen widget |
-| `android-stats-screen.md` | #171: why stats stays in the warm `WebScreen` rather than a native Compose screen, the shared `Api.stats` prerequisite with #145, and the bounded-summary middle ground |
+| `android-stats-screen.md` | #171: why stats stays in the warm `WebScreen` rather than a native Compose screen, the `Api.stats` prerequisite #145 turned out not to share, and the bounded-summary middle ground |
 | `notifications-web.md` | the `web` channel, the nudge, the settings dialog |
 | `discord.md` | bot mode, the gateway, interaction handling |
 | `timezones.md` | `resolveTimeZone` vs `callerDay`, the device clock header |
