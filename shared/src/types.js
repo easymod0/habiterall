@@ -123,6 +123,8 @@
  * @typedef {object} Stats
  * @property {number} score            latest strength, 0..1
  * @property {ScorePoint[]} scores
+ * @property {Trend} trend             how the score moved over the trailing
+ *   window — see `Trend` for the units and the floor.
  * @property {Streak[]} streaks
  * @property {number} currentStreak
  * @property {number} bestStreak
@@ -266,6 +268,25 @@
  * @typedef {object} CoverageWindow
  * @property {number} answered         days in the window holding a row
  * @property {number} days             days in the window
+ */
+
+/**
+ * How the score moved over the trailing `TREND_LOOKBACK_DAYS`-day window,
+ * in SCORE units (`[-1, 1]`) — the renderer converts to points, since the
+ * score itself renders as a percentage. `null` means WITHHELD, not flat: the
+ * EWMA climbs from a cold 0 start regardless of behaviour, so for any habit
+ * younger than `minWindow` days a real trend cannot yet be told apart from
+ * the curve still filling. `minWindow` is present even when `change` is
+ * null, so a caller can say WHY the figure is withheld ("needs N more days")
+ * rather than merely showing nothing; it is derived from the habit's own
+ * decay constant, not fixed, because a less frequent habit's curve converges
+ * more slowly.
+ * @typedef {object} Trend
+ * @property {number} days             always `TREND_LOOKBACK_DAYS`
+ * @property {number|null} change      unrounded score delta over `days`, or
+ *   null when the habit has not yet reached `minWindow`
+ * @property {number} minWindow        the earliest day count `change` can be
+ *   trusted from, derived from where this habit's own curve converges
  */
 
 /**

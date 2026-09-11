@@ -9,8 +9,9 @@ const {
   computeCategoryStats, computeMissRuns, computeRecovery, SCORE_WARMUP_DAYS, creditAnchor,
   summariseMembers, summariseByCategory,
   isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, fromISO, MAX_RANGE_DAYS,
-  isRealDay, CANONICAL_DATE_RE,
+  isRealDay, CANONICAL_DATE_RE, TREND_CONVERGED_SCORE,
 } = await import('../src/stats.js');
+const { STRENGTH_BANDS } = await import('../src/awards.js');
 
 const UNSET = 0, YES = 2, SKIP = 3;
 
@@ -1475,6 +1476,128 @@ test('a caller that declined coverage gets neither key', () => {
   const stats = computeStats(boolHabit, rows, { end: '2026-01-31', coverage: false });
   assert.equal(Object.hasOwn(stats, 'coverage'), false);
   assert.equal(Object.hasOwn(stats, 'coverageWindow'), false);
+});
+
+/* ---------- trend: the score's own momentum, over TREND_LOOKBACK_DAYS ---------- */
+
+test('a perfect daily habit at day 40 reports NO trend', () => {
+  // This is the defect version passing every other assertion: the EWMA
+  // climbs from a cold 0 start regardless of behaviour, so a 40-day-old
+  // perfect habit LOOKS like it is improving fast when it has done nothing
+  // but exist. The floor withholds the figure until the curve has converged
+  // (see `trendOver`), and 87 is that floor for a daily habit — measured,
+  // not re-derived here from the constants (which would pin the name and
+  // nothing else).
+  //
+  // 40 days rather than a shorter window on purpose: it is past the 30-day
+  // lookback itself, so a point dated exactly 30 days before the last one
+  // genuinely EXISTS in `scores` — which is what makes this test able to
+  // catch a dropped `scores.length < minWindow` guard. A window shorter
+  // than the lookback (20 days, say) would report `null` for an unrelated
+  // reason — no such point to compare against — and would pass even with
+  // that guard missing.
+  const end = '2026-05-20';
+  const start = addDays(end, -39); // 40 days inclusive
+  const rows = dateRange(start, end).map((date) => ({ date, value: YES, status: '' }));
+  const stats = computeStats(boolHabit, rows, { end });
+  assert.equal(stats.trend.change, null);
+  assert.equal(stats.trend.minWindow, 87);
+
+  // #160's own named case, kept BESIDE the 40-day one rather than instead of
+  // it, and labelled as the weaker of the two: at 20 days the answer is right
+  // for two reasons at once, so on its own it would pass against a build with
+  // no floor in it at all. It is here because it is the case the issue names.
+  const twenty = dateRange(addDays(end, -19), end)
+    .map((date) => ({ date, value: YES, status: '' }));
+  assert.equal(computeStats(boolHabit, twenty, { end }).trend.change, null);
+});
+
+test('...and at day 87 it does, with the warm-up artefact bounded', () => {
+  // Both sides of the floor, over the same fixture shape: one day short of
+  // 87 withholds, 87 reports — and what it reports is bounded, not zero. The
+  // residual weight still on the EWMA's cold start at day 87 is
+  // `0.05 * (1 - alpha^30)`, measured at ~3.8 points for a daily habit, so a
+  // perfect habit's OWN trend at the floor must not read as a real 20+ point
+  // swing.
+  const end = '2026-05-20';
+
+  const short = addDays(end, -85); // 86 days inclusive
+  const shortRows = dateRange(short, end).map((date) => ({ date, value: YES, status: '' }));
+  assert.equal(computeStats(boolHabit, shortRows, { end }).trend.change, null);
+
+  const full = addDays(end, -86); // 87 days inclusive
+  const fullRows = dateRange(full, end).map((date) => ({ date, value: YES, status: '' }));
+  const trend = computeStats(boolHabit, fullRows, { end }).trend;
+  assert.notEqual(trend.change, null);
+  assert.ok(trend.change > 0, `expected a positive residual, got ${trend.change}`);
+  assert.ok(trend.change * 100 <= 5,
+    `expected the warm-up artefact bounded at 5 points, got ${trend.change * 100}`);
+});
+
+test('a habit that genuinely got worse reports a negative change', () => {
+  // 150 perfect days (well past the 87-day floor, so the curve is fully
+  // converged) followed by 50 stated lapses. The 30-day lookback lands
+  // entirely inside the lapse stretch, so the trend must read as a real,
+  // negative decline rather than the bounded warm-up artefact above.
+  const end = '2026-06-30';
+  const start = addDays(end, -199); // 200 days inclusive
+  const dates = dateRange(start, end);
+  const rows = dates.map((date, i) => ({ date, value: i < 150 ? YES : 0, status: '' }));
+  const stats = computeStats(boolHabit, rows, { end });
+  assert.ok(stats.trend.change < 0, `expected a negative change, got ${stats.trend.change}`);
+  // Rounded to points, as the tile does — pinned as a literal rather than
+  // re-derived, so a change to the decay maths shows up here.
+  assert.equal(Math.round(stats.trend.change * 100), -27);
+});
+
+test('the lookback is indexed by DATE, not by position', () => {
+  // Same entries, once with no `start` (scores[0] sits at the earliest row)
+  // and once with an explicit `start` that narrows the window — moving
+  // scores[0] forward while leaving the window past the 87-day floor. In
+  // both cases the trend must be the change since exactly 30 CALENDAR days
+  // before the last score, which this asserts by recomputing that figure
+  // independently from `stats.scores` itself rather than trusting the
+  // field.
+  const end = '2026-06-30';
+  const wideStart = addDays(end, -199); // 200 days
+  const rows = dateRange(wideStart, end).map((date) => ({ date, value: YES, status: '' }));
+
+  const narrowStart = addDays(end, -119); // 120 days — still past the 87-day floor
+
+  for (const opts of [{ end }, { start: narrowStart, end }]) {
+    const stats = computeStats(boolHabit, rows, opts);
+    const target = addDays(end, -30);
+    const found = stats.scores.find((p) => p.date === target);
+    assert.ok(found, `expected a score dated ${target}`);
+    const expected = stats.scores.at(-1).score - found.score;
+    assert.equal(stats.trend.change, expected);
+  }
+});
+
+test('a non-daily habit gets a LONGER floor, because its curve converges more slowly', () => {
+  // This is the test that fails if anyone replaces the derived floor with a
+  // fixed 87: a 1x/week habit's decay constant is closer to 1, so its curve
+  // takes far longer to shed the weight still on its cold start.
+  const weekly = {
+    type: 'boolean', target_value: 0, target_type: 'at_least',
+    freq_numerator: 1, freq_denominator: 7,
+  };
+  const end = '2026-05-20';
+  const start = addDays(end, -19);
+  const rows = dateRange(start, end).map((date) => ({ date, value: YES, status: '' }));
+  const stats = computeStats(weekly, rows, { end });
+  assert.equal(stats.trend.minWindow, 179);
+});
+
+test('TREND_CONVERGED_SCORE is the top strength band', () => {
+  // Two declarations pinned by a test, the same answer `CHANNELS` and
+  // `SETTING_VALUES` already take — `stats.js` cannot import `awards.js`
+  // (awards.js imports stats.js), so the value is a second literal rather
+  // than a shared import. Asserting the literal on BOTH sides means a
+  // matched drift (someone bumping both to 0.9) still fails.
+  assert.equal(TREND_CONVERGED_SCORE, STRENGTH_BANDS[STRENGTH_BANDS.length - 1]);
+  assert.equal(TREND_CONVERGED_SCORE, 0.95);
+  assert.equal(STRENGTH_BANDS[STRENGTH_BANDS.length - 1], 0.95);
 });
 
 /* ---------- summaryStats: the two-field entry point /overview uses ---------- */

@@ -560,7 +560,7 @@ function dayCredit(habit, entry, unlogged = UNLOGGED_DEFAULT, mayCredit = true) 
  */
 export function computeScores(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
                               creditFrom = undefined) {
-  return scoresOver(habit, entryMap, boundedRange(start, end), unlogged, creditFrom);
+  return scoresOver(habit, entryMap, boundedRange(start, end), unlogged, creditFrom).scores;
 }
 
 /**
@@ -570,6 +570,14 @@ export function computeScores(habit, entryMap, start, end, unlogged = UNLOGGED_D
  * reachable only through the `boundedRange` call in the wrapper above (and in
  * `computeStats` / `summaryStats`, which share one walk across every pass), so
  * no caller outside this file can hand a pass an unclamped range.
+ *
+ * Also returns the `alpha` it computed, so `computeStats`' trend pass can use
+ * the SAME decay constant without a third read of `habit.freq_denominator` —
+ * this function and `onPaceSeries` are its only two readers in the whole file,
+ * and `test/stats.test.js`'s counting-getter test pins that at exactly two
+ * invocations per `computeStats`/`summaryStats` call.
+ *
+ * @returns {{scores: Array<{date: string, score: number}>, alpha: number}}
  */
 function scoresOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
                     creditFrom = undefined) {
@@ -617,7 +625,100 @@ function scoresOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
 
     out.push({ date: dates[i], score: Number(score.toFixed(6)) });
   }
-  return out;
+  return { scores: out, alpha };
+}
+
+/* ---------- trend ---------- */
+
+/** How far back the trend looks. */
+export const TREND_LOOKBACK_DAYS = 30;
+
+/**
+ * The score the curve counts as CONVERGED at — the top strength band.
+ * Declared here and as the last element of `STRENGTH_BANDS` (`awards.js`), which
+ * this file cannot import (awards.js imports this one). Pinned against it by a
+ * test, the same two-declarations-plus-a-test answer `CHANNELS` and
+ * `SETTING_VALUES` already take.
+ */
+export const TREND_CONVERGED_SCORE = 0.95;
+
+/**
+ * How the strength moved over the last `TREND_LOOKBACK_DAYS` days, in SCORE
+ * units — the renderer converts to points.
+ *
+ * The EWMA `scoresOver` builds starts at 0 and climbs toward the truth
+ * regardless of behaviour, so for the first weeks of ANY habit the trend is
+ * large and positive purely because the curve is still filling — a habit
+ * that has done nothing wrong reports "getting much better" from doing
+ * nothing new. A perfect daily habit crosses the 50/80/95% strength bands on
+ * days 13, 31 and 57 (`test/awards.test.js` pins `bandAt(57) === 95`), so the
+ * comparison needs a FLOOR before it can be trusted, and the floor is derived
+ * from where the top band is reached rather than invented: the weight still
+ * on the EWMA's zero start is `alpha^n`, and the top band (`TREND_CONVERGED_SCORE`)
+ * is where that weight has fallen to `1 - TREND_CONVERGED_SCORE` — 0.05 for a
+ * 0.95 band — which for a daily habit (`alpha = 0.5^(1/13)`) lands on day 57,
+ * exactly the measured day the awards suite pins. `minWindow` is that
+ * convergence day plus the lookback itself, so BOTH ends of the comparison sit
+ * at or past convergence. The residual warm-up artefact right at the floor —
+ * `(1 - TREND_CONVERGED_SCORE) * (1 - alpha^TREND_LOOKBACK_DAYS)` — is bounded
+ * by about 5 points and decays fast after; it is bounded, not removed, and the
+ * tile's copy says so by naming the floor rather than hiding it.
+ *
+ * A slower habit converges more slowly and so needs a LONGER floor: a 1×/week
+ * habit's `alpha` is closer to 1, `alpha^n` falls off more gradually, and
+ * `minWindow` comes out at 179 rather than 87 for a daily habit. A 1×/month
+ * habit's floor is deep into a year — a real limitation, not a bug, and it is
+ * why `minWindow` always rides on the payload even when `change` is withheld:
+ * the tile can say WHY rather than just going blank.
+ *
+ * @param {Array<{date: string, score: number}>} scores oldest first, from the
+ *   same `scoresOver` call the returned `alpha` came from.
+ * @param {number} alpha the decay constant `scoresOver` computed for this
+ *   habit's frequency — passed in rather than re-read from the habit, so this
+ *   is not a third site reading `freq_numerator`/`freq_denominator` (see the
+ *   note on `scoresOver`).
+ * @returns {{days: number, change: number|null, minWindow: number}}
+ */
+function trendOver(scores, alpha) {
+  // `alpha` is checked BEFORE `minWindow` is derived from it, and the order is
+  // the whole of why this is two statements rather than one. `Math.log` of a
+  // non-positive or out-of-range alpha yields NaN or Infinity, and a NaN
+  // `minWindow` would still ride onto the payload beside the withheld
+  // `change` — where the tile spells it into its own copy, "Needs NaN days".
+  // Unreachable today (`scoresOver` clamps both frequency terms to at least 1,
+  // so `alpha` is strictly inside (0, 1)), which is exactly why it has to fail
+  // in a readable direction if it ever is reached.
+  if (!Number.isFinite(alpha) || alpha <= 0 || alpha >= 1) {
+    return { days: TREND_LOOKBACK_DAYS, change: null, minWindow: Infinity };
+  }
+
+  const converged = Math.log(1 - TREND_CONVERGED_SCORE) / Math.log(alpha);
+  const minWindow = Math.ceil(converged) + TREND_LOOKBACK_DAYS;
+
+  if (!Number.isFinite(minWindow) || !Number.isInteger(minWindow) || minWindow <= 0) {
+    return { days: TREND_LOOKBACK_DAYS, change: null, minWindow: Infinity };
+  }
+
+  if (scores.length < minWindow) {
+    return { days: TREND_LOOKBACK_DAYS, change: null, minWindow };
+  }
+
+  const last = scores[scores.length - 1];
+  const target = addDays(last.date, -TREND_LOOKBACK_DAYS);
+
+  // Indexed by DATE, scanning backwards, never by `scores.length - 1 -
+  // TREND_LOOKBACK_DAYS`: a narrowed `?start=` moves `scores[0]`, and a zone
+  // that deletes a calendar day (`Pacific/Apia`) makes the two disagree about
+  // which element is 30 days back.
+  let found = null;
+  for (let i = scores.length - 1; i >= 0; i--) {
+    if (scores[i].date <= target) { found = scores[i]; break; }
+  }
+  if (!found) return { days: TREND_LOOKBACK_DAYS, change: null, minWindow };
+
+  // Unrounded — the tile rounds to points, exactly as `recovery.averageLength`
+  // and `recovery.rate` are rounded at the tile and not here.
+  return { days: TREND_LOOKBACK_DAYS, change: last.score - found.score, minWindow };
 }
 
 /* ---------- on pace ---------- */
@@ -1756,7 +1857,7 @@ export function computeStats(habit, entries,
   // day" — and a history bar, a weekday rate or a times-per-week bucket
   // painting a day as kept that the streak beside it counts as missed is that
   // same disagreement one surface further out.
-  const scores = scoresOver(habit, entryMap, dates, unlogged, creditFrom);
+  const { scores, alpha } = scoresOver(habit, entryMap, dates, unlogged, creditFrom);
 
   // Built ONCE (#219) and folded two ways: `computeStreaks` and
   // `computeMissRuns`/`computeResilience` each used to build an identical
@@ -1784,6 +1885,7 @@ export function computeStats(habit, entries,
   return {
     score: scores.length ? scores[scores.length - 1].score : 0,
     scores,
+    trend: trendOver(scores, alpha),
     streaks,
     currentStreak: currentStreak(streaks, end),
     bestStreak: bestStreak(streaks),
@@ -1860,7 +1962,7 @@ export function summaryStats(habit, entries,
   // `computeStreaks`, so this walks the range and builds the series once each
   // rather than a second time apiece inside that wrapper (#219).
   const dates = boundedRange(from, end);
-  const scores = scoresOver(habit, entryMap, dates, unlogged, creditFrom);
+  const { scores } = scoresOver(habit, entryMap, dates, unlogged, creditFrom);
   const series = onPaceSeries(habit, entryMap, dates, unlogged, creditFrom);
   const streaks = streaksFrom(series);
   // `missRunsFrom(series)` and NOT `computeMissRuns`, which would rebuild
