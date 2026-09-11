@@ -94,7 +94,13 @@ async function refreshBackupStatus() {
   const { state: runState, error, date } = body.last;
   let text;
   if (runState === 'ok') {
-    text = `Scheduled backup: last ran ${date}, kept ${body.keep} files.`;
+    // body.keep is the configured ceiling, read live from the environment —
+    // not a count of files that exist. Stating it as the retention POLICY
+    // rather than as a fact about this run is deliberate: on day two of a
+    // fresh install the account has one file, not seven, and raising
+    // HABITERALL_BACKUP_KEEP later must not retroactively restate every past
+    // run as having kept a number it never did.
+    text = `Scheduled backup: last ran ${date}, keeping the newest ${body.keep}.`;
   } else if (runState === 'running') {
     // The honest reading of a row still saying 'running': that run began
     // and never finished.

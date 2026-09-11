@@ -1752,7 +1752,11 @@ you have also pointed it at `/data`, a note, another tool's output.
 The last outcome — when it last ran, whether it succeeded, and the error if it
 did not — shows as one line in the app's **Backup & Restore** dialog. A run that
 never finished (the process was killed mid-write) reads as a problem rather
-than as silence, and a failure never permanently disables the next attempt.
+than as silence, and a failure never permanently disables the next attempt. The
+error shown is a short classification (`ENOTDIR (mkdir)`, say), never the raw
+message — a filesystem error's full text embeds the directory you chose, and
+the complete message is written to the server's own log instead, where the
+detail belongs.
 
 Back up Authentik's database too, or you lose your user directory.
 

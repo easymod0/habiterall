@@ -308,6 +308,13 @@ exactly the dedupe key `dueBackup` needs: claim the day first, and a process
 killed mid-run leaves the honest `'running'` state behind rather than a stale
 `'ok'`.
 
+`backup_status.error` is a short CLASSIFICATION (`reportableError` in
+`backup.js`), never the raw error message — a Node `fs` error's `.message`
+embeds the path it operated on, and the directory is exactly what
+`GET /api/backup/status` promises never to disclose. The full message still
+goes to the server's own log at `error`, which is the operator's log and
+where the detail belongs.
+
 It is a table and not a setting on purpose, for the same reason
 `server_secrets` and `auth_credentials` are not: this is the server reporting
 on itself, never sent by the client and never carried by a backup — a backup
@@ -318,3 +325,11 @@ directory path at all, only a basename for `file` — the operator chose the
 directory in their own compose file and does not need the app to hand it back,
 and disclosing a server filesystem path buys nothing on an edition whose
 password is optional.
+
+A day whose run FAILED is not retried until the next local date: the row
+claims the day before the attempt, and `dueBackup`'s dedupe is the date alone —
+it cannot tell a failed attempt from a successful one, only that today has
+already been tried. The trade is one lost night against a status write on
+every one of the 1,440 ticks a day, and the failure is not silent in the
+meantime — it is visible in the dialog (`GET /api/backup/status`) until the
+next day's run repairs it or an operator does.

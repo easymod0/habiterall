@@ -89,6 +89,33 @@ export function backupConfig(env) {
   return { dir, schedule, scheduleMinutes, keep, enabled };
 }
 
+/**
+ * A short classification of `err` that structurally CANNOT carry a
+ * filesystem path — never `err.message`, never `String(err)`. A Node `fs`
+ * error's `.message` embeds the path it operated on
+ * (`ENOTDIR: not a directory, mkdir '/…'`), and `backup_status.error` is
+ * exactly what `GET /api/backup/status` returns verbatim: the route's own
+ * comment, the `backup_status` column comment in `db.js`, and the
+ * "Scheduled backups" paragraph in this edition's `CLAUDE.md` all promise
+ * that response never discloses the operator's `HABITERALL_BACKUP_DIR`, and
+ * that route sits behind `requireAuth`, which is a no-op under
+ * `HABITERALL_AUTH=off` — the very edition whose password is optional.
+ *
+ * The FULL error still reaches the server's own log exactly as before
+ * (`log.error('backup.failed', { date }, err)`) — that is the operator's own
+ * log, read by the operator alone, and it is where the detail belongs. What
+ * is stored here is a CLASSIFICATION for the dialog, not a redaction of the
+ * message: `code`+`syscall` (`ENOSPC (write)`), else `code` alone, else the
+ * error's constructor name (`TypeError`), else the literal `'Error'`.
+ */
+function reportableError(err) {
+  const code = typeof err?.code === 'string' && err.code ? err.code : '';
+  const syscall = typeof err?.syscall === 'string' && err.syscall ? err.syscall : '';
+  if (code && syscall) return `${code} (${syscall})`;
+  if (code) return code;
+  return err instanceof Error ? err.constructor.name : 'Error';
+}
+
 /** The `backup_status` row, shaped for `GET /api/backup/status`, or `null`. */
 export function backupStatus() {
   const row = /** @type {any} */ (q.status.get());
@@ -160,13 +187,17 @@ export async function runBackup(cfg, deps) {
       // — only the STATE says error, because a volume quietly filling up
       // from a failed prune is exactly the failure that must be loud.
       log.error('backup.prune_failed', { date, file }, err);
-      q.upsertStatus.run(date, 'error', String(err?.message ?? err), file, bytes, 0);
+      q.upsertStatus.run(date, 'error', reportableError(err), file, bytes, 0);
       return;
     }
 
     if (pruned.length) {
       // Names and dates only, per the README's rule on what a log may hold.
-      log.info('backup.pruned', { date, count: pruned.length, files: pruned });
+      // `files` is joined into one string rather than left as an array:
+      // `scalar()` (shared/src/log.js) collapses any array to `[N items]`,
+      // which is why `count` already carries the number and this field
+      // exists at all — an unjoined array here logged no names, ever.
+      log.info('backup.pruned', { date, count: pruned.length, files: pruned.join(', ') });
     }
     q.upsertStatus.run(date, 'ok', '', file, bytes, pruned.length);
     log.info('backup.ok', { date, file, bytes, pruned: pruned.length });
@@ -176,7 +207,7 @@ export async function runBackup(cfg, deps) {
     // return normally rather than let it propagate.
     log.error('backup.failed', { date }, err);
     try {
-      q.upsertStatus.run(date, 'error', String(err?.message ?? err), '', null, 0);
+      q.upsertStatus.run(date, 'error', reportableError(err), '', null, 0);
     } catch (inner) {
       // Recording the failure must not itself be the thing that throws.
       log.error('backup.status_write_failed', { date }, inner);

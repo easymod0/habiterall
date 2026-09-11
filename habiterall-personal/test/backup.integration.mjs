@@ -5,8 +5,11 @@
  * storage at all. What that suite cannot see is the half that only exists
  * once wired to a real filesystem, a real database and the real tick:
  *
- *   1. the scheduled file is BYTE-FOR-BYTE what `GET /api/export` produces —
- *      the "one code path" property `buildBackupPayload` exists for;
+ *   1. the scheduled file's parsed payload deep-equals what `GET /api/export`
+ *      produces, `exported_at` aside — it is NOT byte-for-byte (the route
+ *      sends compact JSON, the file is written two-space indented, and the
+ *      timestamps differ by construction), but both come from the one code
+ *      path `buildBackupPayload` exists for;
  *   2. the dedupe survives a real day's worth of ticks without rewriting;
  *   3. retention only ever deletes files this module wrote;
  *   4. a failure (an unwritable directory) is reported, never fatal, and a
@@ -16,12 +19,16 @@
  *   6. the feature stays off until `HABITERALL_BACKUP_DIR` is set;
  *   7. a successful run leaves no `.tmp` behind;
  *   8. `HABITERALL_NOTIFY=off` must not silently take the backup down with
- *      it — the coupling defect `notifier.js`'s `start()` exists to prevent.
+ *      it — the coupling defect `notifier.js`'s `start()` exists to prevent;
+ *   9. ...and the reverse must hold too: `HABITERALL_NOTIFY=off` must keep the
+ *      Discord GATEWAY shut even with a bot token configured, because the
+ *      backup hook joins only the tick and never the reminders' receive half.
  *
  * Every case drives `backupTask`/`runBackup` with a CHOSEN instant rather
- * than waiting on the wall clock — the one exception is case 8, which has to
- * go through the real `start()` to prove the wiring, and uses a schedule of
- * '00:00' so it is due at whatever real time the suite happens to run.
+ * than waiting on the wall clock — the exceptions are cases 8 and 8b, which
+ * have to go through the real `start()` to prove the wiring, and use a
+ * schedule of '00:00' so each is due at whatever real time the suite happens
+ * to run.
  *
  *   node test/backup.integration.mjs
  */
@@ -253,6 +260,13 @@ try {
   ck('the deletion is logged, naming the count',
     lines3.some((l) => l.includes('"msg":"backup.pruned"') && l.includes('"count":4')),
     lines3.join('').slice(0, 800));
+  // scalar() (shared/src/log.js) collapses any array to `[N items]`, so
+  // `files: pruned` alone never puts a single name in the emitted line — this
+  // is the assertion that keeps `files: pruned.join(', ')` from regressing.
+  ck('the deletion names at least one of the actual pruned filenames',
+    lines3.some((l) => l.includes('"msg":"backup.pruned"') &&
+      olderDates3.slice(0, 4).some((d) => l.includes(backupFileName(d)))),
+    lines3.join('').slice(0, 800));
 
   /* ---------- case 4: the failure path ---------- */
 
@@ -290,6 +304,18 @@ try {
   ck('the failure was logged at error',
     lines4.some((l) => l.includes('"level":"error"') && l.includes('backup')),
     lines4.join('').slice(0, 800));
+
+  // The status route's error must be a CLASSIFICATION, never the raw fs error
+  // message — which embeds this very directory (`ENOTDIR: not a directory,
+  // mkdir '<badDir4>'`). Assert both halves: the path is nowhere in the
+  // response, and the classification still names the code.
+  const status4Text = JSON.stringify(status4);
+  ck('the status response discloses none of the backup directory path',
+    !status4Text.includes(badDir4) && !status4Text.includes(blocker4) &&
+    !status4Text.includes(workdir) && !status4Text.includes('blocker'),
+    status4Text);
+  ck("the reported error names the code (ENOTDIR) rather than the raw message",
+    status4.last.error.includes('ENOTDIR'), status4Text);
 
   // Repair the directory and tick again on the NEXT local date — a failure
   // must not permanently disable the feature.
@@ -394,6 +420,70 @@ try {
     ck('a backup file is written even with reminders off', true);
   } finally {
     liveNotifier8?.stop();
+  }
+
+  /* ---------- case 8b: HABITERALL_NOTIFY=off must keep the Discord gateway shut ---------- */
+  //
+  // The backup hook joins the TICK only; the gateway is the reminders'
+  // RECEIVE half and must stay shut with them, even when a bot token is
+  // configured — otherwise an operator who only set HABITERALL_BACKUP_DIR
+  // (with a stray DISCORD_BOT_TOKEN left set from before reminders were
+  // turned off) gets the bot back online, socket open, and a stale
+  // Yes/No/Skip button left in a channel able to write an entry again.
+  // `connectGateway`'s `open()` calls `new WebSocketImpl(url)` synchronously
+  // with `WebSocketImpl` defaulting to `globalThis.WebSocket`
+  // (`shared/src/discord-gateway.js`), so a fake class recording its own
+  // construction is enough to prove no socket opened without an ounce of
+  // real network. Driven over the real `start()`, the same reason case 8
+  // is: only running the wiring can see a reverted `config.enabled &&`.
+
+  class FakeWebSocket8b {
+    constructor(url) { FakeWebSocket8b.constructed.push(url); }
+    close() {}
+    send() {}
+  }
+  FakeWebSocket8b.constructed = [];
+
+  const realWebSocket8b = globalThis.WebSocket;
+  // Deleted in the `finally` below, before case 9 spawns a child with
+  // `{...process.env, ...}` — a leaked token would otherwise travel into it.
+  process.env.DISCORD_BOT_TOKEN = 'fake-token-for-case-8b';
+  globalThis.WebSocket = /** @type {any} */ (FakeWebSocket8b);
+
+  let liveNotifier8b = null;
+  try {
+    const dir8b = join(workdir, 'case8b');
+    process.env.HABITERALL_BACKUP_DIR = dir8b;
+    process.env.HABITERALL_BACKUP_SCHEDULE = '00:00';
+    process.env.HABITERALL_BACKUP_KEEP = '7';
+    process.env.HABITERALL_NOTIFY = 'off';
+    process.env.HABITERALL_NOTIFY_INTERVAL_MS = '1000';
+
+    // `backup_status` is the ONE shared row (see the note above `syntheticDay`),
+    // and case 8 has already claimed today's real wall-clock date — so a
+    // second real-clock case waiting for a FILE would wait on a run
+    // `dueBackup` correctly refuses to repeat the same local day, and time
+    // out for a reason that has nothing to do with what this case tests. What
+    // is under test here is only that the wrapped hook FIRES on the tick —
+    // `startNotifier` calls `onTick` every interval regardless of what
+    // `dueBackup` decides inside it — so the hook itself is wrapped to count
+    // its own invocations rather than relying on a file landing on disk.
+    let ticks8b = 0;
+    const backupHookReal8b = backupTask(process.env, { payload: buildBackupPayload });
+    const backupHook8b = backupHookReal8b
+      ? async (instant) => { ticks8b++; await backupHookReal8b(instant); }
+      : null;
+    liveNotifier8b = startNotifier(process.env, backupHook8b ? { onTick: backupHook8b } : {});
+
+    await waitFor(() => ticks8b > 0,
+      { what: 'the tick to fire at least once in case 8b, proving the tick still ran' });
+
+    ck('HABITERALL_NOTIFY=off keeps the Discord gateway shut even with a bot token configured',
+      FakeWebSocket8b.constructed.length === 0, JSON.stringify(FakeWebSocket8b.constructed));
+  } finally {
+    liveNotifier8b?.stop();
+    globalThis.WebSocket = realWebSocket8b;
+    delete process.env.DISCORD_BOT_TOKEN;
   }
 
   /* ---------- case 9: the real entry point, spawned, wires the real hook ---------- */

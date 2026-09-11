@@ -419,8 +419,14 @@ export function start(env = process.env, hooks = {}) {
   }
 
   // The gateway is only for receiving button presses, so it is opened only when
-  // there is a bot to receive them with. Sending needs no socket.
-  const gateway = config.botToken
+  // there is a bot to receive them with AND reminders are actually enabled.
+  // The backup hook above joins the TICK, not the gateway: the gateway is the
+  // reminders' receive half, and `HABITERALL_NOTIFY=off` must keep it shut
+  // even when a bot token is configured for later use — otherwise an operator
+  // who only set `HABITERALL_BACKUP_DIR` got the bot back online, socket open,
+  // with a stale Yes/No/Skip button from before reminders were disabled still
+  // able to write an entry.
+  const gateway = config.enabled && config.botToken
     ? connectGateway({
       token: config.botToken,
       log,
