@@ -46,6 +46,7 @@ const sub = $('#day-sub');
 const booleanBlock = $('#day-boolean');
 const numericBlock = $('#day-numeric');
 const notes = $('#day-notes');
+const notesWrap = $('#day-notes-wrap');
 const skip = $('#day-skip');
 const clear = $('#day-clear');
 const save = $('#day-save');
@@ -70,6 +71,27 @@ const save = $('#day-save');
 let dayHost = null;
 
 /**
+ * Whether the note box is showing the day's REAL note, for as long as it is
+ * open — `false` when the opener could not find out what the note says.
+ *
+ * `saveDay` STATES the note on every save, which is what makes the dialog safe
+ * to open from a surface holding the text and unsafe from one that does not: an
+ * empty box over a day that has a note destroys it on the next Save (#224).
+ * There is a third answer, and it is this one: `PUT
+ * /habits/:id/entries/:date` PRESERVES a `notes` it was not asked to change
+ * (see `entryWrite`, `shared/src/validate.js`), so a dialog that does not know
+ * the note can simply not mention it — the day is still fully editable and the
+ * note is untouched, which is strictly better than refusing to open.
+ *
+ * The one surface that reaches it is `ui/dashboard.js`'s `editDay`, whose
+ * `GET /habits/:id/entries` failed — offline, with nothing in the worker's
+ * cache for that habit. The box is hidden rather than disabled, because a
+ * disabled empty box says "this day has no note", which is the one thing that
+ * cannot be known here.
+ */
+let noteKnown = true;
+
+/**
  * The same write, in the vocabulary `StripHost.edit` speaks.
  *
  * One expression rather than a branch at the call site: `'clear'|'skip'|number`
@@ -88,7 +110,10 @@ const asEdit = (body) => {
  * @param date     ISO date being edited
  * @param value    what is recorded, if anything
  * @param isSkip   whether the day is flagged as a skip
- * @param noteText the note attached to the day, if any
+ * @param noteText the note attached to the day — a string, `''` for a day with
+ *   none, or **`null`** for a caller that could not find out. See `noteKnown`:
+ *   `null` hides the box and leaves `notes` out of the write entirely, which is
+ *   the one honest answer for a surface that does not hold the text.
  * @param host     the opening page's own day model, for a queued write
  */
 export function openDayDialog(habit, date, value, isSkip, noteText = '', host = null) {
@@ -103,7 +128,15 @@ export function openDayDialog(habit, date, value, isSkip, noteText = '', host = 
     show_as: habit.show_as, target_type: habit.target_type,
     target_value: habit.target_value,
   };
-  notes.value = noteText ?? '';
+  // The parameter's own `= ''` default is what keeps `undefined` out of this
+  // comparison, so a caller passing nothing — every call site that predates the
+  // third answer, including `ui/detail.js`'s `notesByDate[date]` for a day with
+  // no note — lands on "no note" rather than on "unknown". That makes `!==
+  // null` and `!= null` equivalent HERE, and the default is the load-bearing
+  // half: remove it and an absent argument starts suppressing the box.
+  noteKnown = noteText !== null;
+  notes.value = noteKnown ? noteText : '';
+  notesWrap.hidden = !noteKnown;
 
   // A measurable habit gets a number field; a yes/no habit gets exactly two
   // buttons. Only one of the two controls is ever present.
@@ -225,17 +258,22 @@ async function saveDay(body) {
   const { habitId, date } = state.dayEdit ?? {};
   if (!habitId) return;
   // Read before the await: the box is what the user typed, and this is the same
-  // string the request carries.
-  const noteText = notes.value.trim();
+  // string the request carries. `null` where the note is not known — the box is
+  // hidden and holds nothing to read, and stating `''` from it would be the
+  // #224 destruction this whole path exists to avoid. See `noteKnown`.
+  const noteText = noteKnown ? notes.value.trim() : null;
 
   try {
     if (body === null) {
       await api(`/habits/${habitId}/entries/${date}`, { method: 'DELETE' });
     } else {
-      // Notes ride along with whatever the day is being set to.
+      // Notes ride along with whatever the day is being set to — unless this
+      // dialog never learnt what the note says, where the key is OMITTED and
+      // `entryWrite` preserves whatever is stored.
       await api(`/habits/${habitId}/entries/${date}`, {
         method: 'PUT',
-        body: JSON.stringify({ notes: noteText, ...body }),
+        body: JSON.stringify(
+          noteText === null ? { ...body } : { notes: noteText, ...body }),
       });
     }
   } catch (e) {
@@ -243,8 +281,12 @@ async function saveDay(body) {
     if (!e.queued) return;
     // The note goes with the value and the skip, which is what makes this
     // different from #230's tap: that one had nothing to plumb because a tap
-    // states nothing about a note, and this dialog states all three.
-    dayHost?.edit(habitId, date, asEdit(body), noteText);
+    // states nothing about a note, and this dialog states all three — except
+    // where it states two, and then `note` is left off for the same reason the
+    // body above leaves it off. `undefined` is `StripHost.edit`'s own "this
+    // write says nothing about the note", so the host's copy is not moved
+    // either.
+    dayHost?.edit(habitId, date, asEdit(body), noteText ?? undefined);
     dayHost?.repaint();
     dialog.close();
     return;

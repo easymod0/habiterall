@@ -20,6 +20,7 @@ import { api } from '/shared/ui/api.js';
 import { focusKeyOf, habitIcon, restoreFocus } from '/shared/ui/components.js';
 import { convention } from '/shared/ui/count-field.js';
 import { openDataDialog } from '/shared/ui/data-dialog.js';
+import { openDayDialog } from '/shared/ui/day-dialog.js';
 import { dateColumns, dayCells } from '/shared/ui/day-strip.js';
 import {
   addDaysISO, datesEndingOn, freqLabel, iso,
@@ -151,7 +152,7 @@ const listHost = {
     };
   },
 
-  edit(id, date, to) {
+  edit(id, date, to, note) {
     const habit = this.habit(id);
     if (!habit) return () => {};
     const had = Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined;
@@ -166,6 +167,21 @@ const listHost = {
       habit.entries[date] = to === 'skip' ? SKIP : to;
     }
     const wasSkip = setSkip(habit, date, to === 'skip');
+    // What this write SAYS about the note, applied to the one thing this list
+    // holds about notes: which dates have one. `undefined` says nothing and
+    // moves nothing — every plain tap, and a day editor that never learnt the
+    // note (`noteKnown`, ui/day-dialog.js). A `'clear'` takes the note with the
+    // row, exactly as the server does. Captured before, restored by the undo,
+    // for the same reason `wasSkip` is: a write that turns out not to have been
+    // made must leave no mark behind, and a stale dot is a mark.
+    const noted = noteDatesByHabit.get(id) ?? new Set();
+    noteDatesByHabit.set(id, noted);
+    const hadNote = noted.has(date);
+    if (to === 'clear') noted.delete(date);
+    else if (note !== undefined) {
+      if (note) noted.add(date);
+      else noted.delete(date);
+    }
 
     return () => {
       const back = this.habit(id);
@@ -173,19 +189,83 @@ const listHost = {
       if (had === undefined) delete back.entries[date];
       else back.entries[date] = had;
       setSkip(back, date, wasSkip);
+      const backNoted = noteDatesByHabit.get(id);
+      if (!backNoted) return;
+      if (hadNote) backNoted.add(date);
+      else backNoted.delete(date);
     };
   },
 
   repaint: () => paint(),
   refresh: () => load(),
 
-  // Routed rather than opened in place — see `StripHost.editDay`'s doc
-  // (`ui/day-strip.js`) for why: this list holds no note TEXT to seed the
-  // dialog with, only which dates hold one, and `saveDay` always STATES the
-  // note it holds on save. `openHabit` is this module's own import of
-  // `ui/detail.js`'s `open`, already in scope — no new export.
-  editDay: (id, date) => { openHabit(id, { editDay: date }); },
+  editDay: (id, date) => editDayOverList(id, date),
 };
+
+/**
+ * Open the day editor over the LIST, seeding its note box with the day's real
+ * note — which this module does not hold and has to go and get.
+ *
+ * `/overview` sends which dates HOLD a note and never the text (a note is up to
+ * 500 characters and that payload is already size-managed), so there is exactly
+ * one thing to decide here: what to put in the box. `saveDay` STATES the note
+ * on every save, so an empty box over a day that has one destroys it (#224) —
+ * which is why this used to navigate to the habit's own page instead
+ * (`openHabit(id, {editDay: date})`, #297), the one surface holding the text.
+ *
+ * It fetches instead, and that is CHEAPER than what it replaced rather than an
+ * added cost: the navigation it drops fetched this exact request AND
+ * `/habits/:id/stats` beside it, then rebuilt up to ten cards of SVG, to end up
+ * at the same dialog over a page nobody asked to be on.
+ *
+ * **It fetches unconditionally, and deliberately does not shortcut on
+ * `hasNote`.** Skipping the request for a day this list believes has no note
+ * would be right whenever that belief is right — and the one case it is wrong
+ * is the dangerous one: `noteDatesByHabit` reads a missing `h.notes` as empty
+ * (see its own comment), which is exactly what a service-worker-cached
+ * `/overview` predating that field sends, so the first boot after an upgrade
+ * would seed `''` over every real note on the list and destroy the next one
+ * saved. A belief that can be silently empty is not a safe thing to decide a
+ * destructive write on.
+ *
+ * **The value and the skip still come from this host, not from the reply.**
+ * They are the optimistic model — a queued tap has already moved them and the
+ * server has not heard about it — so reading them off the fetch would open the
+ * dialog on a day the grid behind it is painting differently. Only the NOTE is
+ * taken from the reply, because only the note is something this host has no
+ * copy of at all.
+ *
+ * A fetch that fails opens the dialog anyway, with the note declared UNKNOWN
+ * (`null`): the day stays fully editable and `notes` is left out of the write,
+ * which `PUT /habits/:id/entries/:date` answers by preserving whatever is
+ * stored. Refusing to open would be the worse answer offline, where this is
+ * reachable and where the tap is the whole point of the grid.
+ */
+async function editDayOverList(id, date) {
+  const habit = listHost.habit(id);
+  if (!habit) return;
+  const { value, isSkip } = listHost.read(id, date);
+
+  let note = null;
+  try {
+    const rows = await api(`/habits/${id}/entries`);
+    // `?? ''` is the answer for a day with NO ROW, which is a day with no note
+    // — not the `null` above, which means "nobody could find out". The two are
+    // different claims and only the second may suppress the box.
+    note = rows.find((r) => r.date === date)?.notes ?? '';
+  } catch {
+    // Deliberately silent. The dialog opens either way and says what it knows
+    // by what it shows; a toast here would report a failure the user is about
+    // to be given a working dialog for.
+  }
+
+  // Still on the list, and still the same habit: the fetch is a round trip, and
+  // a `'reload'` (a reconnect flush, a save elsewhere) can replace every habit
+  // in `state.habits` while it is in flight. Opening a modal over a view the
+  // user has since navigated away from is the one thing this cannot do.
+  if (!dashboardShowing() || !listHost.habit(id)) return;
+  openDayDialog(listHost.habit(id), date, value, isSkip, note, listHost);
+}
 
 /**
  * The browser's own local date at the moment the window on screen was FETCHED.

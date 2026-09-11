@@ -914,6 +914,79 @@ try {
     withNote.label.endsWith(' — has a note') && !withNote.label.includes(NOTE),
     JSON.stringify(withNote));
 
+  /*
+   * ...and the marked cell is still CLICKABLE, which the whole block above is
+   * blind to. Drawing the dot and counting it says nothing about whether the
+   * day underneath can still be opened, and it could not be: `attachCellPopover`'s
+   * `raise` moves a hovered cell to the end of its parent and its marks after
+   * it, and its early return asked `parent.lastElementChild === cell` — which
+   * a cell carrying a mark can never satisfy, because `raise` itself put the
+   * mark last. So every event re-appended the group; the re-append blurs the
+   * cell, `raise` restores the focus it took, and the restore fires `focusin`,
+   * which raises again, unbounded. Measured against the unfixed build with the
+   * press below: 2,066 `focusin`s and 66 `pointerover`s for one press, and NO
+   * `click` at all, the mousedown target having been detached and reattached
+   * under the pointer for the whole gesture. The note dot is simply the first
+   * mark reachable without a setting; with `questionMarks` on, every unanswered
+   * day had it too.
+   *
+   * It needs a REAL CDP mouse press and cannot be done with a scripted
+   * `.click()`: the loop is driven by `pointerover` and `focusin`, neither of
+   * which a synthetic click dispatches, so a case built on one passes against
+   * the unfixed code. The NEGATIVE half is the plain day beside it — without
+   * it, a press that opened nothing for an unrelated reason (a mis-hit, a cell
+   * scrolled out of view) would read as this defect and a build with no fix in
+   * it would look fixed the moment the coordinates went wrong.
+   */
+  const pressCell = async (date) => {
+    await ev(`document.getElementById('day-dialog')?.close()`).catch(() => {});
+    const at = await ev(`(() => {
+      const c = ${calCardSel}?.querySelector('.cal-cell[data-date="${date}"]');
+      if (!c) return null;
+      c.scrollIntoView({ block: 'center' });
+      const r = c.getBoundingClientRect();
+      return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+    })()`);
+    if (!at) return { pressed: false };
+    const where = { ...at, button: 'left', clickCount: 1 };
+    // The hover is its own step: `raise` runs on `pointerover`, so a press with
+    // no pointer movement before it never reaches the code under test.
+    await send('Input.dispatchMouseEvent',
+      { type: 'mouseMoved', ...where, button: 'none' }, sessionId);
+    await sleep(120);
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...where }, sessionId);
+    await sleep(60);
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...where }, sessionId);
+    await sleep(400);
+    return ev(`(() => ({
+      pressed: true,
+      open: document.getElementById('day-dialog').open === true,
+      note: document.getElementById('day-notes').value,
+    }))()`);
+  };
+
+  // A day this window certainly draws and certainly has no note: the fixtures
+  // seed none, and `day.date` is the only date this suite has written one to.
+  const plainDate = await ev(`(() => {
+    const svg = ${calCardSel}?.querySelector('[aria-label="Completion calendar"]');
+    const dates = [...(svg?.querySelectorAll('.cal-cell[data-date]') ?? [])]
+      .map(c => c.getAttribute('data-date'))
+      .filter(d => d !== ${JSON.stringify(day.date)} && d <= new Date().toISOString().slice(0,10));
+    return dates.at(-1) ?? null;})()`);
+
+  const plainPress = await pressCell(plainDate);
+  ck('a calendar day with NO mark opens the editor on a real mouse press',
+    plainPress.open === true, JSON.stringify({ plainDate, ...plainPress }));
+  await ev(`document.getElementById('day-dialog').close()`).catch(() => {});
+
+  const notedPress = await pressCell(day.date);
+  ck('...and so does a day carrying the note DOT — the mark must not make the '
+    + 'cell unclickable',
+    notedPress.open === true, JSON.stringify({ date: day.date, ...notedPress }));
+  ck('...and that editor is seeded with the real note',
+    notedPress.note === NOTE, JSON.stringify(notedPress));
+  await ev(`document.getElementById('day-dialog').close()`).catch(() => {});
+
   // The anti-#176 half: a mark passing on the noted habit says nothing about
   // a SECOND habit whose `notesByDate` really is empty — fixtures never seed
   // a note, so any other habit is a genuine negative.

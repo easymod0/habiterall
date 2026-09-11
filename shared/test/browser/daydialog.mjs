@@ -73,8 +73,13 @@ const fakeHabitIcon = (habit) => {
  */
 const BINDINGS = [
   'title', 'sub', 'booleanBlock', 'numericBlock',
-  'notes', 'skip', 'clear', 'save', 'dialog', 'dayCountField', 'habitIcon',
+  'notes', 'notesWrap', 'skip', 'clear', 'save', 'dialog', 'dayCountField', 'habitIcon',
   'dayHost',
+  // Assigned by `openDayDialog`, like `dayHost` above, and unlike it this one
+  // IS asserted here: it is what decides whether `saveDay` states the note at
+  // all. A function parameter is assignable, so the slice sets it exactly as
+  // the module's own `let` would.
+  'noteKnown',
   // How this account spells an amount. Handed in for the reason every other
   // name here is — the harness evals the function's SOURCE — and it cannot be
   // the module's own, since that one is `formatAmount` bound to `convention()`
@@ -105,8 +110,15 @@ const { formatAmount } = await import('../../public/ui/amount.js');
  * @param format which character this account's decimal point is, standing in
  *   for `convention()`. `point` for every case that predates the goal being
  *   spelled through the formatter at all.
+ * @param noteText what the opener knows about the day's note — a string, or
+ *   `null` for "could not find out". DEFAULTED to `undefined` rather than to
+ *   `''`, so every case below goes through `openDayDialog`'s OWN default. That
+ *   default is the load-bearing half of the three-answer split (see the
+ *   comment at `noteKnown =` in the module): it is what keeps an absent
+ *   argument meaning "no note", and a harness that supplied `''` itself would
+ *   pass against a version with the default deleted.
  */
-function run(habit, date, value, isSkip, prefs = {}, format = 'point') {
+function run(habit, date, value, isSkip, prefs = {}, format = 'point', noteText = undefined) {
   const els = Object.fromEntries(BINDINGS.map((k) => [k, mkEl()]));
   els.dialog = { showModal() { this.open = true; } };
   // The amount control is a module of its own now (ui/count-field.js), so what
@@ -130,13 +142,19 @@ function run(habit, date, value, isSkip, prefs = {}, format = 'point') {
   const state = {};
   const YES = 2, UNSET = 0;
   const settings = { get: (key) => prefs[key] ?? false };
+  // `noteKnown` comes back out of the eval rather than off `els`, because it is
+  // a module-level BINDING and the slice receives it as a parameter — an
+  // assignment to one of those is invisible to this scope. Returned explicitly,
+  // which is the only way a harness built on `new Function` can read a value
+  // the function under test merely reassigns.
   const fn = new Function(...BINDINGS, 'state', 'YES', 'UNSET', 'settings',
     'isAvoided', 'formatDateLong', 'fromISOLocal',
-    'habit', 'date', 'value', 'isSkip',
-    `${body}; openDayDialog(habit, date, value, isSkip); return state;`);
+    'habit', 'date', 'value', 'isSkip', 'noteText',
+    `${body}; openDayDialog(habit, date, value, isSkip, noteText);
+     return { state, noteKnown };`);
   const out = fn(...BINDINGS.map((k) => els[k]), state, YES, UNSET, settings,
-    isAvoided, formatDateLong, fromISOLocal, habit, date, value, isSkip);
-  return { els, state: out, doneBtn, notBtn };
+    isAvoided, formatDateLong, fromISOLocal, habit, date, value, isSkip, noteText);
+  return { els, state: out.state, noteKnown: out.noteKnown, doneBtn, notBtn };
 }
 
 const boolHabit = { id: 1, name: 'Meditate', type: 'boolean', unit: '', target_value: 0, target_type: 'at_least' };
@@ -308,6 +326,52 @@ check('no icon: the title has no icon child',
   r.els.title._children.length === 0, String(r.els.title._children.length));
 check('no icon: the title is exactly the name',
   r.els.title.textContent === 'Meditate', JSON.stringify(r.els.title.textContent));
+
+/*
+ * The note has THREE answers, not two, and the third is what lets the dashboard
+ * open this dialog at all.
+ *
+ * `saveDay` states the note on every save, so an empty box over a day that has
+ * one destroys it (#224) — the reason the list used to navigate to the habit's
+ * own page instead. `null` is the opener saying it could not find out: the box
+ * is hidden and `noteKnown` goes false, which is what makes `saveDay` leave
+ * `notes` out of the body entirely and `PUT /entries/:date` preserve what is
+ * stored.
+ *
+ * Each case asserts BOTH halves — what is on screen and the flag the write
+ * turns on — because they are set by two different lines and a version that
+ * hid the box without moving the flag would still destroy the note, silently
+ * and with nothing on screen to show for it.
+ */
+console.log('\n--- #297/#224: the note has three answers ---');
+
+r = run(boolHabit, '2026-03-15', 2, false, {}, 'point', 'felt easy today');
+check('note: a stated note fills the box',
+  r.els.notes.value === 'felt easy today', JSON.stringify(r.els.notes.value));
+check('note: ...and the box is shown', r.els.notesWrap.hidden === false,
+  String(r.els.notesWrap.hidden));
+check('note: ...and the write may state it', r.noteKnown === true, String(r.noteKnown));
+
+r = run(boolHabit, '2026-03-15', 2, false, {}, 'point', '');
+check('no note: the box is empty', r.els.notes.value === '', JSON.stringify(r.els.notes.value));
+check('no note: ...and still SHOWN — a day with no note is a day you can write one on',
+  r.els.notesWrap.hidden === false, String(r.els.notesWrap.hidden));
+check('no note: ...and the write states the empty string, which is a stated clear',
+  r.noteKnown === true, String(r.noteKnown));
+
+// The default path, which every case above this block takes. Pinned explicitly
+// rather than left implied: `undefined` must go on meaning "no note" and not
+// become the third answer by accident.
+r = run(boolHabit, '2026-03-15', 2, false);
+check('an absent argument is "no note", never "unknown"',
+  r.noteKnown === true && r.els.notesWrap.hidden === false && r.els.notes.value === '',
+  `${r.noteKnown} / ${r.els.notesWrap.hidden} / ${JSON.stringify(r.els.notes.value)}`);
+
+r = run(boolHabit, '2026-03-15', 2, false, {}, 'point', null);
+check('unknown note: the box is HIDDEN, never shown empty',
+  r.els.notesWrap.hidden === true, String(r.els.notesWrap.hidden));
+check('unknown note: ...and the write must not state one',
+  r.noteKnown === false, String(r.noteKnown));
 
 console.log(fails === 0 ? '\nALL DIALOG CHECKS PASSED' : `\n${fails} DIALOG CHECK(S) FAILED`);
 process.exit(fails === 0 ? 0 : 1);

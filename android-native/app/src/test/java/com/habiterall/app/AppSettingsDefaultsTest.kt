@@ -203,6 +203,16 @@ class AppSettingsDefaultsTest {
         // and sends `end = null` — so there is no count here for the setting to
         // govern. Mirroring it would be a value nothing on this client reads.
         "gridDays" to "the native grid scrolls and grows; it has no fixed count",
+        // What a tap on a WEB day square does: walk the cycle, or open the day
+        // editor (`#day-dialog`) instead. This client has no day editor to
+        // open — `DayGrid` and the widget tap the cycle and nothing else, and
+        // the note box the setting exists to reach is a web dialog — so a
+        // default here would be a value nothing on this client reads, which is
+        // what this list is for. Note the cycle ITSELF stays mirrored, in
+        // `Grid.nextState` over `skipDays`/`questionMarks`: those decide what
+        // the states ARE, which this client very much reads. This decides
+        // whether the web ASKS instead, which it cannot.
+        "dayTap" to "the native grid taps the cycle; it has no day editor to open",
         // The detail view IS the WebView (`#/habit/42`), so this client already
         // honours the setting — through the web registry's own default, not a
         // copy of it. One renderer, so a second default would be the drift this

@@ -890,6 +890,22 @@ export const SETTING_VALUES = {
   // than as a plain miss — which is only meaningful because a lapse is now a
   // row of its own; see `entryWrite` above.
   questionMarks: [true, false],
+  // What a plain tap on a day square DOES, on both strips (`dayCells`,
+  // public/ui/day-strip.js). `'cycle'` is what this app has always done and is
+  // the default: a boolean day walks Loop's cycle in place and a measurable one
+  // asks for an amount. `'editor'` opens the day editor instead — the same
+  // `#day-dialog` the calendar opens, so both habit types get the note box, and
+  // a skip and a clear stop being reachable only through the cycle.
+  //
+  // Two values and not a toggle, for the reason `atMostUnlogged` and `theme`
+  // are: what a tap means is a decision with more than one defensible answer,
+  // and a third (say, "ask, but only on a habit that has a note") must be
+  // addable without a boolean having to be read backwards.
+  //
+  // It is NOT a mirror. The native client's grid has its own tap, no day editor
+  // to open, and mirroring this would be a value nothing on it reads — see the
+  // entry this key carries in `notMirrored` (AppSettingsDefaultsTest).
+  dayTap: ['cycle', 'editor'],
   // What a day with NO ROW is worth on a habit with an at-most target, which is
   // the one kind where the question has two defensible answers: zero is under
   // the limit, so silence reads as success. `'miss'` by default and the rule
@@ -1011,6 +1027,10 @@ export const PORTABLE_SETTINGS = Object.freeze([
   'scoreGranularity',
   'skipDays',
   'questionMarks',
+  // Portable for the reason `calendarZoom` is: it carries no capability and
+  // moves no figure. It decides how an answer is ASKED FOR, never what any
+  // answer means — every value a tap can record is the same under both.
+  'dayTap',
   // Portable for the reason the two above are, and more so: it does not change
   // how a row is drawn, it changes what the DAYS WITH NO ROW in the same file
   // count as. Restore the entries without it and the streaks and the strength
