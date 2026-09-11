@@ -980,12 +980,23 @@ try {
     migratingPuts.length > 0 && !!cardsBody,
     JSON.stringify(migratingPuts.map((r) => r.postData)));
 
-  // The legacy rule changed in this same fix round: a bare list is read for
-  // MEMBERSHIP only, in canonical order — not "mentioned ids first" — so the
-  // expected shape below is all nine cards, calendar and history on, in the
-  // order `SETTINGS.detailCards.options` declares.
+  // The legacy rule is read for MEMBERSHIP only, in canonical order — not
+  // "mentioned ids first" — so the expected shape below is every card in the
+  // order `SETTINGS.detailCards.options` declares, with `calendar` and
+  // `history` on.
+  //
+  // ...plus the cards that did not EXIST when a bare list was still a shape
+  // anything wrote (#297). A legacy value could only ever name the ids of its
+  // own era, so an absent id outside that era was never unticked and migrates
+  // ON — see `LEGACY_ERA_CARDS` in `shared/src/validate.js`, and the mirror of
+  // it in `ui/settings.js` which is what this page actually ran. Spelled out
+  // here rather than imported: this suite asserts what the BROWSER sent, so
+  // deriving the expectation from the same module the page used would pass
+  // against a mirror that had drifted from the server's copy, which is the one
+  // thing this write is evidence about.
+  const POST_LEGACY_CARDS = ['recentDays', 'notes'];
   const expectedCards = canonicalCards.map((id) =>
-    ({ id, on: id === 'calendar' || id === 'history' }));
+    ({ id, on: id === 'calendar' || id === 'history' || POST_LEGACY_CARDS.includes(id) }));
   ck('...and the write carries the NEW {id,on}[] shape, in canonical order',
     JSON.stringify(cardsBody?.detailCards) === JSON.stringify(expectedCards),
     `got ${JSON.stringify(cardsBody?.detailCards)}, expected ${JSON.stringify(expectedCards)}`);

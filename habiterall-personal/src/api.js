@@ -204,7 +204,7 @@ const q = {
            END
   `),
   entriesInRange: db.prepare(`
-    SELECT habit_id, date, value, status
+    SELECT habit_id, date, value, status, COALESCE(notes, '') <> '' AS has_note
     FROM entries WHERE date >= ? AND date <= ? ORDER BY date
   `),
   /**
@@ -851,6 +851,11 @@ api.get('/overview', (req, res) => {
   // legitimately recorded 3 is never mistaken for a skipped day.
   const byHabit = new Map(habits.map((h) => [h.id, {}]));
   const skipsByHabit = new Map(habits.map((h) => [h.id, []]));
+  // Dates only, never the text (issue #297): the memo this payload feeds
+  // measures 499 KB for 20 habits x 365 days, and a note is up to 500
+  // characters. A skipped day can still carry a note, so this is pushed
+  // outside the skip/not-skip branch below rather than inside one arm of it.
+  const notesByHabit = new Map(habits.map((h) => [h.id, []]));
   for (const r of rows) {
     const bucket = byHabit.get(r.habit_id);
     if (!bucket) continue;
@@ -860,6 +865,7 @@ api.get('/overview', (req, res) => {
     } else {
       bucket[/** @type {string} */ (r.date)] = r.value;
     }
+    if (r.has_note) notesByHabit.get(r.habit_id).push(/** @type {string} */ (r.date));
   }
 
   // One extra SELECT, read once for the whole payload for the same reason
@@ -971,6 +977,7 @@ api.get('/overview', (req, res) => {
       ...toApiHabit(h),
       entries: byHabit.get(h.id) ?? {},
       skips: skipsByHabit.get(h.id) ?? [],
+      notes: notesByHabit.get(h.id) ?? [],
       score: stats.score,
       currentStreak: stats.currentStreak,
       bestStreak: bestStreakValue,

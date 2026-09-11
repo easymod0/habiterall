@@ -344,9 +344,51 @@ one call further out.
 ## The detail view
 
 **Which cards it draws is a list of INVENTED IDS, and the server never hears
-about it.** `detailCards` gates the ten builders in `ui/detail.js`; the ids come
-from `DETAIL_CARDS` (`shared/src/validate.js`) and not titles, because a card has
-no id and the titles are English prose #144 will translate.
+about it.** `detailCards` gates the eleven builders in `ui/detail.js` (#297 added
+the notes card, below); the ids come from `DETAIL_CARDS` (`shared/src/validate.js`)
+and not titles, because a card has no id and the titles are English prose #144
+will translate.
+
+**A note's DOT is a mark, never a hue (#297).** The calendar could have painted a
+note-bearing day a different colour and did not: the four day states already own
+the colour meaning on that grid — done/skip/no/unknown, plus the at-most ramp and
+the ghost-tick shapes above — and a note is orthogonal to all of them, on any day
+state at once. Recolouring the cell would either invent a fifth meaning for a hue
+or silently steal one of the four existing ones. A small corner dot instead reuses
+exactly the idiom the `?` glyph and the run stroke already established: something
+drawn ON TOP of whatever the cell already means, `pointer-events: none` so it
+never steals the click, and read only for truthiness — never for its own colour —
+because `themecheck.mjs` exists precisely because a colour resolved with
+`getComputedStyle` at draw time freezes into the SVG and the detail view redraws
+by REFETCHING, so a frozen palette survives a theme switch. `charts.js`'s dot
+therefore reads `themed(...)`/`shade(...)` exactly as every other mark on this
+grid does, never a resolved literal.
+
+**A note gained three new ways into the day editor, and every one of them is
+SECONDARY — none may steal the plain tap (#297).** `dayCells`
+(`ui/day-strip.js`) wires `contextmenu` (right-click / long-press) and
+Shift+Enter, on both grids that share that file, to `host.editDay?.(...)` — a
+method the plain click handler never touches. The third is the notes card
+itself: each row is a real `<button>` calling `detailHost.editDay`, which is
+keyboard-reachable by construction rather than by a shortcut nobody discovers
+on their own. All three routes converge on the same rule the day editor has
+always had: `saveDay` unconditionally states the note on every save, so a way
+in that cannot seed the box with the TRUE text would silently destroy whatever
+was there (#224).
+
+**`StripHost.editDay` is optional, and the two hosts answer it differently on
+purpose — that split is the whole point of `StripHost` existing (#297).**
+`detail.js`'s `detailHost.editDay` opens the dialog directly: this page holds the
+whole unwindowed history, note text included, so it can seed the dialog
+truthfully with no second fetch. `dashboard.js`'s `listHost.editDay` cannot do
+that — the dashboard holds only the fortnight it asked for and, by design, never
+the note TEXT, only which DATES hold one (`/overview`'s per-habit `notes` array,
+dates only — a note is up to 500 characters and the payload is already
+size-managed) — so it routes through `openHabit(habit.id, { editDay: date })`,
+i.e. detail's own `open`, which opens the habit's page and then the day editor over it once the
+real note is in hand. Opening the editor in place over the dashboard with an
+empty seed would be the #224 landmine again, this time self-inflicted by the
+grid that cannot see the note it would need to seed with.
 
 **"Recent days" is the one card you ACT on, and it is first for that reason.**
 It is the dashboard's tappable day strip for one habit — `ui/day-strip.js`,
@@ -402,12 +444,36 @@ through `cappedColumns`, NOT `gridColumns` — that function's 7/10/14 ladder
 exists to protect the dashboard's habit-name column, which this card does not
 have.
 
-**Offline, the strip and the calendar card agree about a day (#230).** They draw
-one pair of maps — three, with the notes — and a tap moves them before it
-writes, so `detailHost.repaint` redraws the calendar beside the cells rather
-than waiting on the refetch `writeDay` ends in, which offline never runs. All
-of them are nulled by `render()` before a rebuild, or a tap redraws a card that
-has been detached.
+**Offline, the strip, the calendar card and the notes card agree about a day
+(#230, extended by #297).** They draw one pair of maps — three, with the notes
+— and a tap moves them before it writes, so `detailHost.repaint` redraws the
+calendar beside the cells rather than waiting on the refetch `writeDay` ends
+in, which offline never runs. All of them are nulled by `render()` before a
+rebuild, or a tap redraws a card that has been detached.
+
+**The notes card is the third redraw, and it was missed on the first pass of
+#297 — both reviewers found it independently, which is worth knowing because
+the reasoning that omitted it is easy to repeat.** The card is drawn from
+`notesByDate`, the very live map this section argues for passing to the
+calendar, and it was built once by `render()` and never rebuilt — so offline a
+cleared note left a GHOST ROW with the old text after the dot and the strip
+mark had both already gone, and a first note on a previously-noteless day lit
+both marks with no row to show for it. `notesRedraw` is its `calRedraw`, with
+the same lifecycle. Note this is squarely INSIDE the redraw rule and not an
+instance of the accepted staleness two paragraphs down: that paragraph excuses
+figures the SERVER computed, which nothing local could move, and a note is
+local data the edit itself moved.
+
+**One case a repaint deliberately cannot cover: a habit's FIRST note written
+offline gets no card at all until the next full render.** `buildNotesCard`
+returns `null` for a habit with no notes, so there is no card in the page to
+redraw, and inserting one is `render()`'s job — it owns card ORDER, from the
+stored `detailCards` list, which a repaint has no business deciding. That
+habit's dot and strip mark still light immediately; only the card lags. The
+mirror case IS covered, because there the card exists: clearing a habit's last
+remaining note offline hides the card rather than leaving an empty list, which
+is the same "a card with nothing in it is hidden" promise the settings help
+text makes.
 
 **A QUEUED write from the day editor closes the dialog and repaints too.**
 `saveDay` (`ui/day-dialog.js`) awaits `api()` and offline `api()` stages the
@@ -505,13 +571,35 @@ hide) would invert unticking everything to everything shown, which is the one
 case `parseCardList`'s tests treat as the whole point of the change.
 
 **A legacy account is read tolerantly, and migrated only by a deliberate
-Done** — which is why a legacy account gets `recentDays` OFF until it presses
-Done, deliberately. Nothing writes the new shape on its behalf otherwise: not a boot, not a
-`GET`, nothing scheduled. An account that saved `['history','calendar']` before
-this shipped keeps meaning exactly that — those two on, every other card off —
-for as long as it never opens the settings dialog, because every card added
-after that save is invented later than the account's stored intent and there is
-nothing in a bare id list to say otherwise.
+Done.** Nothing writes the new shape on its behalf: not a boot, not a `GET`,
+nothing scheduled. An account that saved `['history','calendar']` before this
+shipped keeps meaning exactly that for as long as it never opens the settings
+dialog.
+
+**But "exactly that" is not "and nothing added since is visible", and for one
+release it was** (#297). A bare id list cannot say why an id is missing, and
+there are two reasons: somebody unticked it, or it had not shipped yet.
+Reading both as *hidden* made every card added after an account's last save
+invisible to it — with no surface at all, because a hidden card and a card
+that does not exist look identical. `recentDays` shipped that way and nobody
+noticed; the notes card would have shipped that way too, and it is the card
+whose entire purpose is that a note could not be read back. A fix that stays
+unreachable for the accounts that once cared enough to configure the page is
+not a fix.
+
+So `LEGACY_ERA_CARDS` (`shared/src/validate.js`) freezes `DETAIL_CARDS` as
+#174 left it — the ids a bare list could ever have named. An absent id of that
+era was unticked and stays off; an absent id outside it did not exist to tick
+and arrives **on**, which is the answer the object branch already gives the
+same question. Two reasons, told apart by the only evidence there is, instead
+of collapsed into the pessimistic one. `[]` is untouched and still means
+nothing visible: it is the one legacy value whose silence about a card is a
+statement rather than an accident, which is why the guard is `raw.length > 0`
+and not a bare default.
+
+That list is **frozen in time** — appending a new card's id to it would claim
+a value written before the object shape could have named it, turning that card
+off for every legacy account and reintroducing exactly this bug.
 
 Pressing **Done** rewrites it, *even with nothing else changed*, and that took a
 deliberate mechanism: `applyDraft` sends the keys whose draft differs from

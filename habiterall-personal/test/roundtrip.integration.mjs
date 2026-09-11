@@ -820,6 +820,11 @@ const nonCanonicalDetailCards = [
   { id: 'weekdays', on: false }, { id: 'awards', on: true },
   { id: 'streaks', on: true }, { id: 'resilience', on: true },
   { id: 'weekdayMonths', on: true },
+  // Added for issue #297, deliberately NOT placed right after 'calendar' —
+  // its canonical position — for the same reason `recentDays` above is not
+  // first: naming every id in a non-canonical order is what stops a
+  // normaliser that silently re-sorted from passing unnoticed.
+  { id: 'notes', on: true },
 ];
 await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right',
   atMostUnlogged: 'success', theme: 'dark', numberFormat: 'comma',

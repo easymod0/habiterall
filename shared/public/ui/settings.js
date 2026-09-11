@@ -159,6 +159,23 @@ function timeZoneOptions() {
  * @param {unknown} raw
  * @returns {{id: string, on: boolean}[]|undefined}
  */
+/**
+ * The browser's copy of `LEGACY_ERA_CARDS` (shared/src/validate.js) — the ids
+ * that existed while a stored `detailCards` could still be a bare array of
+ * strings. Declared twice for the same reason `DETAIL_CARDS` is: `shared/src`
+ * is not served to the browser. `test/settings.test.js` runs both normalisers
+ * over the same examples and fails if they drift.
+ *
+ * Unlike `order` above, this CANNOT be derived from
+ * `SETTINGS.detailCards.options` — that list is every card the dialog offers
+ * today, which is exactly the set this one must not track. **Frozen in time:
+ * never add to it.** See the server-side copy for what appending would break.
+ */
+const LEGACY_ERA_CARDS = [
+  'strength', 'calendar', 'streaks', 'resilience', 'awards',
+  'history', 'weekdays', 'weekdayMonths', 'frequency',
+];
+
 function normaliseDetailCards(raw) {
   if (!Array.isArray(raw)) return undefined;
   const order = SETTINGS.detailCards.options.map((o) => o.value);
@@ -173,7 +190,15 @@ function normaliseDetailCards(raw) {
     // rather than a Set: `raw` is already capped to `order.length * 4` above,
     // and a repeated or unknown id in it needs no separate handling either —
     // it simply matches nothing extra.
-    return order.map((id) => ({ id, on: raw.includes(id) }));
+    //
+    // The one exception, mirroring `parseCardList` exactly: an id outside
+    // `LEGACY_ERA_CARDS` is one a value of this shape could not have named, so
+    // its absence is not an unticking and it defaults ON. `raw.length > 0`
+    // guards it because `[]` must keep meaning nothing visible.
+    return order.map((id) => ({
+      id,
+      on: raw.includes(id) || (raw.length > 0 && !LEGACY_ERA_CARDS.includes(id)),
+    }));
   }
 
   if (raw.every(isCardObject)) {
@@ -431,6 +456,7 @@ export const SETTINGS = {
       { id: 'recentDays', on: true },
       { id: 'strength', on: true },
       { id: 'calendar', on: true },
+      { id: 'notes', on: true },
       { id: 'streaks', on: true },
       { id: 'resilience', on: true },
       { id: 'awards', on: true },
@@ -447,6 +473,7 @@ export const SETTINGS = {
       { value: 'recentDays', label: 'Recent days' },
       { value: 'strength', label: 'Habit strength' },
       { value: 'calendar', label: 'Calendar' },
+      { value: 'notes', label: 'Notes' },
       { value: 'streaks', label: 'Best streaks' },
       { value: 'resilience', label: 'Bouncing back' },
       { value: 'awards', label: 'Awards' },

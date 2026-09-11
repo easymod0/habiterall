@@ -953,10 +953,13 @@ const OVERVIEW_TTL_MS = 60_000;
  * `MAX_CACHED` is 10,000 and is justified by an entry costing ~100 bytes,
  * which is true of the two caches it was written for and false of this one. An
  * entry here is a whole `/overview` payload — every habit row spread, plus an
- * `entries` grid of up to 365 dated keys per habit, plus `skips`. Measured with
- * `--expose-gc`, retained after a collection: **499 KB** at 20 habits × 365
- * days and **1.2 MB** at 50 × 365. Ten thousand of those is ~4.9 GB, and this
- * edition's container dies with every tenant on it.
+ * `entries` grid of up to 365 dated keys per habit, plus `skips`, plus `notes`
+ * (issue #297: a bounded array of the same dated keys that hold a note — never
+ * the note TEXT, which is up to 500 characters and would multiply this figure
+ * rather than round it). Measured with `--expose-gc`, retained after a
+ * collection: **499 KB** at 20 habits × 365 days and **1.2 MB** at 50 × 365.
+ * Ten thousand of those is ~4.9 GB, and this edition's container dies with
+ * every tenant on it.
  *
  * Nothing stops an account reaching that count either: `end` is any date up to
  * the caller's today and `days` is 1–365, so every distinct window is a
@@ -1369,7 +1372,8 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
   // One query for the grid window, one for the summary window, and — only if
   // something is stale — one for the streak scan, rather than two per habit.
   const { rows: windowRows } = await db.query(
-    `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
+    `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status,
+            COALESCE(notes, '') <> '' AS has_note
      FROM entries WHERE habit_id = ANY($1) AND date BETWEEN $2 AND $3
      ORDER BY date`,
     [ids, start, end]
@@ -1437,6 +1441,11 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
 
   const grid = new Map(ids.map((id) => [id, {}]));
   const skips = new Map(ids.map((id) => [id, []]));
+  // Dates only, never the text (issue #297): the memo below measures 499 KB
+  // for 20 habits x 365 days, and a note is up to 500 characters. A skipped
+  // day can still carry a note, so this is pushed outside the skip/not-skip
+  // branch rather than inside one arm of it.
+  const notesDates = new Map(ids.map((id) => [id, []]));
   for (const r of windowRows) {
     if (r.status === 'skip') {
       grid.get(r.habit_id)[r.date] = SKIP;
@@ -1444,6 +1453,7 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
     } else {
       grid.get(r.habit_id)[r.date] = r.value;
     }
+    if (r.has_note) notesDates.get(r.habit_id).push(r.date);
   }
 
   // `byHabit` holds the 1830-day slice and so has an entry only for a STALE
@@ -1544,6 +1554,7 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
       ...toApiHabit(h),
       entries: grid.get(h.id) ?? {},
       skips: skips.get(h.id) ?? [],
+      notes: notesDates.get(h.id) ?? [],
       score: stats.score,
       currentStreak: stats.currentStreak,
       bestStreak,

@@ -595,9 +595,17 @@ test('a supplied notes is carried through, empty or not', () => {
   assert.equal(parseEntry(numHabit, { value: 2, notes: 'x' }, SENTINELS).notes, 'x');
 });
 
-test('a supplied note is still clamped at 500 characters', () => {
-  const long = parseEntry(numHabit, { value: 1, notes: 'n'.repeat(550) }, SENTINELS);
-  assert.equal(long.notes.length, 500);
+test('a note of exactly 500 characters is accepted, unchanged', () => {
+  const notes = 'n'.repeat(500);
+  const e = parseEntry(numHabit, { value: 1, notes }, SENTINELS);
+  assert.equal(e.notes, notes);
+});
+
+test('a note of 501 characters is rejected, not clamped', () => {
+  assert.throws(
+    () => parseEntry(numHabit, { value: 1, notes: 'n'.repeat(501) }, SENTINELS),
+    ValidationError
+  );
 });
 
 test('entryWrite carries notes through unchanged, including null, on both branches', () => {

@@ -528,6 +528,45 @@ try {
   // directly and never run `ui/detail.js` at all.
   await ev(`fetch('/api/habits/${seeded.habit}/entries/${seeded.day3}',
     { method: 'DELETE' })`);
+
+  // #297's notes fixture rides on THIS habit and inside THIS block's own
+  // offline episode — see the long note above the notes-card checks below for
+  // why it is not a probe habit of its own any more.
+  //
+  // Every write re-states the value it FOUND rather than choosing one, and the
+  // days are ones this habit has already logged, so the only thing that moves
+  // is the note. That is what makes folding safe: no row is created, no value
+  // changes, and the block clears every note it added before it ends, so the
+  // habit leaves this block exactly as it arrived.
+  const notesSeed = await ev(`(async () => {
+    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
+      return d.toISOString().slice(0, 10); };
+    const kept = iso(10), toClear = iso(11), toAdd = iso(12);
+    const rows = await (await fetch('/api/habits/${seeded.habit}/entries')).json();
+    const at = (date) => rows.find(e => e.date === date) ?? null;
+    const usable = (date) => !!at(date) && at(date).status !== 'skip';
+    const put = (date, notes) => {
+      const row = at(date);
+      if (!row) return false;
+      return fetch('/api/habits/${seeded.habit}/entries/' + date, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ value: row.value, notes }) }).then(r => r.ok);
+    };
+    const ok = [await put(kept, 'kept note'), await put(toClear, 'note to clear')];
+    return { kept, toClear, toAdd, seeded: ok.every(Boolean),
+             logged: [kept, toClear, toAdd].every(usable),
+             values: [kept, toClear, toAdd].map(d => at(d) && at(d).value) };
+  })()`);
+  // Asserted rather than assumed: the shared fixtures log this habit every day
+  // but every ninth (i % 9, fixtures.mjs), so 10/11/12 all carry a value — and
+  // if that ever changes, this says so instead of quietly testing a day with
+  // no row, where attaching a note WOULD move something.
+  ck('#297: the three days the notes fixture uses are already logged on this '
+     + 'habit, so attaching a note moves nothing but the note',
+     notesSeed.logged === true, JSON.stringify(notesSeed));
+  ck('#297: ...and both seeded notes landed', notesSeed.seeded === true,
+     JSON.stringify(notesSeed));
+
   await openHabit();
 
   // Scoped to the Calendar card by TITLE, never `document`: `windowedChart`
@@ -638,6 +677,168 @@ try {
      `range ${pagedRange} -> ${heldRange}, calEnd `
      + `${JSON.stringify(pagedEnd)} -> ${JSON.stringify(heldEnd)}`);
 
+  /* ---------- and so does the notes card (#297, review round) ---------- */
+
+  // Folded into the block above rather than standing on its own, and the
+  // reason is CI rather than tidiness. As its own block this cost a probe
+  // habit, a second full `openHabit()` boot and a second offline/reconnect
+  // cycle, and `Browser suites` then failed 3 runs out of 3 on this branch
+  // while staying green on 9 out of 9 elsewhere, including branches sharing
+  // the same runners — so it was caused by the change and not by a contended
+  // runner. Here it reuses the page, the habit and the offline episode that
+  // are already open: no habit created, no boot, no second reconnect.
+  //
+  // It belongs in THIS block on the merits too. The claim is the same one —
+  // offline, everything drawn from `notesByDate`/`entriesByDate` moves with
+  // the write, because `writeDay` never reaches the refetch that used to hide
+  // it (#230) — and the notes card is simply the third drawing of it, after
+  // the strip and the calendar.
+  //
+  // Placed after every calendar assertion above so it can perturb none of
+  // them, and before the reconnect so the writes are genuinely queued. The
+  // saves go through the day editor's own boolean choice, which re-states
+  // YES over days that already hold it, so no value moves here either.
+  console.log('--- offline, the notes card follows the note ---');
+
+  const noteRowTexts = () => ev(`[...document.querySelectorAll(
+    '#view-detail .notes-list .note-text')].map(e => e.textContent)`);
+  const hasNoteMark = (date) => ev(
+    `document.querySelector('${cellSel(date)} .check-box')`
+    + `?.classList.contains('has-note') ?? null`);
+
+  const beforeRows = await noteRowTexts();
+  ck('#297: the card starts with both notes, so it exists throughout this block',
+     beforeRows.includes('kept note') && beforeRows.includes('note to clear'),
+     JSON.stringify(beforeRows));
+
+  // Waited for, never slept on. What is waited FOR is the app's own signal
+  // that the save completed — the dialog closing and the outbox having GROWN
+  // past a count taken before the press — and deliberately not the notes card,
+  // which is the thing being asserted: a wait on the assertion would make the
+  // check tautological.
+  const noteSettle = async (before, what) => {
+    await waitUntil(ev, `(async () =>
+      document.getElementById('day-dialog').open === false
+      && ((await import('/shared/ui/store.js')).state.pending ?? 0) > ${before})()`,
+      { what });
+  };
+  /** Opens the editor from the card's own row — a real `<button>` click. */
+  const openNoteRow = async (text) => {
+    await ev(`[...document.querySelectorAll('#view-detail .notes-list .note-row')]
+      .find(r => r.querySelector('.note-text')?.textContent === ${JSON.stringify(text)})
+      ?.click()`);
+    await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
+      { what: `the day editor to open on the note ${JSON.stringify(text)}` });
+  };
+  /** Re-answers the day as done — the value it already holds — with no note. */
+  const saveCleared = async (what) => {
+    const before = await queued();
+    await ev(`document.getElementById('day-notes').value = ''`);
+    await ev(`document.querySelector('#day-boolean .day-choice[data-action="done"]').click()`);
+    await noteSettle(before, what);
+  };
+
+  /* clearing a note offline drops its row from the card */
+
+  await openNoteRow('note to clear');
+  ck('#297: the day editor opens on the note to clear',
+     await ev(`document.getElementById('day-dialog').open`) === true);
+  await saveCleared('the queued clear to close the dialog and reach the outbox');
+
+  const afterClear = {
+    rows: await noteRowTexts(),
+    dot: await hasNoteMark(notesSeed.toClear),
+    outbox: await queued(),
+  };
+  ck('#297: the cleared note was queued rather than sent', afterClear.outbox >= 1,
+     JSON.stringify(afterClear));
+  ck('#297: ...and its row is gone from the notes card in the SAME repaint that '
+     + 'drops its dot from the strip — not left showing the old text',
+     !afterClear.rows.includes('note to clear') && afterClear.dot === false,
+     JSON.stringify(afterClear));
+  ck('#297: ...while the OTHER note stays, which is the proof the card was '
+     + 'REDRAWN rather than emptied outright',
+     afterClear.rows.includes('kept note'), JSON.stringify(afterClear));
+
+  /* adding a note offline, to a day that had none, draws a row */
+
+  const addCentre = await ev(`(() => {
+    const el = document.querySelector('${cellSel(notesSeed.toAdd)}');
+    if (!el) return null;
+    const b = el.getBoundingClientRect();
+    return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+  })()`);
+  ck('#297: the day with no note is on screen to be right-clicked', !!addCentre,
+     JSON.stringify(addCentre));
+  if (addCentre) {
+    // A REAL right-click over CDP, not a scripted `dispatchEvent` — a
+    // synthetic one proves nothing about the gesture a desktop right-click and
+    // an Android long-press both arrive as.
+    const beforeAdd = await queued();
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed',
+      x: addCentre.x, y: addCentre.y, button: 'right', clickCount: 1 }, sessionId);
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased',
+      x: addCentre.x, y: addCentre.y, button: 'right', clickCount: 1 }, sessionId);
+    await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
+      { what: 'the day editor to open on the noteless day' });
+    ck('#297: a contextmenu on the noteless day opens the day editor',
+       await ev(`document.getElementById('day-dialog').open`) === true);
+    await ev(`document.getElementById('day-notes').value = 'a fresh offline note'`);
+    await ev(`document.querySelector('#day-boolean .day-choice[data-action="done"]').click()`);
+    await noteSettle(beforeAdd, 'the queued add to close the dialog and reach the outbox');
+
+    const afterAdd = {
+      rows: await noteRowTexts(),
+      dot: await hasNoteMark(notesSeed.toAdd),
+      outbox: await queued(),
+    };
+    ck('#297: the added note was queued rather than sent', afterAdd.outbox >= 1,
+       JSON.stringify(afterAdd));
+    ck('#297: ...and a row for it appears in the notes card, in the same '
+       + 'repaint that lights its dot',
+       afterAdd.rows.includes('a fresh offline note') && afterAdd.dot === true,
+       JSON.stringify(afterAdd));
+  }
+
+  /* clearing the LAST note offline hides the card */
+
+  // The branch nothing else in the repo reaches. `buildNotesCard` returns null
+  // for a habit with no notes, so a repaint that empties the map has to HIDE
+  // the card it cannot un-build — a promise made in `detail.js`, in
+  // `shared/public/CLAUDE.md` and in the archive, and until this case it rested
+  // on nothing. Clearing the two notes this habit now has also restores it to
+  // the note-free state the fixtures left it in.
+  const notesCardDisplay = () => ev(`(() => {
+    const c = [...document.querySelectorAll('#view-detail .card')]
+      .find(x => x.querySelector('.card-title')?.textContent === 'Notes');
+    return { found: !!c, display: c ? getComputedStyle(c).display : null,
+             rows: [...document.querySelectorAll('#view-detail .notes-list .note-text')]
+               .map(e => e.textContent) };})()`);
+
+  await openNoteRow('kept note');
+  await saveCleared('the queued clear of the kept note to reach the outbox');
+  const oneLeft = await notesCardDisplay();
+  ck('#297: with ONE note left the card is still shown, which is what makes '
+     + 'the hide below a hide and not a card that was never there',
+     oneLeft.rows.length === 1 && oneLeft.found === true
+       && oneLeft.display !== 'none',
+     JSON.stringify(oneLeft));
+
+  await openNoteRow('a fresh offline note');
+  await saveCleared('the queued clear of the last note to reach the outbox');
+  // `getComputedStyle(...).display`, never `.hidden` — the attribute is set
+  // either way and what carries it is `[hidden] { display: none !important }`
+  // in the stylesheet, so a property read would stay green with that rule
+  // gone. Hidden AND emptied: `querySelectorAll` reads through `hidden`, so a
+  // card that merely went invisible would still answer the cleared note to
+  // anything asking what it lists.
+  const noneLeft = await notesCardDisplay();
+  ck("#297: clearing the habit's LAST note offline hides the notes card rather "
+     + 'than leaving an empty list',
+     noneLeft.found === true && noneLeft.display === 'none'
+       && noneLeft.rows.length === 0,
+     JSON.stringify(noneLeft));
+
   const drainedDay3 = await reconnectAndDrain();
   // The optimistic redraw is only honest if the write it drew actually lands,
   // which is the `unknowncheck.mjs` model this suite already follows: ask the
@@ -646,6 +847,21 @@ try {
   ck('and the queued write lands on reconnect, so the redraw told the truth',
      day3Flushed !== null && day3Flushed.value === 2,
      `${JSON.stringify(day3Flushed)}${drainedDay3}`);
+  // The notes above rode the same drain, and this is the `unknowncheck.mjs`
+  // model applied to them: the card said the notes were gone, so the rows had
+  // better say so too. It also confirms the habit left this block as it
+  // arrived — every note cleared, every value still YES.
+  const notesFlushed = await ev(`(async () => {
+    const rows = await (await fetch('/api/habits/${seeded.habit}/entries')).json();
+    const pick = (d) => { const r = rows.find(e => e.date === d);
+      return r ? { notes: r.notes, value: r.value } : null; };
+    return { kept: pick('${notesSeed.kept}'), toClear: pick('${notesSeed.toClear}'),
+             toAdd: pick('${notesSeed.toAdd}') };})()`);
+  ck('#297: and the queued note clears land too, leaving the rows noted-free '
+     + 'with their values untouched',
+     ['kept', 'toClear', 'toAdd'].every((k) =>
+       notesFlushed[k] && !notesFlushed[k].notes && notesFlushed[k].value === 2),
+     JSON.stringify(notesFlushed));
 
   /* ---------- paging, and forgetting where it was ---------- */
 
@@ -1051,6 +1267,202 @@ try {
       ck('...and the legend does not claim an "In a run" mark absent from the grid',
          !/In a run/.test(calProbe.legendText), JSON.stringify(calProbe));
     }
+  }
+
+  /* ---------- notes: the mark, and the two secondary ways into the editor (#297) ---------- */
+
+  console.log('--- notes ---');
+  // A dedicated probe habit rather than reusing `seeded.habit` — every block
+  // above has already tapped and untapped it, and this needs a day whose NOTE
+  // TEXT survives intact to be checked against, which no earlier state here
+  // promises.
+  const notesProbe = await ev(`(async () => {
+    const h = await (await fetch('/api/habits', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Strip notes probe', type: 'boolean', color: '#22c55e' }),
+    })).json();
+    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
+      return d.toISOString().slice(0, 10); };
+    const noted = iso(1), plain = iso(2);
+    const noteText = 'left half a glass, felt fine';
+    await fetch('/api/habits/' + h.id + '/entries/' + noted, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ value: 2, notes: noteText }) });
+    await fetch('/api/habits/' + h.id + '/entries/' + plain, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ value: 2 }) });
+    return { id: h.id, noted, plain, noteText };
+  })()`);
+  ck('the notes probe habit was created', !!notesProbe?.id, JSON.stringify(notesProbe));
+
+  if (notesProbe?.id) {
+    await openHabit(notesProbe.id);
+
+    /* ---------- the mark ---------- */
+
+    const cellHasNote = (date) => ev(
+      `document.querySelector('#view-detail .day-strip .check[data-date="${date}"] .check-box')`
+      + `?.classList.contains('has-note') ?? null`);
+    ck('a note-bearing day carries the mark',
+       await cellHasNote(notesProbe.noted) === true);
+    ck('a day with an entry and no note does not',
+       await cellHasNote(notesProbe.plain) === false);
+
+    // The class alone is not the mark — `.check-box.has-note::after` draws it,
+    // and a check reading only `classList` stays green with that whole rule
+    // deleted (review round). Read the pseudo-element itself: `content` must
+    // not be `'none'` and the drawn box must have real width.
+    const notePseudo = (date) => ev(`(() => {
+      const el = document.querySelector(
+        '#view-detail .day-strip .check[data-date="${date}"] .check-box');
+      if (!el) return null;
+      const cs = getComputedStyle(el, '::after');
+      return { content: cs.content, width: parseFloat(cs.width),
+               bg: cs.backgroundColor, ring: cs.boxShadow };
+    })()`);
+    const notedPseudo = await notePseudo(notesProbe.noted);
+    // A generated box of real width is not yet a VISIBLE dot: the mark is
+    // carried by `background: var(--surface)` plus the `box-shadow` ring, and
+    // dropping either leaves an invisible 6x6 box that `content`/`width`
+    // alone still pass (review round 2). Both are read here.
+    ck("the note-bearing day's dot is actually DRAWN, not merely classed",
+       !!notedPseudo && notedPseudo.content !== 'none' && notedPseudo.width > 0
+         && notedPseudo.bg !== 'rgba(0, 0, 0, 0)' && notedPseudo.ring !== 'none',
+       JSON.stringify(notedPseudo));
+    const plainPseudo = await notePseudo(notesProbe.plain);
+    // The negative half — what stops a rule drawing a dot on every cell from
+    // passing the check above too.
+    ck('...and the note-free day draws no pseudo-element at all',
+       !!plainPseudo && plainPseudo.content === 'none', JSON.stringify(plainPseudo));
+
+    /* ---------- the secondary affordance: contextmenu opens the editor, seeded truthfully ---------- */
+
+    const cellCentre = (date) => ev(`(() => {
+      const el = document.querySelector(
+        '#view-detail .day-strip .check[data-date="${date}"]');
+      if (!el) return null;
+      const b = el.getBoundingClientRect();
+      return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+    })()`);
+    // A REAL right-click, dispatched over CDP: a scripted `.click()` (or a
+    // scripted `dispatchEvent(new MouseEvent('contextmenu'))`) proves nothing
+    // about the gesture Android's long-press and a desktop right-click both
+    // arrive as — see `shared/public/CLAUDE.md`'s note on `.click()` not
+    // dispatching `pointerdown`, the same class of gap.
+    const rightClick = async (x, y) => {
+      await send('Input.dispatchMouseEvent',
+        { type: 'mousePressed', x, y, button: 'right', clickCount: 1 }, sessionId);
+      await send('Input.dispatchMouseEvent',
+        { type: 'mouseReleased', x, y, button: 'right', clickCount: 1 }, sessionId);
+    };
+
+    const notedCentre = await cellCentre(notesProbe.noted);
+    ck('the note-bearing cell is on screen to be right-clicked', !!notedCentre,
+       JSON.stringify(notedCentre));
+    if (notedCentre) {
+      // `e.preventDefault()` in the handler suppresses the browser's native
+      // context menu, and a suppressed menu leaves no DOM signal of its own —
+      // there is nothing to query afterwards that says "the native menu did
+      // not open". A bubble-phase listener on `document`, installed BEFORE the
+      // press, stands in for it: the button's own `contextmenu` handler runs
+      // at the TARGET phase and calls `preventDefault()` there, so by the time
+      // this listener sees the event in bubble phase, `e.defaultPrevented`
+      // already reflects that call — `true` on a correct build, `false`
+      // without it (measured by the lead removing the call; not a data
+      // defect, but an unpinned claim of the same shape as #297's other one).
+      await ev(`(() => {
+        window.__ctxDefaultPrevented = null;
+        document.addEventListener('contextmenu', (e) => {
+          window.__ctxDefaultPrevented = e.defaultPrevented;
+        }, false);
+        return true;
+      })()`);
+      await rightClick(notedCentre.x, notedCentre.y);
+      const ctxPrevented = await ev(`window.__ctxDefaultPrevented`);
+      ck("the contextmenu's native menu was suppressed — the bubble-phase "
+         + 'listener saw e.defaultPrevented === true',
+         ctxPrevented === true, JSON.stringify(ctxPrevented));
+      await sleep(600);
+      const opened = await ev(`({
+        open: document.getElementById('day-dialog').open,
+        notes: document.getElementById('day-notes').value,
+      })`);
+      ck('a contextmenu on a note-bearing cell opens the day editor, with '
+         + "#day-notes holding that day's real text",
+         opened.open === true && opened.notes === notesProbe.noteText, JSON.stringify(opened));
+      await ev(`document.getElementById('day-cancel').click()`);
+      await sleep(400);
+    }
+
+    /* ---------- the secondary affordance: Shift+Enter, and it must not steal the cycle ---------- */
+
+    // A REAL key event, dispatched by CDP rather than scripted from the page.
+    // A `<button>`'s Enter activation is the browser's own behaviour on a
+    // TRUSTED press, and suppressing it is exactly what the handler's
+    // `preventDefault()` exists for — a `new KeyboardEvent('keydown')` fired
+    // from script triggers no activation at all, so a check built on one would
+    // pass against a build with no `preventDefault()` in it. Same trap, same
+    // fix, as `categorycheck.mjs`'s Enter-inside-a-sub-form check.
+    //
+    // What the activation actually does, measured rather than reasoned: by the
+    // time it runs, `showModal()` has moved focus into the dialog, so the
+    // keypress lands on the day editor's own first `.day-choice` button and
+    // clicks it — the editor is answered and dismissed by the same press that
+    // opened it. That is what the `.day-choice` recorder below pins. The cell
+    // underneath is behind a modal by then and never cycles, which is why the
+    // stored-value check further down does NOT bite this mutation.
+    const pressShiftEnter = async () => {
+      for (const type of ['keyDown', 'keyUp']) {
+        await send('Input.dispatchKeyEvent', {
+          type, key: 'Enter', code: 'Enter', modifiers: 8, // Shift
+          windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+          ...(type === 'keyDown' ? { text: '\r' } : {}),
+        }, sessionId);
+      }
+    };
+
+    const beforeShift = await stored(notesProbe.plain, notesProbe.id);
+    // Record any click that reaches one of the day editor's own answer
+    // buttons. Capture phase and on `document`, so it sees the press whether
+    // or not the dialog is still open by the time anything is read back — the
+    // failure mode is precisely that the dialog is gone again.
+    await ev(`(() => {
+      window.__choiceClicks = [];
+      document.addEventListener('click', (e) => {
+        if (e.target.closest && e.target.closest('.day-choice'))
+          window.__choiceClicks.push(e.target.textContent + ' trusted=' + e.isTrusted);
+      }, true);
+      return true; })()`);
+    await ev(`document.querySelector(
+      '#view-detail .day-strip .check[data-date="${notesProbe.plain}"]').focus()`);
+    await pressShiftEnter();
+    await sleep(600);
+    const shiftOpened = await ev(`document.getElementById('day-dialog').open`);
+    ck('Shift+Enter on a focused cell opens the day editor', shiftOpened === true);
+    // THE mechanism assertion, and the one that names why `preventDefault` is
+    // there. Without it the press falls through into the dialog it just
+    // opened: focus is already inside by the time the browser runs the
+    // button's Enter activation, so the keypress clicks the editor's first
+    // answer button, saves and closes — one press, one unseen save, and
+    // `saveDay` states the note on every save.
+    const choiceClicks = await ev(`window.__choiceClicks`);
+    ck('...and the same press does NOT fall through onto the editor\'s own '
+       + 'answer buttons — no .day-choice was clicked',
+       Array.isArray(choiceClicks) && choiceClicks.length === 0,
+       JSON.stringify(choiceClicks));
+    await sleep(800);
+    const afterShift = await stored(notesProbe.plain, notesProbe.id);
+    // A guard on a DIFFERENT regression from the one above, and it is worth
+    // saying which: this does not bite a missing `preventDefault()`, because
+    // the cell is behind a modal by the time the activation runs and so never
+    // cycles (measured). What it does bite is `editDay` being wired onto the
+    // plain click path, or the handler calling `onCheckClick` as well.
+    ck("...and the day's stored value is UNCHANGED — the proof the secondary "
+       + 'affordance did not also cycle the day underneath it',
+       JSON.stringify(afterShift) === JSON.stringify(beforeShift),
+       `${JSON.stringify(beforeShift)} -> ${JSON.stringify(afterShift)}`);
+    await ev(`document.getElementById('day-cancel').click()`);
+    await sleep(400);
   }
 } catch (e) {
   ck('suite ran to completion', false, e.message);

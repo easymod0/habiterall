@@ -680,6 +680,104 @@ try {
     for (const c of cats) await fetch('/api/categories/' + c.id, { method: 'DELETE' });
   })()`);
 
+  /* ---------- notes: the mark at the narrowest phone width, and no box grows
+     to carry it (#297) ---------- */
+  //
+  // gridcheck.mjs already pins `.check` centring at 1440 and 390px; this is
+  // the one suite that reaches 360px, the narrowest viewport this app is
+  // checked at, so it is the only place a note dot quietly widening the box
+  // it sits in — rather than staying an absolutely-positioned overlay — would
+  // be caught before it cost the smallest phones a squeezed row.
+  console.log('\n--- notes, at the narrowest phone width ---');
+  const notesVp = VIEWPORTS.find((v) => v.w === 360);
+  await send('Emulation.setDeviceMetricsOverride',
+    { width: notesVp.w, height: notesVp.h, deviceScaleFactor: 1, mobile: notesVp.mobile },
+    sessionId);
+
+  const notesGeomSeed = await ev(`(async () => {
+    const habits = await (await fetch('/api/habits')).json();
+    const h = habits.find(x => !x.archived);
+    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
+      return d.toISOString().slice(0, 10); };
+    const noted = iso(1), plain = iso(2);
+    await fetch('/api/habits/' + h.id + '/entries/' + noted, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: 2, notes: 'small-phone note probe' }) });
+    await fetch('/api/habits/' + h.id + '/entries/' + plain, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: 2 }) });
+    return { id: h.id, noted, plain };
+  })()`);
+  ck('a habit exists to seed the note-geometry probe onto', !!notesGeomSeed?.id,
+    JSON.stringify(notesGeomSeed));
+
+  if (notesGeomSeed?.id) {
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard, at 360px, with the note-geometry probe seeded',
+    });
+    await sleep(500);
+
+    const cellGeom = await ev(`(() => {
+      const noted = document.querySelector(
+        '[data-focus-key="check:${notesGeomSeed.id}:${notesGeomSeed.noted}"]');
+      const plain = document.querySelector(
+        '[data-focus-key="check:${notesGeomSeed.id}:${notesGeomSeed.plain}"]');
+      const rect = (el) => { const b = el.getBoundingClientRect();
+        return { w: Math.round(b.width), h: Math.round(b.height) }; };
+      const pseudo = (el) => { const box = el?.querySelector('.check-box');
+        if (!box) return null;
+        const cs = getComputedStyle(box, '::after');
+        return { content: cs.content, width: parseFloat(cs.width),
+                 bg: cs.backgroundColor, ring: cs.boxShadow }; };
+      return {
+        notedHasMark: !!noted?.querySelector('.check-box')?.classList.contains('has-note'),
+        plainHasMark: !!plain?.querySelector('.check-box')?.classList.contains('has-note'),
+        notedCell: noted ? rect(noted) : null,
+        plainCell: plain ? rect(plain) : null,
+        notedPseudo: pseudo(noted),
+        plainPseudo: pseudo(plain),
+      };
+    })()`);
+    ck('at 360px, the note-bearing cell carries the mark',
+      cellGeom.notedHasMark === true, JSON.stringify(cellGeom));
+    ck('...and the note-free cell does not',
+      cellGeom.plainHasMark === false, JSON.stringify(cellGeom));
+    // The rendered read, beside the class read above — a class the stylesheet
+    // no longer draws anything for still toggles, so this is what pins the DOT
+    // actually existing at all (review round). `content` must not be `'none'`
+    // and the drawn box must have real width; the note-free cell must draw no
+    // pseudo-element.
+    // Both the generated box AND what makes it visible — `background:
+    // var(--surface)` plus the `box-shadow` ring — because a transparent 6x6
+    // box passes `content`/`width` while showing the user nothing (round 2).
+    ck("at 360px, the note-bearing cell's dot is actually DRAWN, not merely "
+      + 'classed',
+      !!cellGeom.notedPseudo && cellGeom.notedPseudo.content !== 'none'
+        && cellGeom.notedPseudo.width > 0
+        && cellGeom.notedPseudo.bg !== 'rgba(0, 0, 0, 0)'
+        && cellGeom.notedPseudo.ring !== 'none',
+      JSON.stringify(cellGeom));
+    ck('...and the note-free cell draws no pseudo-element at all',
+      !!cellGeom.plainPseudo && cellGeom.plainPseudo.content === 'none',
+      JSON.stringify(cellGeom));
+    // The geometry claim, and it is a NARROWER one than it looks: a
+    // note-bearing `.check` is the SAME size as an ordinary one at this width.
+    // This checks the GEOMETRY, not the dot — with `.check-box.has-note::after`
+    // deleted outright both cells are equally dotless and equally sized, and
+    // this assertion passes against that build too. It still bites a dot that
+    // grows the box (the dot is positioned absolutely inside `.check-box`,
+    // which must add no box size of its own), which is a real and different
+    // regression from "no dot is drawn at all" — the rendered read just above
+    // is what pins the dot existing in the first place.
+    ck('...and the note dot changes no cell geometry at this width',
+      !!cellGeom.notedCell && !!cellGeom.plainCell
+        && cellGeom.notedCell.w === cellGeom.plainCell.w
+        && cellGeom.notedCell.h === cellGeom.plainCell.h
+        && cellGeom.notedCell.h >= MIN_TOUCH,
+      JSON.stringify(cellGeom));
+  }
+
   console.log(fails === 0 ? '\nALL RESPONSIVE CHECKS PASSED' : `\n${fails} RESPONSIVE CHECK(S) FAILED`);
 } catch (e) {
   console.error('ERR', e.message); fails++;

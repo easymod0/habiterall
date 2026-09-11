@@ -532,7 +532,11 @@ export function parseHabit(body = {}) {
  * grouped in with it, exactly as the old `??` grouped it with `undefined` —
  * and a real string, possibly `''`, when it did. `entryWrite` is what turns
  * that distinction into "leave the stored note alone" versus "clear it";
- * `parseEntry` only stops collapsing the two.
+ * `parseEntry` only stops collapsing the two. A supplied note over
+ * `LIMITS.notes` characters is rejected, not clamped — the import path
+ * clamps deliberately (a bulk restore must not abort on one long note), but
+ * a live write is a single note the caller can see and fix, so silent
+ * truncation is just data loss.
  *
  * @param {import('./types.js').Habit} habit
  * @param {{value?: unknown, status?: string, notes?: unknown}} body
@@ -542,7 +546,10 @@ export function parseHabit(body = {}) {
 export function parseEntry(habit, body = {}, { UNSET, YES, SKIP }) {
   const notes = body.notes === undefined || body.notes === null
     ? null
-    : String(body.notes).slice(0, LIMITS.notes);
+    : String(body.notes);
+  if (notes !== null && notes.length > LIMITS.notes) {
+    throw new ValidationError(`notes must be ${LIMITS.notes} characters or fewer`);
+  }
 
   // A skip may be requested explicitly, or (for boolean habits only) by the
   // legacy SKIP wire value. On a numerical habit 3 is a real amount.
@@ -682,7 +689,31 @@ export function answerBody(habit, { action, value }) {
  * browser. `test/settings.test.js` fails if the two lists drift.
  */
 export const DETAIL_CARDS = Object.freeze([
-  'recentDays', 'strength', 'calendar', 'streaks', 'resilience', 'awards',
+  'recentDays', 'strength', 'calendar', 'notes', 'streaks', 'resilience', 'awards',
+  'history', 'weekdays', 'weekdayMonths', 'frequency',
+]);
+
+/**
+ * The cards that existed while a stored `detailCards` could still be a plain
+ * array of strings — #174 is the change that introduced the object shape, and
+ * this is `DETAIL_CARDS` as that commit left it.
+ *
+ * It exists so `parseCardList` can tell the two reasons an id is missing from
+ * a legacy value apart. An id of this era is absent because somebody unticked
+ * it; an id outside it is absent because it had not shipped yet, and reading
+ * that as "hidden" makes every card added since invisible to exactly the
+ * accounts that once cared enough to configure the page — with no surface
+ * saying so, since a hidden card looks like a card that does not exist. The
+ * object branch already answers this by inserting a missing id `on: true`;
+ * this is the same answer for the shape that cannot carry the question.
+ *
+ * **Frozen in time on purpose — never add to this.** A card shipping today
+ * cannot appear in a value written before the object shape existed, so
+ * appending an id here would be claiming the opposite, and would turn that
+ * card off for every legacy account. `DETAIL_CARDS` is where a new card goes.
+ */
+const LEGACY_ERA_CARDS = Object.freeze([
+  'strength', 'calendar', 'streaks', 'resilience', 'awards',
   'history', 'weekdays', 'weekdayMonths', 'frequency',
 ]);
 
@@ -700,11 +731,13 @@ export const DETAIL_CARDS = Object.freeze([
  *     every legacy value that can be in storage is already a canonical-order
  *     subset — reading the order the caller happened to list ids in would
  *     silently rearrange the page the first time a card was re-ticked. Read for
- *     membership alone: all nine ids in `DETAIL_CARDS` order, `on` set by
- *     whether the id was mentioned. `[]` takes this branch on purpose —
- *     unticking everything must still mean nothing visible, and reading it as
- *     the new shape (nothing mentioned, so nothing to hide) would invert that
- *     to everything shown.
+ *     membership alone: every id in `DETAIL_CARDS` order, `on` set by whether
+ *     the id was mentioned — *except* an id outside `LEGACY_ERA_CARDS`, which
+ *     a value of this shape could not have mentioned and which therefore
+ *     defaults `on: true` rather than reading as unticked. `[]` takes this
+ *     branch on purpose and is exempt from that: unticking everything must
+ *     still mean nothing visible, and reading it as the new shape (nothing
+ *     mentioned, so nothing to hide) would invert that to everything shown.
  *   - NEW SHAPE (every element an object with a string `id`): the array already
  *     carries both the order and the visibility, so it is kept close to
  *     verbatim — deduped by id first-wins, unknown ids dropped, `on` coerced to
@@ -736,7 +769,21 @@ export function parseCardList(raw) {
     // small enough that a second membership test costs nothing, and it means
     // a repeated or unknown id in `raw` needs no separate handling — it simply
     // matches nothing extra.
-    return DETAIL_CARDS.map((id) => ({ id, on: raw.includes(id) }));
+    //
+    // ...except for an id this value could not have mentioned. A NON-EMPTY
+    // legacy array lists what its author ticked out of the cards that existed
+    // at the time, so an id outside `LEGACY_ERA_CARDS` was not unticked — it
+    // did not exist to tick — and defaults ON, which is the same answer the
+    // object branch below already gives the same question. An id that IS of
+    // that era and absent really was unticked, and stays off.
+    //
+    // `raw.length > 0` guards it because `[]` means "hide everything" and must
+    // keep meaning that: it is the one legacy value whose silence about a card
+    // is a statement rather than an accident.
+    return DETAIL_CARDS.map((id) => ({
+      id,
+      on: raw.includes(id) || (raw.length > 0 && !LEGACY_ERA_CARDS.includes(id)),
+    }));
   }
 
   if (raw.every(isCardObject)) {

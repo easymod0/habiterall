@@ -875,6 +875,141 @@ try {
     + 'the truth', landed === true && finalRow?.value === 2,
     JSON.stringify(finalRow));
 
+  /* ---------- issue #297: the calendar draws a note mark ---------- */
+
+  console.log('\n--- note mark ---');
+  /*
+   * `day.date` already carries a note — the offline block above wrote `NOTE`
+   * and just confirmed it landed. A fresh, cross-document reload is what
+   * forces `open()` to refetch and rebuild `notesByDate`, and `buildCalendarCard`
+   * to hand the LIVE map to `calendarChart` inside `draw()` — reading the
+   * in-page state the offline block already repainted from would prove
+   * nothing about the caller actually threading `notes` through.
+   */
+  await reloadAndWaitFor(ev, `!!document.querySelector('#view-detail .day-strip .check')`, {
+    reload: () => send('Page.navigate',
+      { url: `${APP}/?open=notemark#/habit/${day.id}` }, sessionId),
+    what: 'the detail page, reloaded, to re-fetch the note',
+  });
+  await sleep(400);
+
+  const noteProbe = () => ev(`(() => {
+    const c = ${calCardSel};
+    if (!c) return { missing: true };
+    const svg = c.querySelector('[aria-label="Completion calendar"]');
+    if (!svg) return { missing: true };
+    const cell = svg.querySelector('[data-date="${day.date}"]');
+    return {
+      hasDot: !!svg.querySelector('[data-note-for="${day.date}"]'),
+      noteMarks: svg.getAttribute('data-note-marks'),
+      legendText: c.querySelector('.legend')?.textContent ?? '',
+      label: cell?.getAttribute('data-label') ?? '',
+    };})()`);
+  const withNote = await noteProbe();
+  ck('a day with a note shows the mark', withNote.hasDot === true, JSON.stringify(withNote));
+  ck('...and data-note-marks counts it', Number(withNote.noteMarks) > 0, JSON.stringify(withNote));
+  ck('...and the legend shows "Has a note"', /Has a note/.test(withNote.legendText),
+    JSON.stringify(withNote));
+  ck('...and the cell label carries the FACT, never the note text',
+    withNote.label.endsWith(' — has a note') && !withNote.label.includes(NOTE),
+    JSON.stringify(withNote));
+
+  // The anti-#176 half: a mark passing on the noted habit says nothing about
+  // a SECOND habit whose `notesByDate` really is empty — fixtures never seed
+  // a note, so any other habit is a genuine negative.
+  const other = await ev(`(async () => {
+    const habits = await (await fetch('/api/habits')).json();
+    return habits.find(h => !h.archived && h.id !== ${day.id}) ?? null;})()`);
+  ck('there is a second habit to check for a false positive', !!other, JSON.stringify(other));
+
+  await reloadAndWaitFor(ev, `!!document.querySelector('#view-detail .day-strip .check')`, {
+    reload: () => send('Page.navigate',
+      { url: `${APP}/?open=notemark2#/habit/${other.id}` }, sessionId),
+    what: "a second habit's detail page",
+  });
+  await sleep(400);
+
+  const noNoteProbe = await ev(`(() => {
+    const c = ${calCardSel};
+    if (!c) return { missing: true };
+    const svg = c.querySelector('[aria-label="Completion calendar"]');
+    return {
+      dots: svg ? svg.querySelectorAll('[data-note-for]').length : null,
+      noteMarks: svg?.getAttribute('data-note-marks') ?? null,
+      legendText: c.querySelector('.legend')?.textContent ?? '',
+    };})()`);
+  ck('a habit with no notes shows no note mark',
+    noNoteProbe.dots === 0 && noNoteProbe.noteMarks === '0', JSON.stringify(noNoteProbe));
+  ck('...and no "Has a note" legend entry',
+    !/Has a note/.test(noNoteProbe.legendText), JSON.stringify(noNoteProbe));
+
+  /* ---------- issue #297: the notes card ---------- */
+
+  console.log('\n--- notes card ---');
+  // `other` (checked just above) has no notes at all, so its page is the
+  // negative half of this block before `day.id`'s page is reloaded back into
+  // view for the positive half — reusing the fixtures already in hand rather
+  // than seeding a third habit.
+  const noCardProbe = await ev(`(() => {
+    const cards = [...document.querySelectorAll('#view-detail .card')];
+    return { hasNotesCard: cards.some(c => c.querySelector('.card-title')?.textContent === 'Notes') };})()`);
+  ck('a habit with no notes shows no Notes card at all',
+    noCardProbe.hasNotesCard === false, JSON.stringify(noCardProbe));
+
+  // Back to the noted habit's own page. A fresh cache-buster keeps the
+  // navigation cross-document, which is what keeps `reloadAndWaitFor`'s
+  // marker sound (see the note above the first use of it in this file).
+  await reloadAndWaitFor(ev, `!!document.querySelector('#view-detail .day-strip .check')`, {
+    reload: () => send('Page.navigate',
+      { url: `${APP}/?open=notescard#/habit/${day.id}` }, sessionId),
+    what: "the noted habit's detail page, for the notes card",
+  });
+  await sleep(400);
+
+  const notesCardSel = `[...document.querySelectorAll('#view-detail .card')]
+    .find(c=>c.querySelector('.card-title')?.textContent==='Notes')`;
+  const notesCardProbe = () => ev(`(() => {
+    const c = ${notesCardSel};
+    if (!c) return { missing: true };
+    const rows = [...c.querySelectorAll('.note-row')];
+    const row = rows.find(r => r.querySelector('.note-text')?.textContent === ${JSON.stringify(NOTE)});
+    return {
+      rowCount: rows.length,
+      hasRow: !!row,
+      // The date must be FORMATTED, never the raw storage string — a serial
+      // number is exactly what formatDateShort exists to replace.
+      dateIsRaw: row?.querySelector('.note-date')?.textContent === ${JSON.stringify(day.date)},
+    };})()`);
+  const withCard = await notesCardProbe();
+  ck('a day with a note is listed on the notes card, with its date',
+    withCard.rowCount > 0 && withCard.hasRow === true, JSON.stringify(withCard));
+  ck('...and the date is formatted, not the raw ISO string',
+    withCard.dateIsRaw === false, JSON.stringify(withCard));
+
+  // Activating the row is the THIRD way into the day editor (STEP 4's
+  // right-click/Shift+Enter on a strip cell are the other two), and this one
+  // is a real `<button>` — an ordinary click is enough, no modifier needed.
+  const rowActivated = await ev(`(() => {
+    const c = ${notesCardSel};
+    const rows = [...c.querySelectorAll('.note-row')];
+    const row = rows.find(r => r.querySelector('.note-text')?.textContent === ${JSON.stringify(NOTE)});
+    if (!row) return { clicked: false };
+    row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    return { clicked: true };})()`);
+  ck('the note row is clickable', rowActivated.clicked === true, JSON.stringify(rowActivated));
+  await sleep(400);
+
+  const editorFromCard = await ev(`(() => ({
+    open: document.getElementById('day-dialog').open,
+    note: document.getElementById('day-notes').value,
+  }))()`);
+  ck('activating the row opens the day editor for that date, seeded with the '
+    + 'real note — the #224 landmine, since detailHost.editDay holds the whole '
+    + 'unwindowed history',
+    editorFromCard.open === true && editorFromCard.note === NOTE,
+    JSON.stringify(editorFromCard));
+  await ev(`document.getElementById('day-dialog').close()`).catch(() => {});
+
   /* ---------- the page is drawn for ONE local day ---------- */
 
   console.log('\n--- local midnight ---');

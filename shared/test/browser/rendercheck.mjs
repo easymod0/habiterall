@@ -36,7 +36,7 @@ globalThis.document = {
   createElement: (name) => new FakeNode(name),
 };
 
-const { streakChart } = await import(sharedPublic('charts.js'));
+const { streakChart, calendarChart } = await import(sharedPublic('charts.js'));
 const { formatDayRange, fromISOLocal } = await import(sharedPublic('ui/dates.js'));
 
 let fails = 0;
@@ -200,6 +200,63 @@ spanning.walk(n => { if (n.name === 'text') spanTexts.push(n.text); });
 const fewer = streakChart(streaks.slice(0, 2), '#8b5cf6', { limit: 5 });
 check('fewer streaks than limit renders only what exists',
   Number(fewer.attrs.height) === 6 + 2*30 + 6, fewer.attrs.height);
+
+/* --- issue #297: the calendar's note dot --- */
+{
+  const todayN = new Date();
+  todayN.setHours(0, 0, 0, 0);
+  const isoN = (d) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const agoN = (n) => isoN(new Date(todayN.getTime() - n * 86400000));
+
+  const dNoted = agoN(5);    // has a note
+  const dPlain = agoN(6);    // logged, no note
+  // `endDate` 5 days ahead of real today, same idiom `atmost.mjs`'s
+  // `paintRuns` uses, so the window reaches into the future without moving
+  // `dNoted`/`dPlain` — which stay safely inside it — off the grid.
+  const dFuture = agoN(-3);  // in the future, and given a note anyway
+
+  const noteHabit = { type: 'boolean', target_value: 0, target_type: 'at_least' };
+  const noteEntries = { [dNoted]: 1, [dPlain]: 1 };
+  const notes = { [dNoted]: 'went well today', [dFuture]: 'should never draw' };
+
+  const noteSvg = calendarChart(noteEntries, '#10b981', noteHabit, {
+    weeks: 4, endDate: agoN(-5), skips: new Set(), notes,
+  });
+
+  const noteDots = new Map();
+  let notedLabel = null;
+  noteSvg.walk((n) => {
+    if (n.name === 'circle' && n.attrs['data-note-for']) noteDots.set(n.attrs['data-note-for'], n);
+    if (n.name === 'rect' && n.attrs['data-date'] === dNoted) notedLabel = n.attrs['data-label'];
+  });
+
+  check('297: a note-bearing date gets a data-note-for mark',
+    noteDots.has(dNoted), [...noteDots.keys()].join(','));
+  check('297: data-note-marks counts it',
+    noteSvg.attrs['data-note-marks'] === '1', noteSvg.attrs['data-note-marks']);
+  check('297: a date with an entry and no note gets no mark',
+    !noteDots.has(dPlain), [...noteDots.keys()].join(','));
+  check('297: a future date with a note gets no mark, even though it is in the map',
+    !noteDots.has(dFuture), [...noteDots.keys()].join(','));
+
+  const dot = noteDots.get(dNoted);
+  check('297: the mark colours are var(...) strings, never a resolved literal',
+    !!dot && /^var\(--/.test(dot.attrs.fill) && /^var\(--/.test(dot.attrs.stroke),
+    dot ? `fill=${dot.attrs.fill} stroke=${dot.attrs.stroke}` : 'no dot drawn');
+  check('297: the cell label gains the FACT, never the note text',
+    notedLabel != null && notedLabel.endsWith(' — has a note') &&
+      !notedLabel.includes('went well today'),
+    notedLabel);
+
+  // No `notes` option at all: the attribute is still the literal "0", not
+  // absent — the same rule `data-run-marks` states, for the same reason (a
+  // caller reading a missing attribute as "no notes" cannot tell that apart
+  // from an older `charts.js` that never wrote one).
+  const bareSvg = calendarChart(noteEntries, '#10b981', noteHabit, { weeks: 4, skips: new Set() });
+  check('297: with no notes option, data-note-marks is the literal "0"',
+    bareSvg.attrs['data-note-marks'] === '0', bareSvg.attrs['data-note-marks']);
+}
 
 console.log('\n--- sample SVG (top rows) ---');
 console.log(svg.toXML().split('\n').slice(0, 14).join('\n'));

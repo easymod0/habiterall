@@ -215,9 +215,24 @@ test('a legacy list means membership is visibility, and carries NO order of its 
   // instead) — so this reads for membership alone: all nine in
   // `DETAIL_CARDS` order, `on` set by whether the id was mentioned, which
   // reproduces exactly the page master drew.
-  assert.deepEqual(parseCardList(['history', 'calendar']),
-    DETAIL_CARDS.map((id) => ({ id, on: id === 'history' || id === 'calendar' })),
-    'a legacy list must be read in DETAIL_CARDS order, not the order it lists ids in');
+  // Written out as literals rather than derived from `DETAIL_CARDS`: the two
+  // rules this branch now applies — mentioned-means-on for a legacy-era id,
+  // could-not-have-been-mentioned-means-on for a newer one — are both visible
+  // here, and an expectation built from a `.map` over `DETAIL_CARDS` would
+  // have to restate one of them to be written at all.
+  assert.deepEqual(parseCardList(['history', 'calendar']), [
+    { id: 'recentDays', on: true },        // newer than the legacy shape
+    { id: 'strength', on: false },         // of that era, and unticked
+    { id: 'calendar', on: true },          // mentioned
+    { id: 'notes', on: true },             // newer than the legacy shape (#297)
+    { id: 'streaks', on: false },
+    { id: 'resilience', on: false },
+    { id: 'awards', on: false },
+    { id: 'history', on: true },           // mentioned
+    { id: 'weekdays', on: false },
+    { id: 'weekdayMonths', on: false },
+    { id: 'frequency', on: false },
+  ], 'a legacy list must be read in DETAIL_CARDS order, not the order it lists ids in');
 
   // `[]` is the single most important case here: it must NOT be read as the
   // new shape (an empty array of objects, meaning "nothing mentioned to
@@ -226,16 +241,37 @@ test('a legacy list means membership is visibility, and carries NO order of its 
   assert.deepEqual(parseCardList([]), DETAIL_CARDS.map((id) => ({ id, on: false })),
     'an empty legacy list must leave every card off, not turn every card on');
 
-  // A card that shipped AFTER a legacy value was stored is off, and that is
-  // the deliberate policy rather than an oversight — "a legacy account is read
-  // tolerantly, and migrated only by a deliberate Done". Asserted as a literal
-  // `false` on the newest card, because the two derived assertions above are
-  // both built from DETAIL_CARDS and would keep passing if the legacy branch
-  // started defaulting an unmentioned id to ON.
+  // A card that shipped after a legacy value was stored is ON, and this
+  // REVERSES the policy this test used to pin ("stays off until a deliberate
+  // Done"). The reversal is the point: `#297` added the notes card, whose
+  // whole purpose is that a note was unreadable, and under the old rule it
+  // stayed unreadable for exactly the accounts that once configured this
+  // page — invisibly, since a hidden card and a card that does not exist look
+  // identical. The old rule could not tell the two reasons an id is missing
+  // apart; `LEGACY_ERA_CARDS` can, so an id that did not exist when the
+  // legacy shape did was never unticked and defaults on.
+  //
+  // Asserted as literals on BOTH kinds of absent id, because an assertion
+  // built from `DETAIL_CARDS` would pass under either rule.
+  const fromLegacy = parseCardList(['history']);
   assert.deepEqual(
-    parseCardList(['history']).find((c) => c.id === 'recentDays'),
-    { id: 'recentDays', on: false },
-    'a card newer than a legacy stored value stays off until a deliberate Done'
+    fromLegacy.find((c) => c.id === 'recentDays'),
+    { id: 'recentDays', on: true },
+    'a card newer than the legacy shape was never unticked, so it arrives visible'
+  );
+  assert.deepEqual(
+    fromLegacy.find((c) => c.id === 'notes'),
+    { id: 'notes', on: true },
+    'the notes card (#297) reaches a legacy account rather than hiding from it'
+  );
+  // ...and the other half, which is what stops this becoming "turn everything
+  // on": an id that DID exist when this value was written is absent because
+  // somebody unticked it, and stays off. Without this pair the change would
+  // silently overrule every explicit choice a legacy account ever made.
+  assert.deepEqual(
+    fromLegacy.find((c) => c.id === 'calendar'),
+    { id: 'calendar', on: false },
+    'a card of the legacy era that the value omits really was unticked, and stays off'
   );
 });
 
@@ -253,6 +289,7 @@ test('a new-shape list keeps its own order, and a card left out is inserted at i
     { id: 'weekdayMonths', on: false },
     { id: 'awards', on: true },
     { id: 'calendar', on: true },
+    { id: 'notes', on: true },
     { id: 'streaks', on: true },
     { id: 'resilience', on: true },
     { id: 'weekdays', on: true },
@@ -302,8 +339,12 @@ test('dupes collapse first-wins, unknown ids and __proto__ are dropped, and a mi
   // function under test would let a parseCardList broken in the same way on
   // both inputs pass. A legacy list carries no order (see the test above),
   // so a repeat, an unknown id and `__proto__` change nothing at all — the
-  // result is every id in DETAIL_CARDS order, `on` iff it is `calendar`.
-  const expected = DETAIL_CARDS.map((id) => ({ id, on: id === 'calendar' }));
+  // result is every id in DETAIL_CARDS order, `on` iff it is `calendar` or is
+  // a card newer than the legacy shape (which this value could not have named,
+  // so its absence is not an unticking — see the legacy test above).
+  const POST_LEGACY = ['recentDays', 'notes'];
+  const expected = DETAIL_CARDS.map((id) =>
+    ({ id, on: id === 'calendar' || POST_LEGACY.includes(id) }));
   assert.deepEqual(parseCardList(['calendar', 'calendar', 'nonsense', '__proto__']), expected,
     'a repeated, unknown or prototype id must not change the legacy result');
   assert.equal(/** @type {any} */ ({}).polluted, undefined);
@@ -404,6 +445,9 @@ test('the default order encodes its three arguments', () => {
     'calendar must sit directly under the score — immediately after strength');
   assert.equal(order[order.indexOf('resilience') + 1], 'awards',
     'a probability you can act on must beat a trophy — awards right after resilience');
+  assert.equal(order[order.indexOf('calendar') + 1], 'notes',
+    'notes must sit directly under the calendar — immediately after calendar, ' +
+    'issue #297');
 });
 
 test('the registry default is written in DETAIL_CARDS order', () => {

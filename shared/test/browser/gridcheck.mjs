@@ -674,6 +674,121 @@ try{
       .join('|') === ${JSON.stringify(manualNames.join('|'))}`,
     { what: 'the dashboard to redraw back in manual order' });
 
+  /* ---------- notes: the mark, and the secondary affordance routes through
+     the habit's own page (#297) ---------- */
+  console.log('\n--- notes ---');
+  const notesSeed = await ev(`(async () => {
+    const habits = await (await fetch('/api/habits')).json();
+    const h = habits.find(x => !x.archived);
+    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
+      return d.toISOString().slice(0, 10); };
+    const noted = iso(1), plain = iso(2);
+    const noteText = 'grid probe note, kept honest';
+    await fetch('/api/habits/' + h.id + '/entries/' + noted, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: 2, notes: noteText }) });
+    await fetch('/api/habits/' + h.id + '/entries/' + plain, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: 2 }) });
+    return { id: h.id, noted, plain, noteText };
+  })()`);
+  ck('a habit exists to seed the notes probe onto', !!notesSeed?.id, JSON.stringify(notesSeed));
+
+  if (notesSeed?.id) {
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+      reload: () => send('Page.navigate',{url:APP},sessionId),
+      what: 'the dashboard, reloaded to pick up the seeded notes',
+    });
+    await sleep(600);
+
+    const boxSel = (date) => `[data-focus-key="check:${notesSeed.id}:${date}"] .check-box`;
+    const hasNoteMark = (date) => ev(
+      `document.querySelector('${boxSel(date)}')?.classList.contains('has-note') ?? null`);
+    ck('the note-bearing day carries the mark on the dashboard grid',
+       await hasNoteMark(notesSeed.noted) === true);
+    ck('a day with an entry and no note does not',
+       await hasNoteMark(notesSeed.plain) === false);
+
+    // The CLASS alone is not the mark — `.check-box.has-note::after` is what
+    // actually draws it, and a check reading only `classList` stays green with
+    // that whole rule deleted from the stylesheet (review round). Read what is
+    // RENDERED, on the pseudo-element itself: `content` must not be `'none'`
+    // (no box generated at all) and the box drawn must have real width.
+    const notePseudo = (date) => ev(`(() => {
+      const el = document.querySelector('${boxSel(date)}');
+      if (!el) return null;
+      const cs = getComputedStyle(el, '::after');
+      return { content: cs.content, width: parseFloat(cs.width),
+               bg: cs.backgroundColor, ring: cs.boxShadow };
+    })()`);
+    const notedPseudo = await notePseudo(notesSeed.noted);
+    // A generated box of real width is not yet a VISIBLE dot: the mark is
+    // carried by `background: var(--surface)` plus the `box-shadow` ring, and
+    // dropping either leaves an invisible 6x6 box that `content`/`width`
+    // alone still pass (review round 2). Both are read here.
+    ck("the note-bearing day's dot is actually DRAWN, not merely classed",
+       !!notedPseudo && notedPseudo.content !== 'none' && notedPseudo.width > 0
+         && notedPseudo.bg !== 'rgba(0, 0, 0, 0)' && notedPseudo.ring !== 'none',
+       JSON.stringify(notedPseudo));
+    const plainPseudo = await notePseudo(notesSeed.plain);
+    // The negative half, and the one that stops a rule drawing a dot on EVERY
+    // cell from passing the check above too.
+    ck('...and the note-free day draws no pseudo-element at all',
+       !!plainPseudo && plainPseudo.content === 'none', JSON.stringify(plainPseudo));
+
+    const cellCentre = (date) => ev(`(() => {
+      const el = document.querySelector('[data-focus-key="check:${notesSeed.id}:${date}"]');
+      if (!el) return null;
+      const b = el.getBoundingClientRect();
+      return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+    })()`);
+    // A REAL right-click, dispatched over CDP — a scripted `.click()`
+    // dispatches no `pointerdown` and proves nothing about the gesture a
+    // desktop right-click (or an Android long-press, which fires the same
+    // `contextmenu` event on a `<button>`) actually arrives as.
+    const rightClick = async (x, y) => {
+      await send('Input.dispatchMouseEvent',
+        { type: 'mousePressed', x, y, button: 'right', clickCount: 1 }, sessionId);
+      await send('Input.dispatchMouseEvent',
+        { type: 'mouseReleased', x, y, button: 'right', clickCount: 1 }, sessionId);
+    };
+
+    const notedCentre = await cellCentre(notesSeed.noted);
+    ck('the note-bearing cell is on screen to be right-clicked', !!notedCentre,
+       JSON.stringify(notedCentre));
+
+    if (notedCentre) {
+      await rightClick(notedCentre.x, notedCentre.y);
+      // The secondary affordance ROUTES THROUGH the habit's own page (#224):
+      // this list holds only which dates hold a note, never the TEXT, so
+      // opening the editor in place here would seed an empty box over a day
+      // that has a real note — and `saveDay` always STATES the note on save,
+      // which would destroy it silently on the very next Save. So the proof
+      // is the whole trip, not just "a dialog opened somewhere".
+      await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
+        { what: "the day editor to open on the habit's own page" });
+      await sleep(300);
+      const landed = await ev(`({
+        hash: location.hash,
+        listShowing: !document.getElementById('view-list').hidden,
+        detailShowing: !document.getElementById('view-detail').hidden,
+        notes: document.getElementById('day-notes').value,
+      })`);
+      ck("the secondary affordance lands on the habit's own detail view, "
+         + 'with the day editor open',
+         landed.hash === `#/habit/${notesSeed.id}` && landed.detailShowing === true
+           && landed.listShowing === false,
+         JSON.stringify(landed));
+      // The anti-#224 proof: an EMPTY box here is the bug this whole design
+      // is shaped to avoid, since the dashboard's own host never held the
+      // note's text to seed the dialog with in the first place.
+      ck('...and #day-notes holds the REAL note, not an empty box',
+         landed.notes === notesSeed.noteText, JSON.stringify(landed));
+      await ev(`document.getElementById('day-cancel').click()`);
+      await sleep(300);
+    }
+  }
+
   console.log(fails===0?'\nALL GRID CHECKS PASSED':`\n${fails} FAILED`);
 }catch(e){console.error('ERR',e.message);fails++;}
 finally{await closeChrome({ chrome, port: PORT, profile });process.exit(fails?1:0);}
