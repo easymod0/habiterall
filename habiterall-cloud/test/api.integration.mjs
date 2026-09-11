@@ -3118,6 +3118,12 @@ for (const id of gateIds) {
 for (const id of [
   sortCharlie.id, sortAlpha.id, sortBravo.id, tieZzz.id, tieAaa.id,
   rmNever.id, rmWeekAgo.id, rmYesterday.id,
+  // #297's negative-case habit. Its own entry is not on `habitId`, so the
+  // targeted DELETE below does not reach it, and the import block's
+  // "the victim's data is untouched" counts EVERY entry alice has — which
+  // is the check this list's comment is about, and the one this habit
+  // failed in CI when it was left out.
+  noNotesHabit.id,
 ]) {
   await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
 }
