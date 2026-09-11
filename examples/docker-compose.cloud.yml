@@ -49,6 +49,10 @@ services:
       migrate: { condition: service_completed_successfully }
     ports:
       - '${BIND_ADDR:-}:${APP_PORT:-3100}:3000'
+    volumes:
+      # Scheduled backups land here, not in db-data: a volume that dies takes
+      # the database with it, so the dump belongs on separate storage.
+      - habiterall-backups:/backups
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten
@@ -74,6 +78,20 @@ services:
       # The fallback clock. A container has no timezone, so it is UTC; users
       # can override it for their own reminders in ⚙ → Notifications.
       TZ: ${TZ:-Etc/UTC}
+
+      # Scheduled backups: one whole-database pg_dump a night, every account,
+      # one file. Empty DIR is off. The dump must bypass row-level security
+      # (every tenant table is FORCE ROW LEVEL SECURITY), which the app's own
+      # restricted role cannot do — and this example deliberately does not
+      # grant the app the database owner credential that would let it. Add
+      # that credential to this service yourself, knowingly, to turn backups
+      # on; see "Scheduled backups" in the README and cloud.env.example for
+      # what to add and what it costs. Until you do, the app logs an error
+      # naming the missing credential and writes no backups.
+      HABITERALL_BACKUP_DIR: ${HABITERALL_BACKUP_DIR:-}    # e.g. /backups; empty is off
+      HABITERALL_BACKUP_SCHEDULE: ${HABITERALL_BACKUP_SCHEDULE:-}  # 03:00
+      HABITERALL_BACKUP_KEEP: ${HABITERALL_BACKUP_KEEP:-}  # 7
+      HABITERALL_PG_DUMP: ${HABITERALL_PG_DUMP:-}          # pg_dump path; the image's own is on PATH
 
       # Limits, the pool, and logging. Empty means the default, so these are
       # here to make the knob reachable from .env rather than to set anything
@@ -111,3 +129,4 @@ services:
 
 volumes:
   db-data:
+  habiterall-backups:

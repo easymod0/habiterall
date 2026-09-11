@@ -1,9 +1,13 @@
 /**
- * The scheduled JSON backup, personal edition (issue #75).
+ * The scheduled backup, personal edition (issue #75), in the JSON export's
+ * own shape and, since phase two, an optional `.db` snapshot beside it.
  *
  * This is the storage/filesystem/environment half; the pure schedule and
  * retention math lives in `@habiterall/shared/backup.js` and is imported
- * from there rather than re-derived.
+ * from there rather than re-derived. `HABITERALL_BACKUP_FORMAT` is read in
+ * THIS file and nowhere else — it is personal-only (cloud always writes a
+ * whole-database `pg_dump`), so it must never be read from `shared/` or from
+ * `habiterall-cloud`.
  *
  * Import direction is deliberately ONE-WAY: `api.js` already imports
  * `notifier.js`, and `api.js`'s `/backup/status` route needs `backupStatus`
@@ -17,12 +21,12 @@
  */
 
 import {
-  mkdirSync, writeFileSync, readdirSync, renameSync, unlinkSync,
+  mkdirSync, writeFileSync, readdirSync, renameSync, unlinkSync, statSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { db } from './db.js';
 import {
-  parseBackupSchedule, backupFileName, dueBackup, prunableBackups,
+  parseBackupSchedule, parseBackupFormat, backupFileName, dueBackup, prunableBackups,
 } from '@habiterall/shared/backup.js';
 import { zonedClock } from '@habiterall/shared/notify.js';
 import { log } from '@habiterall/shared/log.js';
@@ -46,15 +50,19 @@ const q = {
 const DEFAULT_SCHEDULE = '03:00';
 const DEFAULT_SCHEDULE_MINUTES = 180;
 const DEFAULT_KEEP = 7;
+// `json` keeps phase one's reviewed default behaviour unchanged — this phase
+// is purely additive.
+const DEFAULT_FORMAT = 'json';
 
 /**
- * Read the three operator variables. Every read is a LITERAL member
+ * Read the four operator variables. Every read is a LITERAL member
  * expression (`env.HABITERALL_BACKUP_DIR`, not a destructure or a computed
  * key) so `shared/test/compose.test.js`'s graph walker can see it.
  *
  * @param {Record<string, string|undefined>} env
  * @returns {{dir: string, schedule: string, scheduleMinutes: number,
- *   keep: number, enabled: boolean}}
+ *   keep: number, enabled: boolean, format: 'json'|'db'|'both',
+ *   formats: Array<'json'|'db'>}}
  */
 export function backupConfig(env) {
   const dir = String(env.HABITERALL_BACKUP_DIR ?? '').trim();
@@ -86,7 +94,22 @@ export function backupConfig(env) {
   }
   const keep = keepInvalid ? DEFAULT_KEEP : parsedKeep;
 
-  return { dir, schedule, scheduleMinutes, keep, enabled };
+  const rawFormat = env.HABITERALL_BACKUP_FORMAT;
+  const parsedFormat = parseBackupFormat(rawFormat);
+  // Same division as the schedule and keep fallbacks above: unset says
+  // nothing wrong, set-but-unparseable is a typo that must fall back rather
+  // than silently disable the feature, and must not be silent either.
+  const formatWasSet = rawFormat !== undefined && rawFormat !== '';
+  if (parsedFormat === null && formatWasSet) {
+    log.warn('backup.format_invalid', { value: rawFormat, fallback: DEFAULT_FORMAT });
+  }
+  const format = parsedFormat === null ? DEFAULT_FORMAT : parsedFormat;
+  // The kinds this run WRITES. 'both' is JSON and `.db` together; retention
+  // always covers both families regardless of this list — see `runBackup`.
+  /** @type {Array<'json'|'db'>} */
+  const formats = format === 'both' ? ['json', 'db'] : [format];
+
+  return { dir, schedule, scheduleMinutes, keep, enabled, format, formats };
 }
 
 /**
@@ -136,7 +159,14 @@ export function backupStatus() {
  * `backup_status`, and returns normally so tomorrow's tick tries again; a
  * failed night must not permanently disable the feature.
  *
- * @param {{dir: string, keep: number}} cfg from `backupConfig`
+ * Writes every kind in `cfg.formats` ('json', or 'db', or both under
+ * 'both'). A failure writing one kind does not stop the others being
+ * attempted — whatever files DID land are kept and reported — but the run as
+ * a whole is recorded as `'error'`; a partial success is still an honest
+ * error state.
+ *
+ * @param {{dir: string, keep: number, formats: Array<'json'|'db'>}} cfg from
+ *   `backupConfig`
  * @param {{payload: () => any, instant?: Date|number}} deps `payload` is the
  *   injected builder (`buildBackupPayload` from `api.js`, supplied by
  *   `server.js` — never imported here directly, see the file header).
@@ -149,7 +179,6 @@ export async function runBackup(cfg, deps) {
   // `resolveTimeZone` answers where an ACCOUNT is, a different question —
   // folding the two together breaks one of them (root CLAUDE.md).
   const { date } = zonedClock(instant, '');
-  const file = backupFileName(date);
 
   try {
     mkdirSync(cfg.dir, { recursive: true });
@@ -160,34 +189,61 @@ export async function runBackup(cfg, deps) {
     // settings dialog shows as a problem rather than as silence.
     q.upsertStatus.run(date, 'running', '', '', null, 0);
 
-    const finalPath = join(cfg.dir, file);
-    const tmpPath = `${finalPath}.tmp`;
-    let bytes;
-    try {
-      const body = JSON.stringify(payload(), null, 2);
-      bytes = Buffer.byteLength(body);
-      writeFileSync(tmpPath, body);
-      // Atomic: rename onto the final name is one filesystem operation, so a
-      // reader never observes a truncated file. A crash between the write
-      // and the rename leaves only the .tmp, which is what "no partial left
-      // behind" (step 5) checks for after a clean run.
-      renameSync(tmpPath, finalPath);
-    } catch (err) {
-      try { unlinkSync(tmpPath); } catch { /* best effort */ }
-      throw err;
+    /** @type {Array<{name: string, bytes: number}>} */
+    const written = [];
+    let failure = null;
+
+    for (const kind of cfg.formats) {
+      const name = backupFileName(date, kind);
+      const finalPath = join(cfg.dir, name);
+      const tmpPath = `${finalPath}.tmp`;
+      try {
+        if (kind === 'db') {
+          // VACUUM INTO REFUSES an output file that already exists (measured
+          // — "output file already exists"), so a best-effort unlink of a
+          // stale .tmp from a crashed previous run comes first, or one crash
+          // permanently breaks every future .db snapshot.
+          try { unlinkSync(tmpPath); } catch { /* no stale .tmp — fine */ }
+          // The BOUND parameter, never string concatenation: the directory
+          // is operator-controlled, and `VACUUM INTO '<path>'` built by
+          // concatenation would make a quote in the path a SQL-injection
+          // surface. This is not optional.
+          db.prepare('VACUUM INTO ?').run(tmpPath);
+        } else {
+          const body = JSON.stringify(payload(), null, 2);
+          writeFileSync(tmpPath, body);
+        }
+        // Atomic: rename onto the final name is one filesystem operation, so
+        // a reader never observes a truncated file. A crash between the
+        // write and the rename leaves only the .tmp, which is what "no
+        // partial left behind" (step 5) checks for after a clean run.
+        renameSync(tmpPath, finalPath);
+        written.push({ name, bytes: statSync(finalPath).size });
+      } catch (err) {
+        try { unlinkSync(tmpPath); } catch { /* best effort */ }
+        log.error('backup.write_failed', { date, kind }, err);
+        failure = failure ?? err;
+      }
     }
 
+    // Prune ALWAYS covers both personal families ('json' and 'db'), never
+    // just `cfg.formats` — an operator who switches `both` -> `json` must
+    // not leave `.db` files unmanaged forever. Never 'sql': that family is
+    // cloud's, and a personal instance must not delete it.
     let pruned;
     try {
       const names = readdirSync(cfg.dir);
-      pruned = prunableBackups(names, cfg.keep, { except: file });
+      pruned = prunableBackups(names, cfg.keep,
+        { except: written.map((w) => w.name), kinds: ['json', 'db'] });
       for (const name of pruned) unlinkSync(join(cfg.dir, name));
     } catch (err) {
-      // The write above already succeeded and the file this run wrote stays
-      // — only the STATE says error, because a volume quietly filling up
-      // from a failed prune is exactly the failure that must be loud.
-      log.error('backup.prune_failed', { date, file }, err);
-      q.upsertStatus.run(date, 'error', reportableError(err), file, bytes, 0);
+      // Whatever DID land above stays — only the STATE says error, because a
+      // volume quietly filling up from a failed prune is exactly the
+      // failure that must be loud.
+      const fileList = written.map((w) => w.name).join(', ');
+      const totalBytes = written.length ? written.reduce((sum, w) => sum + w.bytes, 0) : null;
+      log.error('backup.prune_failed', { date, file: fileList }, err);
+      q.upsertStatus.run(date, 'error', reportableError(err), fileList, totalBytes, 0);
       return;
     }
 
@@ -199,12 +255,25 @@ export async function runBackup(cfg, deps) {
       // exists at all — an unjoined array here logged no names, ever.
       log.info('backup.pruned', { date, count: pruned.length, files: pruned.join(', ') });
     }
-    q.upsertStatus.run(date, 'ok', '', file, bytes, pruned.length);
-    log.info('backup.ok', { date, file, bytes, pruned: pruned.length });
+
+    // `file` is every basename this run wrote, comma-joined when there is
+    // more than one (format: 'both'); `bytes` is the TOTAL across them.
+    const fileList = written.map((w) => w.name).join(', ');
+    const totalBytes = written.length ? written.reduce((sum, w) => sum + w.bytes, 0) : null;
+
+    if (failure) {
+      // A partial success (one kind landed, the other did not) is still an
+      // honest 'error' state — the files that DID land are kept and named.
+      q.upsertStatus.run(date, 'error', reportableError(failure), fileList, totalBytes, pruned.length);
+      return;
+    }
+
+    q.upsertStatus.run(date, 'ok', '', fileList, totalBytes, pruned.length);
+    log.info('backup.ok', { date, file: fileList, bytes: totalBytes, pruned: pruned.length });
   } catch (err) {
-    // Every other failure path lands here — mkdir, the claim write, or
-    // serialising/writing the payload: log at error, record the row, and
-    // return normally rather than let it propagate.
+    // Every other failure path lands here — mkdir or the claim write: log at
+    // error, record the row, and return normally rather than let it
+    // propagate.
     log.error('backup.failed', { date }, err);
     try {
       q.upsertStatus.run(date, 'error', reportableError(err), '', null, 0);

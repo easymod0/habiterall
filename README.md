@@ -329,6 +329,7 @@ services:
       HABITERALL_BACKUP_DIR: ${HABITERALL_BACKUP_DIR:-}          # e.g. /data/backups; empty is off
       HABITERALL_BACKUP_SCHEDULE: ${HABITERALL_BACKUP_SCHEDULE:-}  # 03:00
       HABITERALL_BACKUP_KEEP: ${HABITERALL_BACKUP_KEEP:-}          # 7
+      HABITERALL_BACKUP_FORMAT: ${HABITERALL_BACKUP_FORMAT:-}      # json (default), db, or both
 
       # Limits and logging. Empty means the default, so these are here to make
       # the knob reachable from .env rather than to set anything — a variable
@@ -483,16 +484,28 @@ HABITERALL_BACKUP_DIR=
 # warning naming what it was given, rather than silently disabling backups.
 HABITERALL_BACKUP_SCHEDULE=03:00
 
-# How many dated backups to keep. The oldest beyond this count are deleted
-# after each successful run, and the deletion is logged. Only files named
-# habiterall-backup-YYYY-MM-DD.json are ever touched, so the directory can
-# safely hold anything else — the database itself, a note, another tool's
-# output.
+# How many dated backups to keep, PER FORMAT — `both` with keep=7 leaves
+# 7 `.json` files and 7 `.db` files, not 7 total. The oldest beyond this count
+# are deleted after each successful run, and the deletion is logged. Only
+# files this feature wrote are ever touched, so the directory can safely hold
+# anything else — the database itself, a note, another tool's output.
 HABITERALL_BACKUP_KEEP=7
 
-# The file written is the very same JSON backup the in-app "Backup & Restore"
-# button produces, so it restores through the same import — see
-# https://github.com/easymod0/habiterall#scheduled-backups
+# `json` (default), `db`, or `both`. `json` is the same export the in-app
+# "Backup & Restore" button produces, and restores through the same import.
+# `db` is a `VACUUM INTO` snapshot of the whole SQLite file, restored by
+# copying it back into place rather than through the import. It carries
+# everything the JSON export withholds on purpose — the unportable settings
+# (Discord/ntfy credentials, the notify timezone) plus the operational tables
+# JSON never touches at all: `auth_credentials` (the password hash),
+# `server_secrets` (the session secret), sessions, and the notifier's own
+# logs. An unrecognised value falls back to `json` and logs a warning.
+#
+# Because of what it carries, a `.db` snapshot is a CREDENTIAL-BEARING file —
+# treat it like the database itself, not like the JSON export.
+HABITERALL_BACKUP_FORMAT=json
+
+# See https://github.com/easymod0/habiterall#scheduled-backups
 
 # ---- limits -----------------------------------------------------------------
 # Ceiling on a backup being restored.
@@ -722,6 +735,10 @@ services:
       authentik-bootstrap: { condition: service_completed_successfully }
     ports:
       - '${BIND_ADDR:-}:${APP_PORT:-3100}:3000'
+    volumes:
+      # Scheduled backups land here, not in db-data: a volume that dies takes
+      # the database with it, so the dump belongs on separate storage.
+      - habiterall-backups:/backups
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten
@@ -749,6 +766,20 @@ services:
       # The fallback clock. A container has no timezone, so it is UTC; users
       # can override it for their own reminders in ⚙ → Notifications.
       TZ: ${TZ:-Etc/UTC}
+
+      # Scheduled backups: one whole-database pg_dump a night, every account,
+      # one file. Empty DIR is off. The dump must bypass row-level security
+      # (every tenant table is FORCE ROW LEVEL SECURITY), which the app's own
+      # restricted role cannot do — and this example deliberately does not
+      # grant the app the database owner credential that would let it. Add
+      # that credential to this service yourself, knowingly, to turn backups
+      # on; see "Scheduled backups" in the README and cloud.env.example for
+      # what to add and what it costs. Until you do, the app logs an error
+      # naming the missing credential and writes no backups.
+      HABITERALL_BACKUP_DIR: ${HABITERALL_BACKUP_DIR:-}    # e.g. /backups; empty is off
+      HABITERALL_BACKUP_SCHEDULE: ${HABITERALL_BACKUP_SCHEDULE:-}  # 03:00
+      HABITERALL_BACKUP_KEEP: ${HABITERALL_BACKUP_KEEP:-}  # 7
+      HABITERALL_PG_DUMP: ${HABITERALL_PG_DUMP:-}          # pg_dump path; the image's own is on PATH
 
       # Limits, the pool, and logging. Empty means the default, so these are
       # here to make the knob reachable from .env rather than to set anything
@@ -787,6 +818,7 @@ services:
 volumes:
   db-data:
   authentik-db-data:
+  habiterall-backups:
   # Refilled from the habiterall image on every `up`, so a file edited in here
   # is overwritten on the next start. Change them in an image you build.
   authentik-blueprints:
@@ -1011,6 +1043,57 @@ DISCORD_BOT_TOKEN=
 #   NTFY_ALLOWED_HOSTS=ntfy.sh,example.com/ntfy
 NTFY_ALLOWED_HOSTS=
 
+# ---- backups ----------------------------------------------------------------
+# A nightly `pg_dump` of the WHOLE database — every account, one file — not a
+# per-account export. Empty DIR means the feature is off.
+HABITERALL_BACKUP_DIR=
+
+# `HH:MM`, a daily local time on the CONTAINER's own clock (TZ, above). A
+# value that does not parse falls back to 03:00 and logs a warning naming
+# what it was given, rather than silently disabling backups.
+HABITERALL_BACKUP_SCHEDULE=03:00
+
+# How many dated dumps to keep. The oldest beyond this count are deleted after
+# each successful run, and the deletion is logged. Only files this feature
+# wrote are ever touched.
+HABITERALL_BACKUP_KEEP=7
+
+# The dump needs a role that can BYPASS row-level security (superuser, or
+# `BYPASSRLS`) — every tenant table is `FORCE ROW LEVEL SECURITY`, which
+# applies RLS to the table OWNER too, so the app's own restricted DATABASE_URL
+# role cannot do this at all, and dumping "as the owner" plainly is not
+# enough either.
+#
+# The shipped compose files deliberately do NOT give the app that credential:
+# the app not being able to change the schema, or read past row-level
+# security, is part of this edition's security model. To turn scheduled
+# backups on, add DATABASE_URL_ADMIN to the app service yourself, in an
+# override file or your own compose edit — for example, the same
+# postgres://habiterall_owner:${DB_OWNER_PASSWORD}@db:5432/habiterall the
+# `migrate` service already uses. That is a deliberate, informed widening:
+# a compromise of the app process then reaches a credential that can rewrite
+# the schema and read every tenant's rows, which is why this is opt-in and
+# not the default. Until you add it, the app logs an error naming the missing
+# credential and writes no backups — it does not fail silently and it never
+# falls back to the restricted role.
+#
+# Two ways to keep the app from ever holding that credential at all: run
+# `pg_dump` from outside the app on your own schedule (see SETUP.md for the
+# manual command), or create a dedicated least-privilege dump role — a
+# `BYPASSRLS` role granted only `SELECT` — instead of handing over the owner
+# credential.
+
+# Path to `pg_dump` inside the image, if you need something other than the
+# one already on PATH. `pg_dump` must be AT LEAST the server's major version
+# or it refuses to run — the image ships a client matched to the Postgres
+# major in these compose files, so bumping the server's major means bumping
+# the image's client too.
+HABITERALL_PG_DUMP=
+
+# Restore with `psql "$DATABASE_URL_ADMIN" < habiterall-backup-YYYY-MM-DD.sql`
+# against an EMPTY database — see
+# https://github.com/easymod0/habiterall#scheduled-backups
+
 # ---- limits -----------------------------------------------------------------
 # Shown at their code defaults, so an unedited copy changes nothing.
 MAX_HABITS_PER_USER=200
@@ -1144,6 +1227,10 @@ services:
       migrate: { condition: service_completed_successfully }
     ports:
       - '${BIND_ADDR:-}:${APP_PORT:-3100}:3000'
+    volumes:
+      # Scheduled backups land here, not in db-data: a volume that dies takes
+      # the database with it, so the dump belongs on separate storage.
+      - habiterall-backups:/backups
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten
@@ -1169,6 +1256,20 @@ services:
       # The fallback clock. A container has no timezone, so it is UTC; users
       # can override it for their own reminders in ⚙ → Notifications.
       TZ: ${TZ:-Etc/UTC}
+
+      # Scheduled backups: one whole-database pg_dump a night, every account,
+      # one file. Empty DIR is off. The dump must bypass row-level security
+      # (every tenant table is FORCE ROW LEVEL SECURITY), which the app's own
+      # restricted role cannot do — and this example deliberately does not
+      # grant the app the database owner credential that would let it. Add
+      # that credential to this service yourself, knowingly, to turn backups
+      # on; see "Scheduled backups" in the README and cloud.env.example for
+      # what to add and what it costs. Until you do, the app logs an error
+      # naming the missing credential and writes no backups.
+      HABITERALL_BACKUP_DIR: ${HABITERALL_BACKUP_DIR:-}    # e.g. /backups; empty is off
+      HABITERALL_BACKUP_SCHEDULE: ${HABITERALL_BACKUP_SCHEDULE:-}  # 03:00
+      HABITERALL_BACKUP_KEEP: ${HABITERALL_BACKUP_KEEP:-}  # 7
+      HABITERALL_PG_DUMP: ${HABITERALL_PG_DUMP:-}          # pg_dump path; the image's own is on PATH
 
       # Limits, the pool, and logging. Empty means the default, so these are
       # here to make the knob reachable from .env rather than to set anything
@@ -1206,6 +1307,7 @@ services:
 
 volumes:
   db-data:
+  habiterall-backups:
 ```
 <!-- /generated -->
 
@@ -1728,26 +1830,35 @@ marks* decides how the rows in the same file are read.
 
 ### Scheduled backups
 
-**Personal edition only.** Three environment variables turn "the whole
-database, automated" into something that just happens, instead of a button
-someone has to remember to press:
+Both editions can write a backup on their own, nightly, instead of one somebody
+has to remember to press — but what each one writes, and what enables it,
+differs.
+
+**Personal** picks a **format**: `json` (the default), `db`, or `both`.
+`json` is the same export the in-app **Backup & Restore** button produces
+(`GET /api/export`) and restores through the same import. `db` is a
+`VACUUM INTO` snapshot of the whole SQLite file — one statement, WAL-aware, no
+new dependency — restored by copying it back into place rather than through
+the import. The JSON export already carries your habits (archived ones
+included), your categories and your portable settings, so a `.db` snapshot is
+not "more data" in that sense; what it genuinely adds is the settings the JSON
+export deliberately withholds (your Discord/ntfy credentials, the notify
+timezone), plus tables JSON never touches at all — the password hash, the
+session secret, sessions, and the notifier's own logs. That is also its cost:
+**a `.db` snapshot is a credential-bearing file** and has to be stored like the
+database itself, not like the portable export.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `HABITERALL_BACKUP_DIR` | empty (off) | Where the nightly backup is written. Empty means the feature is off — nothing changes for an existing install on upgrade |
 | `HABITERALL_BACKUP_SCHEDULE` | `03:00` | `HH:MM`, a daily local time on the **container's own clock** (`TZ`, above). A value that will not parse falls back to `03:00` and logs a warning naming what it was given, rather than silently turning backups off |
-| `HABITERALL_BACKUP_KEEP` | `7` | How many dated backups to keep. The oldest beyond this count are deleted after each successful run, and the deletion is logged |
+| `HABITERALL_BACKUP_KEEP` | `7` | How many dated backups to keep, **per format** — `both` at `keep=7` leaves 7 `.json` files and 7 `.db` files, not 7 total. The oldest beyond the count are deleted after each successful run, and the deletion is logged |
+| `HABITERALL_BACKUP_FORMAT` | `json` | `json`, `db`, or `both`. An unrecognised value falls back to `json` and logs a warning |
 
 It writes once a day, at the scheduled minute, on the same one-minute timer the
 reminders already use — no second scheduler in the process. If the server was
 down at `03:00` and comes back at `05:00`, that day's backup still runs, late;
 it never runs twice in the same local day.
-
-The file is `habiterall-backup-<date>.json` — the very same JSON export the
-in-app **Backup & Restore** button produces (`GET /api/export`), so it restores
-through the same import. Retention only ever touches files matching that exact
-name, so the directory can safely hold anything else: the database itself, if
-you have also pointed it at `/data`, a note, another tool's output.
 
 The last outcome — when it last ran, whether it succeeded, and the error if it
 did not — shows as one line in the app's **Backup & Restore** dialog. A run that
@@ -1757,6 +1868,53 @@ error shown is a short classification (`ENOTDIR (mkdir)`, say), never the raw
 message — a filesystem error's full text embeds the directory you chose, and
 the complete message is written to the server's own log instead, where the
 detail belongs.
+
+**Cloud** writes a `pg_dump` of the **whole database** — every account, one
+plain-SQL file a night, not a per-account export — but only once you turn it
+on. The dump needs a Postgres role that can **bypass row-level security** —
+superuser, or `BYPASSRLS` — because every tenant table here is
+`FORCE ROW LEVEL SECURITY`, which applies RLS to the table's OWNER too; the
+app's own restricted role cannot dump anything at all. The shipped compose
+files **deliberately do not give the app that credential**: the app not being
+able to change the schema, or read past row-level security, is part of this
+edition's security model. Turning scheduled backups on means adding
+`DATABASE_URL_ADMIN` — the same owner credential `migrate` already holds — to
+the app service yourself, knowingly: a compromise of the app process then
+reaches a credential that can rewrite the schema and read every tenant's rows,
+which is why this is opt-in rather than default. Until you add it, the app
+logs an error naming the missing credential and writes no backups — it does
+not fail silently and it never falls back to the restricted role. If you would
+rather the app never hold that credential at all, run `pg_dump` from outside
+the app on your own schedule instead (see `habiterall-cloud/SETUP.md`), or
+grant a dedicated least-privilege dump role — `BYPASSRLS` with only `SELECT`
+— in place of the owner credential. `pg_dump` also has to be **at least the
+server's own major version**, or it refuses to run — the image ships one
+matched to the Postgres major in these compose files, so bumping the server's
+major means bumping the image's client too. There is no per-account restore,
+no point-in-time recovery and no replica here; see #240.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HABITERALL_BACKUP_DIR` | empty (off) | Where the nightly dump is written. Empty means the feature is off |
+| `HABITERALL_BACKUP_SCHEDULE` | `03:00` | `HH:MM`, on the container's own clock, same rule as personal's |
+| `HABITERALL_BACKUP_KEEP` | `7` | How many dated dumps to keep |
+| `HABITERALL_PG_DUMP` | `pg_dump` (on `PATH`) | Path to the client inside the image, if not the default |
+
+Cloud carries no "last outcome" anywhere a caller can read: every account on
+the instance is an untrusted tenant of this state, so `GET /api/backup/status`
+answers only whether scheduled backups are configured
+(`{enabled, schedule: null, keep: null, last: null}`), and the operator's own
+log is the record of how a run went.
+
+Retention is per FAMILY, in both editions: personal's `.json` and `.db` never
+touch each other's count, and cloud only ever prunes its own `.sql` files — so
+pointing all three at one directory is safe, and each restores its own way:
+
+| Artefact | Restore |
+|---|---|
+| `.json` (personal) | ⚙ → Backup & Restore → import, or `POST /api/import` |
+| `.db` (personal) | Stop the server, copy the file over `data/habiterall.db` (and remove any `-wal`/`-shm` sidecar), start it again |
+| `.sql` (cloud) | `psql "$DATABASE_URL_ADMIN" < habiterall-backup-<date>.sql`, against an **empty** database |
 
 Back up Authentik's database too, or you lose your user directory.
 
@@ -1852,9 +2010,10 @@ older syntax than the one the server accepts.
 | `HABITERALL_PUBLIC_URL` | — | This instance's address, so a Discord reminder can link back to it |
 | `DISCORD_BOT_TOKEN` | — | Enables the interactive Discord mode (buttons). Without it, Discord reminders are webhook text |
 | `NTFY_ALLOWED_HOSTS` | `ntfy.sh` | Which hosts an ntfy topic URL may name. Your server makes the request, so this is the whole guard — see [ntfy](#ntfy) for the entry syntax |
-| `HABITERALL_BACKUP_DIR` | empty (off) | Where a nightly JSON backup is written — see [Scheduled backups](#scheduled-backups) |
+| `HABITERALL_BACKUP_DIR` | empty (off) | Where a nightly backup is written — see [Scheduled backups](#scheduled-backups) |
 | `HABITERALL_BACKUP_SCHEDULE` | `03:00` | `HH:MM`, on the container's own clock — see [Scheduled backups](#scheduled-backups) |
-| `HABITERALL_BACKUP_KEEP` | `7` | How many dated backups to keep — see [Scheduled backups](#scheduled-backups) |
+| `HABITERALL_BACKUP_KEEP` | `7` | How many dated backups to keep, per format — see [Scheduled backups](#scheduled-backups) |
+| `HABITERALL_BACKUP_FORMAT` | `json` | `json`, `db`, or `both` — see [Scheduled backups](#scheduled-backups) |
 | `MAX_UPLOAD_MB` | `16` | Ceiling on a backup being restored |
 | `BIND_ADDR` | empty | Which interface the published port appears on. Empty is every interface; `127.0.0.1` restricts it to a proxy on this host. Not `0.0.0.0`, which is IPv4 only |
 | `NODE_ENV` | `production` in both images | `production` turns on HSTS. See [Turning the guards off](#turning-the-guards-off) before unsetting it |
@@ -1888,6 +2047,15 @@ what the `/healthz` memo is sized against) and `PGSSL`.
 
 One variable is in no file at all: `PORT`, which is fixed inside the container
 by the image and the published mapping. `APP_PORT` is the host-side knob.
+
+Four more turn on the scheduled whole-database dump:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HABITERALL_BACKUP_DIR` | empty (off) | Where the nightly `pg_dump` is written — see [Scheduled backups](#scheduled-backups) |
+| `HABITERALL_BACKUP_SCHEDULE` | `03:00` | `HH:MM`, on the container's own clock — see [Scheduled backups](#scheduled-backups) |
+| `HABITERALL_BACKUP_KEEP` | `7` | How many dated dumps to keep — see [Scheduled backups](#scheduled-backups) |
+| `HABITERALL_PG_DUMP` | `pg_dump` (on `PATH`) | Path to the client inside the image, if not the default — see [Scheduled backups](#scheduled-backups) |
 
 ### Limits on an import
 

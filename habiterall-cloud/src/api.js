@@ -16,6 +16,7 @@ import { withUser, withUserWrite, isCategoryNameConflict } from './db/pool.js';
 import { createMemo, forgetAccount, remember } from './cache.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
+import { backupEnabled } from './backup.js';
 import {
   writeLoopDatabase, EXPORT_SKIPPED_HEADER, skipsForLog,
 } from '@habiterall/shared/export-loop.js';
@@ -1859,16 +1860,35 @@ api.get('/notify/status', route(async (req, res) => {
 
 /**
  * The API surface is identical in both editions by promise, and `enabled` is
- * the field that carries the capability difference. Scheduled backups are
- * personal-only for now because N accounts under RLS need a privileged
- * per-account export path that deliberately steps outside the policies — a
- * security-shaped change that wants its own review (issue #75). This route
- * reads no table, so it needs no RLS policy, no grant, no migration and no
- * tenancy-suite case, and `enabled: false` is a true statement about cloud,
- * not a stub.
+ * the field that carries the capability difference (issue #75). This
+ * edition DOES take a scheduled backup on the same tick as its reminders —
+ * a whole-database `pg_dump`, not a per-account export — because N accounts
+ * under RLS have no privileged per-account export path here and the dump is
+ * instance-level operator state with no owning account. So this route
+ * carries the ONE bit a caller may be told — whether this instance is
+ * configured to take scheduled backups at all — and nothing else:
+ *
+ * - `schedule`, `keep` and `last` are `null` for every caller, on purpose.
+ *   In the personal edition the one account IS the operator; here every
+ *   caller is one of N untrusted tenants, and the schedule, the retention
+ *   count and a failure classification are the OPERATOR's business, not
+ *   any one tenant's. There is no operator/admin identity in this edition —
+ *   `requireAuth` gives `req.session.user` and nothing else — so "show the
+ *   operator more" has nowhere to hang.
+ * - Cloud keeps NO status record — not module state, not a table — only an
+ *   in-memory `lastAttemptDate` in `backup.js` used for the day's dedupe. The
+ *   operator's log is the durable record of how a run went. See
+ *   `habiterall-cloud/CLAUDE.md`'s "Scheduled backups" section for why there
+ *   is no table (no `data_version` bump on a nightly write, no new lock-order
+ *   question for `withUserWrite`, and no tenancy case for state no tenant may
+ *   read).
+ * - It reads no table, so it needs no RLS policy, no grant, no migration
+ *   and no tenancy-suite case, and `enabled` costs nothing to compute.
+ *
+ * Per-account restore, point-in-time recovery and replicas remain #240.
  */
 api.get('/backup/status', route(async (req, res) => {
-  res.json({ enabled: false, schedule: null, keep: null, last: null });
+  res.json({ enabled: backupEnabled(), schedule: null, keep: null, last: null });
 }));
 
 /* ---------- export ---------- */

@@ -25,6 +25,7 @@
     "test:summaryrace": "node test/summary-race.integration.mjs",
     "test:roundtrip": "node test/roundtrip.integration.mjs",
     "test:plans": "node test/schema-plans.integration.mjs",
+    "test:backup": "node test/backup.integration.mjs",
     "bench:queries": "node scripts/bench-queries.mjs",
     "bench:version-read": "node scripts/bench-version-read.mjs"
   },

@@ -333,3 +333,38 @@ already been tried. The trade is one lost night against a status write on
 every one of the 1,440 ticks a day, and the failure is not silent in the
 meantime — it is visible in the dialog (`GET /api/backup/status`) until the
 next day's run repairs it or an operator does.
+
+**`HABITERALL_BACKUP_FORMAT` adds a second artefact beside the JSON export,
+never replaces it as the reviewed default.** `json` stays the default so
+phase one's behaviour is unchanged for every existing install; `db` and `both`
+are opt-in. The mechanism is SQLite's own `VACUUM INTO` — one statement, WAL-
+aware (it captures rows still resident in the write-ahead log), no dependency
+added — rather than a file copy, which would need the `.db`/`-wal`/`-shm`
+trio and a caller careful about when it is safe to read them.
+
+**The path is a BOUND parameter, `db.prepare('VACUUM INTO ?').run(path)`,
+never string concatenation.** The directory is operator-controlled, so
+building the statement by concatenation would make a quote in the path a
+SQL-injection surface — this is not a style preference.
+
+**`VACUUM INTO` refuses a target that already exists**, so a stale `.db.tmp`
+left by a crashed previous run would otherwise break every future snapshot
+permanently; the write unlinks one, best effort, before ever calling it.
+
+**Retention always covers BOTH families, `kinds: ['json', 'db']`, regardless
+of which formats this run wrote** — never the cloud-only `sql` family, which a
+personal instance must not touch even if someone points both editions at one
+directory. An operator who switches `both` -> `json` must not find `.db` files
+piling up forever with nothing managing them; keeping the prune wide is what
+makes format a free choice rather than one that leaves cleanup behind.
+
+**A `.db` snapshot is credential-bearing where the JSON export is not.** The
+JSON export already carries the habits (archived included), the categories and
+the portable settings — a `.db` snapshot's real addition is the settings that
+export deliberately withholds (`notifyChannels`, `discordWebhook`,
+`discordChannelId`, `discordUserId`, `notifyTimezone`, `ntfyTopicUrl`,
+`ntfyToken`) and the tables JSON never reaches at all: `auth_credentials` (the
+password hash), `server_secrets` (the session secret), `sessions`,
+`notify_log`, `notify_status`, `device_clock`, `backup_status` itself. That is
+a real cost to say plainly, not just a capability: treat a `.db` snapshot like
+the database, not like the portable export.

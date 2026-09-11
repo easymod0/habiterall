@@ -247,6 +247,7 @@ services:
 # only this stack runs.
 volumes:
   db-data:
+  habiterall-backups:
   authentik-data:
   authentik-templates:
   authentik-certs:

@@ -24,6 +24,18 @@
  *      Discord GATEWAY shut even with a bot token configured, because the
  *      backup hook joins only the tick and never the reminders' receive half.
  *
+ * Phase two adds `HABITERALL_BACKUP_FORMAT` ('json' | 'db' | 'both') and a
+ * `VACUUM INTO` `.db` snapshot beside the JSON export. Cases F1-F7, inserted
+ * before case 8 below, cover: a `db`-only run, a `both` run (and that its
+ * `.json` half is unchanged), that the `.db` snapshot carries an UNPORTABLE
+ * setting the JSON export withholds, that retention is per family, that
+ * switching format away from `both` still prunes the orphaned family, that an
+ * unparseable format value falls back to `json` and warns, and that a
+ * `VACUUM INTO` failure is reported rather than fatal. Each explicitly sets
+ * `HABITERALL_BACKUP_FORMAT` for its own case and the block restores it to
+ * unset before case 8, so the format-default assumption every case from 8
+ * onward was written against still holds.
+ *
  * Every case drives `backupTask`/`runBackup` with a CHOSEN instant rather
  * than waiting on the wall clock — the exceptions are cases 8 and 8b, which
  * have to go through the real `start()` to prove the wiring, and use a
@@ -41,6 +53,7 @@ import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 
 const workdir = mkdtempSync(join(tmpdir(), 'habiterall-backup-'));
 // Exactly the notify.integration.mjs idiom: both set before the first import,
@@ -168,6 +181,18 @@ try {
     method: 'PUT', body: JSON.stringify({ value: 0 }),
   });
   ck('a stated-lapse entry (value: 0) is seeded', lapseEntry.status === 200, JSON.stringify(lapseEntry.body));
+
+  // A PORTABLE setting (default false), seeded now so the `settings` table is
+  // non-empty for every case from here on, including case F1's ".db snapshot
+  // has a settings row" — case F3, later, seeds an UNPORTABLE one on top of
+  // this and asserts a sharper distinction (present in the .db, absent from
+  // the .json).
+  const skipDaysSeed = await api('/api/settings', {
+    method: 'PUT', body: JSON.stringify({ skipDays: true }),
+  });
+  ck('a portable setting (skipDays) is seeded off its default',
+    skipDaysSeed.status === 200 && skipDaysSeed.body.settings?.skipDays === true,
+    JSON.stringify(skipDaysSeed.body));
 
   /* ---------- case 1: the scheduled file is what the button produces ---------- */
 
@@ -371,6 +396,298 @@ try {
   const files7 = readdirSync(dir7);
   ck('no .tmp file remains after a successful run',
     !files7.some((f) => f.endsWith('.tmp')), JSON.stringify(files7));
+
+  /* ---------- case F1: format: 'db' writes one file, no .json ---------- */
+
+  const dirF1 = join(workdir, 'caseF1');
+  process.env.HABITERALL_BACKUP_DIR = dirF1;
+  process.env.HABITERALL_BACKUP_SCHEDULE = '00:00';
+  process.env.HABITERALL_BACKUP_KEEP = '7';
+  process.env.HABITERALL_BACKUP_FORMAT = 'db';
+
+  const taskF1 = backupTask(process.env, { payload: buildBackupPayload });
+  const instantF1 = nextInstant();
+  const { date: todayF1 } = zonedClock(instantF1, '');
+  await taskF1(instantF1);
+
+  const filesF1 = readdirSync(dirF1);
+  ck('format: db writes exactly one file', filesF1.length === 1, JSON.stringify(filesF1));
+  ck("it is today's .db file, not a .json one",
+    filesF1[0] === backupFileName(todayF1, 'db'), filesF1[0]);
+  ck('no .tmp remains after a successful db-only run',
+    !filesF1.some((f) => f.endsWith('.tmp')), JSON.stringify(filesF1));
+  // The status row must agree the run was clean. Without this, a mutation
+  // that has `VACUUM INTO` write straight at the FINAL name (bypassing the
+  // tmp-then-rename step) still leaves exactly one correctly-named .db file
+  // on disk — the file-listing checks above alone cannot tell that apart
+  // from a genuinely atomic write — but the unconditional `renameSync`
+  // afterward then fails (its `.tmp` source never existed), so the run is
+  // recorded as `'error'` even though a complete file sits at the name a
+  // restore would trust. This is the assertion that catches it.
+  const statusF1 = (await api('/api/backup/status')).body;
+  ck('the status row reports the db-only run as ok, not error',
+    statusF1.last?.state === 'ok' && statusF1.last?.error === '', JSON.stringify(statusF1));
+
+  const snapshotF1 = new DatabaseSync(join(dirF1, filesF1[0]), { readOnly: true });
+  try {
+    const habitNamesF1 = /** @type {any[]} */ (snapshotF1.prepare('SELECT name FROM habits').all())
+      .map((r) => r.name);
+    ck('the fixture habit is in the .db snapshot, by name',
+      habitNamesF1.includes('Water'), JSON.stringify(habitNamesF1));
+    const settingsCountF1 = /** @type {any} */ (
+      snapshotF1.prepare('SELECT COUNT(*) AS c FROM settings').get()).c;
+    ck('the .db snapshot has a settings row', settingsCountF1 > 0, String(settingsCountF1));
+    const categoriesCountF1 = /** @type {any} */ (
+      snapshotF1.prepare('SELECT COUNT(*) AS c FROM categories').get()).c;
+    ck('the .db snapshot has a categories row', categoriesCountF1 > 0, String(categoriesCountF1));
+  } finally {
+    snapshotF1.close();
+  }
+
+  /* ---------- case F2: format: 'both' writes both, .json half unchanged ---------- */
+
+  const dirF2 = join(workdir, 'caseF2');
+  process.env.HABITERALL_BACKUP_DIR = dirF2;
+  process.env.HABITERALL_BACKUP_SCHEDULE = '00:00';
+  process.env.HABITERALL_BACKUP_KEEP = '7';
+  process.env.HABITERALL_BACKUP_FORMAT = 'both';
+
+  const taskF2 = backupTask(process.env, { payload: buildBackupPayload });
+  const instantF2 = nextInstant();
+  const { date: todayF2 } = zonedClock(instantF2, '');
+  await taskF2(instantF2);
+
+  const jsonNameF2 = backupFileName(todayF2, 'json');
+  const dbNameF2 = backupFileName(todayF2, 'db');
+  const filesF2 = readdirSync(dirF2);
+  ck('format: both writes exactly two files', filesF2.length === 2, JSON.stringify(filesF2));
+  ck('both are dated today, one of each family',
+    new Set(filesF2).has(jsonNameF2) && new Set(filesF2).has(dbNameF2), JSON.stringify(filesF2));
+
+  const writtenJsonF2 = JSON.parse(readFileSync(join(dirF2, jsonNameF2), 'utf8'));
+  const viaButtonF2 = (await api('/api/export')).body;
+  delete writtenJsonF2.exported_at;
+  delete viaButtonF2.exported_at;
+  try {
+    assert.deepStrictEqual(writtenJsonF2, viaButtonF2);
+    ck("the .json half of a 'both' run still deepEquals GET /api/export", true);
+  } catch (err) {
+    ck("the .json half of a 'both' run still deepEquals GET /api/export", false, err.message);
+  }
+
+  const statusF2 = (await api('/api/backup/status')).body;
+  ck('status.file names both files (json, then db — the write order)',
+    statusF2.last?.file === `${jsonNameF2}, ${dbNameF2}`, JSON.stringify(statusF2));
+  const realBytesF2 = statSync(join(dirF2, jsonNameF2)).size + statSync(join(dirF2, dbNameF2)).size;
+  ck("status.bytes is the sum of both files' real sizes on disk (statSync), not a re-derivation",
+    statusF2.last?.bytes === realBytesF2, JSON.stringify(statusF2));
+
+  /* ---------- case F2b: except protects EVERY file this run wrote, not just the first --- */
+  //
+  // Ordinarily today's own file is the NEWEST in its family, so the date-sort
+  // cut alone would never select it and `except` never has to do any real
+  // work — which is why F2 above cannot catch `except` degrading to "only the
+  // first name". This plants a genuinely NEWER file in the .db family before
+  // the tick (as a clock skew, or a file dropped in by hand, could) so `keep`
+  // ranks TODAY's own .db file among the ones the arithmetic alone would
+  // prune, and only `except` protecting the SECOND file this 'both' run wrote
+  // (the .db one, after the .json one) can save it.
+
+  const dirF2b = join(workdir, 'caseF2b');
+  mkdirSync(dirF2b, { recursive: true });
+  const instantF2b = nextInstant();
+  const { date: todayF2b } = zonedClock(instantF2b, '');
+  const futureDateF2b = offsetDate(todayF2b, 5);
+  writeFileSync(join(dirF2b, backupFileName(futureDateF2b, 'db')), 'a coincidentally newer .db file');
+
+  process.env.HABITERALL_BACKUP_DIR = dirF2b;
+  process.env.HABITERALL_BACKUP_SCHEDULE = '00:00';
+  process.env.HABITERALL_BACKUP_KEEP = '1';   // ranks today's .db as the one to prune, absent `except`
+  process.env.HABITERALL_BACKUP_FORMAT = 'both';
+
+  const taskF2b = backupTask(process.env, { payload: buildBackupPayload });
+  await taskF2b(instantF2b);
+
+  const filesF2b = new Set(readdirSync(dirF2b));
+  const expectedF2b = new Set([
+    backupFileName(todayF2b, 'json'), backupFileName(todayF2b, 'db'),
+    backupFileName(futureDateF2b, 'db'),
+  ]);
+  ck("except protects the SECOND file a 'both' run wrote (.db), not only the first (.json)",
+    filesF2b.size === expectedF2b.size && [...filesF2b].every((f) => expectedF2b.has(f)),
+    JSON.stringify([...filesF2b]));
+
+  /* ---------- case F3: the .db snapshot carries what the JSON export withholds --- */
+
+  const discordWebhookF3 = 'https://discord.com/api/webhooks/123456789012345678/a-secret-token';
+  const putSettingsF3 = await api('/api/settings', {
+    method: 'PUT', body: JSON.stringify({ discordWebhook: discordWebhookF3 }),
+  });
+  ck('an UNPORTABLE setting is set through the API',
+    putSettingsF3.status === 200 && putSettingsF3.body.settings?.discordWebhook === discordWebhookF3,
+    JSON.stringify(putSettingsF3.body));
+
+  const dirF3 = join(workdir, 'caseF3');
+  process.env.HABITERALL_BACKUP_DIR = dirF3;
+  process.env.HABITERALL_BACKUP_SCHEDULE = '00:00';
+  process.env.HABITERALL_BACKUP_KEEP = '7';
+  process.env.HABITERALL_BACKUP_FORMAT = 'both';
+
+  const taskF3 = backupTask(process.env, { payload: buildBackupPayload });
+  const instantF3 = nextInstant();
+  const { date: todayF3 } = zonedClock(instantF3, '');
+  await taskF3(instantF3);
+
+  const jsonNameF3 = backupFileName(todayF3, 'json');
+  const dbNameF3 = backupFileName(todayF3, 'db');
+  const writtenJsonTextF3 = readFileSync(join(dirF3, jsonNameF3), 'utf8');
+  ck('the unportable setting is nowhere in the .json file — the JSON export withholds it',
+    !writtenJsonTextF3.includes(discordWebhookF3), writtenJsonTextF3.slice(0, 400));
+
+  const snapshotF3 = new DatabaseSync(join(dirF3, dbNameF3), { readOnly: true });
+  try {
+    const rowF3 = /** @type {any} */ (
+      snapshotF3.prepare('SELECT value FROM settings WHERE key = ?').get('discordWebhook'));
+    ck("the unportable setting IS in the .db snapshot's settings table — the whole reason the format exists",
+      rowF3 !== undefined && String(rowF3.value).includes(discordWebhookF3), JSON.stringify(rowF3));
+  } finally {
+    snapshotF3.close();
+  }
+
+  /* ---------- case F4: retention is per family ---------- */
+
+  const dirF4 = join(workdir, 'caseF4');
+  mkdirSync(dirF4, { recursive: true });
+  const instantF4 = nextInstant();
+  const { date: todayF4 } = zonedClock(instantF4, '');
+  const olderDatesF4 = [-5, -4, -3, -2, -1].map((n) => offsetDate(todayF4, n));
+  for (const d of olderDatesF4) {
+    writeFileSync(join(dirF4, backupFileName(d, 'json')), '{}');
+    writeFileSync(join(dirF4, backupFileName(d, 'db')), 'not a real sqlite file, but retention never opens it');
+  }
+  writeFileSync(join(dirF4, 'keep-me.txt'), 'not a backup');
+  writeFileSync(join(dirF4, 'habiterall.db'), 'the live database file — must never be touched');
+  writeFileSync(join(dirF4, 'habiterall.db-wal'), 'its WAL sidecar — must never be touched');
+  const staleDbTmpF4 = `${backupFileName(offsetDate(todayF4, -6), 'db')}.tmp`;
+  writeFileSync(join(dirF4, staleDbTmpF4), 'a stale .db.tmp from an unrelated, older crashed run');
+
+  process.env.HABITERALL_BACKUP_DIR = dirF4;
+  process.env.HABITERALL_BACKUP_SCHEDULE = '00:00';
+  process.env.HABITERALL_BACKUP_KEEP = '2';
+  process.env.HABITERALL_BACKUP_FORMAT = 'both';
+
+  const taskF4 = backupTask(process.env, { payload: buildBackupPayload });
+  await taskF4(instantF4);
+
+  const filesF4 = new Set(readdirSync(dirF4));
+  const expectedF4 = new Set([
+    backupFileName(todayF4, 'json'), backupFileName(todayF4, 'db'),
+    backupFileName(olderDatesF4[4], 'json'), backupFileName(olderDatesF4[4], 'db'),
+    'keep-me.txt', 'habiterall.db', 'habiterall.db-wal', staleDbTmpF4,
+  ]);
+  ck('retention keeps exactly the newest KEEP of EACH family, and every foreign file untouched',
+    filesF4.size === expectedF4.size && [...filesF4].every((f) => expectedF4.has(f)),
+    JSON.stringify([...filesF4]));
+
+  /* ---------- case F5: switching format does not orphan the other family ---------- */
+
+  const dirF5 = join(workdir, 'caseF5');
+  mkdirSync(dirF5, { recursive: true });
+  const instantF5 = nextInstant();
+  const { date: todayF5 } = zonedClock(instantF5, '');
+  // Five .db files "left over from a previous `both` era" — nothing here
+  // ever writes a .json one, which is the point: this run's format is 'json'
+  // only, and the .db family must still be managed.
+  const olderDatesF5 = [-5, -4, -3, -2, -1].map((n) => offsetDate(todayF5, n));
+  for (const d of olderDatesF5) {
+    writeFileSync(join(dirF5, backupFileName(d, 'db')), 'a leftover .db snapshot from a "both" era');
+  }
+
+  process.env.HABITERALL_BACKUP_DIR = dirF5;
+  process.env.HABITERALL_BACKUP_SCHEDULE = '00:00';
+  process.env.HABITERALL_BACKUP_KEEP = '2';
+  process.env.HABITERALL_BACKUP_FORMAT = 'json';
+
+  const taskF5 = backupTask(process.env, { payload: buildBackupPayload });
+  await taskF5(instantF5);
+
+  const filesF5 = readdirSync(dirF5);
+  const remainingDbF5 = new Set(filesF5.filter((f) => f.endsWith('.db')));
+  ck("switching to format: 'json' still prunes the orphaned .db family down to keep",
+    remainingDbF5.size === 2 &&
+    remainingDbF5.has(backupFileName(olderDatesF5[4], 'db')) &&
+    remainingDbF5.has(backupFileName(olderDatesF5[3], 'db')),
+    JSON.stringify(filesF5));
+  ck("and the .json file for today was still written",
+    filesF5.includes(backupFileName(todayF5, 'json')), JSON.stringify(filesF5));
+
+  /* ---------- case F6: a bad format value falls back to json and warns ---------- */
+
+  const dirF6 = join(workdir, 'caseF6');
+  process.env.HABITERALL_BACKUP_DIR = dirF6;
+  process.env.HABITERALL_BACKUP_SCHEDULE = '00:00';
+  process.env.HABITERALL_BACKUP_KEEP = '7';
+  process.env.HABITERALL_BACKUP_FORMAT = 'sqlite';   // not one of json | db | both
+
+  const { lines: linesF6 } = await captureLogs(async () => {
+    const taskF6 = backupTask(process.env, { payload: buildBackupPayload });
+    await taskF6(nextInstant());
+  });
+
+  const filesF6 = readdirSync(dirF6);
+  ck("an unparseable format value falls back to writing a .json file",
+    filesF6.length === 1 && filesF6[0].endsWith('.json'), JSON.stringify(filesF6));
+  ck('backup.format_invalid was logged',
+    linesF6.some((l) => l.includes('"msg":"backup.format_invalid"')), linesF6.join('').slice(0, 400));
+
+  /* ---------- case F7: a VACUUM INTO failure is reported, not fatal ---------- */
+
+  const dirF7base = join(workdir, 'caseF7');
+  mkdirSync(dirF7base, { recursive: true });
+  const blockerF7 = join(dirF7base, 'blocker');
+  writeFileSync(blockerF7, 'a regular file standing where a directory is expected');
+  const badDirF7 = join(blockerF7, 'sub');
+
+  process.env.HABITERALL_BACKUP_DIR = badDirF7;
+  process.env.HABITERALL_BACKUP_SCHEDULE = '00:00';
+  process.env.HABITERALL_BACKUP_KEEP = '7';
+  process.env.HABITERALL_BACKUP_FORMAT = 'db';
+
+  const taskF7 = backupTask(process.env, { payload: buildBackupPayload });
+  const instantF7 = nextInstant();
+  let threwF7 = null;
+  let linesF7 = [];
+  try {
+    const captured = await captureLogs(() => taskF7(instantF7));
+    linesF7 = captured.lines;
+  } catch (err) {
+    threwF7 = err;
+  }
+  ck("a format: 'db' tick against a directory that cannot be created does not throw", threwF7 === null,
+    threwF7 ? String(threwF7?.stack ?? threwF7) : '');
+
+  const stillServingF7 = await api('/api/habits');
+  ck('the process is still serving after the db-format failure', stillServingF7.status === 200,
+    JSON.stringify(stillServingF7).slice(0, 200));
+
+  const statusF7 = (await api('/api/backup/status')).body;
+  ck("the status route reports the failed db-format run with a non-empty error",
+    statusF7.last?.state === 'error' && typeof statusF7.last?.error === 'string' &&
+    statusF7.last.error.length > 0, JSON.stringify(statusF7));
+
+  const statusF7Text = JSON.stringify(statusF7);
+  ck('the status response discloses none of the backup directory path',
+    !statusF7Text.includes(badDirF7) && !statusF7Text.includes(blockerF7) &&
+    !statusF7Text.includes(workdir) && !statusF7Text.includes('blocker'),
+    statusF7Text);
+  ck('the db-format failure was logged at error',
+    linesF7.some((l) => l.includes('"level":"error"') && l.includes('backup')),
+    linesF7.join('').slice(0, 800));
+
+  // Restore the format to unset before case 8 onward, which were written
+  // against the (unset -> 'json') default and assert against `BACKUP_FILE_RE`
+  // (the .json-only pattern) directly.
+  delete process.env.HABITERALL_BACKUP_FORMAT;
 
   /* ---------- case 8: reminders off, backups still run ---------- */
   //

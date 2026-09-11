@@ -45,6 +45,12 @@ WORKDIR /app/habiterall-cloud
 # from the copy, on a first run only, on the published path only.
 RUN mkdir -p /out/blueprints /out/icons /out/images && chown -R node:node /out
 
+# pg_dump for the scheduled whole-database backup (issue #75). It must be at
+# least the server's major version or it refuses to run, so this pin moves
+# with the Postgres major in the compose files — verified against
+# postgres:17-alpine. It is the only package this image installs.
+RUN apk add --no-cache postgresql17-client
+
 USER node
 EXPOSE 3000
 

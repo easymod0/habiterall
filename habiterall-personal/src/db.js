@@ -177,9 +177,12 @@ db.exec(`
     -- 'running' | 'ok' | 'error'
     state  TEXT    NOT NULL,
     error  TEXT    NOT NULL DEFAULT '',
-    -- basename only — never the directory, which is the operator's own
-    -- compose configuration and not this app's to disclose (see the route).
+    -- basename only, comma-joined when a run writes more than one file
+    -- (HABITERALL_BACKUP_FORMAT=both) — never the directory, which is the
+    -- operator's own compose configuration and not this app's to disclose
+    -- (see the route).
     file   TEXT    NOT NULL DEFAULT '',
+    -- the TOTAL bytes across every file this run wrote, not one file's size.
     bytes  INTEGER,
     pruned INTEGER NOT NULL DEFAULT 0,
     at     TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))

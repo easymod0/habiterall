@@ -1180,11 +1180,13 @@ api.get('/notify/status', (req, res) => {
  * `api.js` reaching into the filesystem or the environment itself.
  *
  * The directory path must NEVER appear in this response, and `last.file` is
- * a basename only. The operator chose the directory in their own compose
- * file and does not need the app to read it back to them; on an edition
- * whose password is optional, disclosing a server filesystem path buys
- * nothing. This is not the settings blob and is never carried by
- * `/api/export` — see `db.js`'s comment above `backup_status`.
+ * a basename only, comma-joined when a run wrote more than one
+ * (`HABITERALL_BACKUP_FORMAT=both`) with `last.bytes` the total across them.
+ * The operator chose the directory in their own compose file and does not
+ * need the app to read it back to them; on an edition whose password is
+ * optional, disclosing a server filesystem path buys nothing. This is not
+ * the settings blob and is never carried by `/api/export` — see `db.js`'s
+ * comment above `backup_status`.
  */
 api.get('/backup/status', (req, res) => {
   const cfg = backupConfig(process.env);

@@ -4,8 +4,10 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-const { parseBackupSchedule, BACKUP_FILE_PREFIX, backupFileName, BACKUP_FILE_RE, dueBackup,
-  prunableBackups } = await import('../src/backup.js');
+const {
+  parseBackupSchedule, BACKUP_FILE_PREFIX, backupFileName, BACKUP_FILE_RE,
+  BACKUP_DB_FILE_RE, BACKUP_SQL_FILE_RE, parseBackupFormat, dueBackup, prunableBackups,
+} = await import('../src/backup.js');
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -99,7 +101,10 @@ test('dueBackup: an unparseable schedule (null) is never due', () => {
     false);
 });
 
-// `keep: 2` throughout, deliberately not the default of 7.
+// `keep: 2` throughout, deliberately not the default of 7. Every call below
+// now carries `kinds: ['json']` — phase two made `kinds` a required option,
+// so these phase-one cases had to gain it; the assertions themselves are
+// unchanged.
 test('prunableBackups: five dated files, keep 2, returns the three oldest, oldest first', () => {
   // Deliberately unsorted input, to prove the function sorts rather than
   // trusting `readdirSync`'s (unspecified) order.
@@ -110,7 +115,7 @@ test('prunableBackups: five dated files, keep 2, returns the three oldest, oldes
     'habiterall-backup-2026-09-02.json',
     'habiterall-backup-2026-09-04.json',
   ];
-  assert.deepEqual(prunableBackups(names, 2), [
+  assert.deepEqual(prunableBackups(names, 2, { kinds: ['json'] }), [
     'habiterall-backup-2026-09-01.json',
     'habiterall-backup-2026-09-02.json',
     'habiterall-backup-2026-09-03.json',
@@ -129,12 +134,12 @@ test('prunableBackups: a directory holding files it did not write returns nothin
     'habiterall.db', 'habiterall.db-wal', 'notes.txt', 'backup.json', 'other.json',
     'habiterall-backup-2026-09-10.json.tmp', 'habiterall-backup-2026-09-01.json',
   ];
-  assert.deepEqual(prunableBackups(names, 2), []);
+  assert.deepEqual(prunableBackups(names, 2, { kinds: ['json'] }), []);
 });
 
 test('prunableBackups: keep greater than the number of matching files returns nothing', () => {
   const names = ['habiterall-backup-2026-09-01.json', 'habiterall-backup-2026-09-02.json'];
-  assert.deepEqual(prunableBackups(names, 5), []);
+  assert.deepEqual(prunableBackups(names, 5, { kinds: ['json'] }), []);
 });
 
 test('prunableBackups: keep equal to the file count, one file, all of it "except"', () => {
@@ -143,7 +148,8 @@ test('prunableBackups: keep equal to the file count, one file, all of it "except
   // prunable either way this is computed.
   const names = ['habiterall-backup-2026-09-10.json'];
   assert.deepEqual(
-    prunableBackups(names, 1, { except: 'habiterall-backup-2026-09-10.json' }), []);
+    prunableBackups(names, 1, { except: 'habiterall-backup-2026-09-10.json', kinds: ['json'] }),
+    []);
 });
 
 test('prunableBackups: except is never returned even when the date arithmetic alone would pick it', () => {
@@ -160,7 +166,7 @@ test('prunableBackups: except is never returned even when the date arithmetic al
     'habiterall-backup-2026-09-10.json',
   ];
   assert.deepEqual(
-    prunableBackups(names, 1, { except: 'habiterall-backup-2026-09-01.json' }),
+    prunableBackups(names, 1, { except: 'habiterall-backup-2026-09-01.json', kinds: ['json'] }),
     ['habiterall-backup-2026-09-05.json']);
 });
 
@@ -171,7 +177,161 @@ test('prunableBackups: an invalid keep (0) still never returns except', () => {
   // it; the guard is what stops that.
   const names = ['habiterall-backup-2026-09-10.json'];
   assert.deepEqual(
-    prunableBackups(names, 0, { except: 'habiterall-backup-2026-09-10.json' }), []);
+    prunableBackups(names, 0, { except: 'habiterall-backup-2026-09-10.json', kinds: ['json'] }),
+    []);
+});
+
+/* ---------- phase two: the `.db` and `.sql` filename families ---------- */
+
+test('parseBackupFormat: the three valid values', () => {
+  assert.equal(parseBackupFormat('json'), 'json');
+  assert.equal(parseBackupFormat('db'), 'db');
+  assert.equal(parseBackupFormat('both'), 'both');
+});
+
+test('parseBackupFormat: case and surrounding space are tolerated', () => {
+  assert.equal(parseBackupFormat(' BOTH '), 'both');
+  assert.equal(parseBackupFormat('DB '), 'db');
+});
+
+test('parseBackupFormat: everything else is null, not a throw', () => {
+  for (const bad of ['sqlite', 'json,db', 'jsondb', '', undefined, null, 3]) {
+    assert.equal(parseBackupFormat(bad), null, String(bad));
+  }
+});
+
+test('backupFileName: kind selects the extension, and the default still holds', () => {
+  assert.equal(backupFileName('2026-09-11', 'db'), 'habiterall-backup-2026-09-11.db');
+  assert.equal(backupFileName('2026-09-11', 'sql'), 'habiterall-backup-2026-09-11.sql');
+  // No kind argument at all -> the phase-one `.json` default, unchanged.
+  assert.equal(backupFileName('2026-09-11'), 'habiterall-backup-2026-09-11.json');
+});
+
+test('BACKUP_DB_FILE_RE refuses every other family and every .tmp', () => {
+  assert.equal(BACKUP_DB_FILE_RE.test('habiterall-backup-2026-09-11.db'), true);
+  assert.equal(BACKUP_DB_FILE_RE.test('habiterall-backup-2026-09-11.db.tmp'), false);
+  assert.equal(BACKUP_DB_FILE_RE.test('habiterall-backup-2026-09-11.json'), false);
+  assert.equal(BACKUP_DB_FILE_RE.test('habiterall.db'), false);
+  assert.equal(BACKUP_DB_FILE_RE.test('habiterall.db-wal'), false);
+  assert.equal(BACKUP_DB_FILE_RE.test('my-habiterall-backup-2026-09-11.db'), false);
+});
+
+test('BACKUP_SQL_FILE_RE refuses every other family and every .tmp', () => {
+  assert.equal(BACKUP_SQL_FILE_RE.test('habiterall-backup-2026-09-11.sql'), true);
+  assert.equal(BACKUP_SQL_FILE_RE.test('habiterall-backup-2026-09-11.sql.tmp'), false);
+  assert.equal(BACKUP_SQL_FILE_RE.test('habiterall-backup-2026-09-11.db'), false);
+  assert.equal(BACKUP_SQL_FILE_RE.test('habiterall-backup-2026-09-11.json'), false);
+  assert.equal(BACKUP_SQL_FILE_RE.test('dump.sql'), false);
+});
+
+test('prunableBackups: two families, keep 2, a directory holding files neither writer generated', () => {
+  // Five dated files per family (json, db), plus foreign files that must
+  // survive untouched: a live `habiterall.db` and its `-wal` sidecar, a
+  // stray `notes.txt`, an unrelated `backup.json`, cloud's own `dump.sql`,
+  // and a `.tmp` partial for each family this module DOES generate.
+  const names = [
+    'habiterall-backup-2026-09-03.json', 'habiterall-backup-2026-09-01.json',
+    'habiterall-backup-2026-09-05.json', 'habiterall-backup-2026-09-02.json',
+    'habiterall-backup-2026-09-04.json',
+    'habiterall-backup-2026-09-03.db', 'habiterall-backup-2026-09-01.db',
+    'habiterall-backup-2026-09-05.db', 'habiterall-backup-2026-09-02.db',
+    'habiterall-backup-2026-09-04.db',
+    'habiterall.db', 'habiterall.db-wal', 'notes.txt', 'backup.json', 'dump.sql',
+    'habiterall-backup-2026-09-10.json.tmp', 'habiterall-backup-2026-09-10.db.tmp',
+  ];
+  const foreign = ['habiterall.db', 'habiterall.db-wal', 'notes.txt', 'backup.json', 'dump.sql',
+    'habiterall-backup-2026-09-10.json.tmp', 'habiterall-backup-2026-09-10.db.tmp'];
+  assert.deepEqual(
+    prunableBackups(names, 2, { kinds: ['json', 'db'] }),
+    [
+      'habiterall-backup-2026-09-01.json',
+      'habiterall-backup-2026-09-02.json',
+      'habiterall-backup-2026-09-03.json',
+      'habiterall-backup-2026-09-01.db',
+      'habiterall-backup-2026-09-02.db',
+      'habiterall-backup-2026-09-03.db',
+    ],
+    `must return exactly the three oldest of each family, oldest first, and none of ` +
+    `the foreign files: ${JSON.stringify(foreign)}`);
+});
+
+test('prunableBackups: a family not asked for is never touched, even when it is over the limit', () => {
+  // The same directory as above, but `kinds: ['json']` only — the five `.db`
+  // files are all over `keep: 2`, and none of them may come back.
+  const names = [
+    'habiterall-backup-2026-09-03.json', 'habiterall-backup-2026-09-01.json',
+    'habiterall-backup-2026-09-05.json', 'habiterall-backup-2026-09-02.json',
+    'habiterall-backup-2026-09-04.json',
+    'habiterall-backup-2026-09-03.db', 'habiterall-backup-2026-09-01.db',
+    'habiterall-backup-2026-09-05.db', 'habiterall-backup-2026-09-02.db',
+    'habiterall-backup-2026-09-04.db',
+  ];
+  assert.deepEqual(
+    prunableBackups(names, 2, { kinds: ['json'] }),
+    [
+      'habiterall-backup-2026-09-01.json',
+      'habiterall-backup-2026-09-02.json',
+      'habiterall-backup-2026-09-03.json',
+    ]);
+});
+
+test('prunableBackups: kinds naming a family with no matching files returns nothing', () => {
+  const names = [
+    'habiterall-backup-2026-09-01.json', 'habiterall-backup-2026-09-02.json',
+    'habiterall-backup-2026-09-01.db',
+  ];
+  assert.deepEqual(prunableBackups(names, 2, { kinds: ['sql'] }), []);
+});
+
+test('prunableBackups: except accepts an array, and protects an entry in each family', () => {
+  // Both `except` entries are named among the files `keep`'s own arithmetic
+  // would otherwise prune (the oldest of each family, not merely the newest,
+  // which `keep` would protect on its own regardless of `except`) — the same
+  // reasoning the single-family "except is never returned even when the date
+  // arithmetic alone would pick it" case above uses, extended to the array
+  // form and across two families. A mutation dropping the array handling and
+  // honouring only a bare string would see `except` (the array itself) match
+  // neither filename here, and both oldest files would wrongly come back.
+  const names = [
+    'habiterall-backup-2026-09-01.json', // except — oldest, still protected
+    'habiterall-backup-2026-09-05.json',
+    'habiterall-backup-2026-09-01.db',   // except — oldest, still protected
+    'habiterall-backup-2026-09-05.db',
+  ];
+  assert.deepEqual(
+    prunableBackups(names, 1, {
+      kinds: ['json', 'db'],
+      except: ['habiterall-backup-2026-09-01.json', 'habiterall-backup-2026-09-01.db'],
+    }),
+    []);
+});
+
+test('prunableBackups: kinds omitted entirely throws', () => {
+  const names = ['habiterall-backup-2026-09-01.json'];
+  assert.throws(
+    () => prunableBackups(names, 2, {}),
+    (err) => err instanceof TypeError && /kinds/.test(err.message));
+});
+
+test('prunableBackups: kinds as an empty array throws', () => {
+  const names = ['habiterall-backup-2026-09-01.json'];
+  assert.throws(
+    () => prunableBackups(names, 2, { kinds: [] }),
+    (err) => err instanceof TypeError && /kinds/.test(err.message));
+});
+
+test('prunableBackups: kinds as a bare string (not an array) throws', () => {
+  const names = ['habiterall-backup-2026-09-01.json'];
+  assert.throws(
+    () => prunableBackups(names, 2, { kinds: /** @type {any} */ ('json') }),
+    (err) => err instanceof TypeError && /kinds/.test(err.message));
+});
+
+test('prunableBackups: an unknown kind name throws and names the offender', () => {
+  const names = ['habiterall-backup-2026-09-01.json'];
+  assert.throws(
+    () => prunableBackups(names, 2, { kinds: ['json', 'nope'] }),
+    (err) => err instanceof TypeError && /nope/.test(err.message));
 });
 
 /* ---------- a source-text guard on the atomic write in the personal edition ----------
