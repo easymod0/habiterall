@@ -1,11 +1,17 @@
 package com.habiterall.app
 
+import com.habiterall.app.ui.AmountFormat.COMMA
+import com.habiterall.app.ui.AmountFormat.POINT
 import com.habiterall.app.ui.amountComplaint
+import com.habiterall.app.ui.deviceAmountFormat
 import com.habiterall.app.ui.formatAmount
 import com.habiterall.app.ui.parseAmount
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Before
 import org.junit.Test
+import java.util.Locale
 
 /**
  * The two ends of a habit's target: the box the user types in, and the number
@@ -18,6 +24,21 @@ import org.junit.Test
  * that formats as "3.0" is what the user then re-saves.
  */
 class HabitAmountTest {
+
+    // Restoring, not merely saving: a test that changes the JVM-wide default
+    // locale and never puts it back poisons every test class that runs after
+    // it in the same process.
+    private lateinit var originalLocale: Locale
+
+    @Before
+    fun captureLocale() {
+        originalLocale = Locale.getDefault()
+    }
+
+    @After
+    fun restoreLocale() {
+        Locale.setDefault(originalLocale)
+    }
 
     @Test
     fun `a plain number parses`() {
@@ -125,6 +146,69 @@ class HabitAmountTest {
         // the box, save without touching it, and get the same number back.
         for (v in listOf(0.0, 1.0, 2.5, 8.0, 1000.0, 0.25)) {
             assertEquals("round trip of $v", v, parseAmount(formatAmount(v))!!, 0.0)
+        }
+    }
+
+    @Test
+    fun `each convention refuses the other's group, never its own`() {
+        // The setting moves only the REFUSAL. A dot group is a number under
+        // POINT and refused under COMMA; a comma group is the other way round.
+        assertNull(parseAmount("10,000", POINT))
+        assertEquals(10.0, parseAmount("10.000", POINT)!!, 0.0)
+        assertNull(parseAmount("10.000", COMMA))
+        assertEquals(10.0, parseAmount("10,000", COMMA)!!, 0.0)
+
+        // Neither convention accepts a group — the ambiguity is symmetric — and
+        // neither refuses a plain decimal, because a group is exactly three
+        // digits and "8,5" or "0,255" is never that.
+        assertEquals(8.5, parseAmount("8,5", POINT)!!, 0.0)
+        assertEquals(8.5, parseAmount("8.5", POINT)!!, 0.0)
+        assertEquals(8.5, parseAmount("8,5", COMMA)!!, 0.0)
+        assertEquals(8.5, parseAmount("8.5", COMMA)!!, 0.0)
+        assertEquals(0.255, parseAmount("0,255", POINT)!!, 0.0)
+        assertEquals(0.255, parseAmount("0.255", COMMA)!!, 0.0)
+        assertEquals(0.255, parseAmount(",255", POINT)!!, 0.0)
+        assertEquals(0.255, parseAmount(".255", COMMA)!!, 0.0)
+    }
+
+    @Test
+    fun `the device tier is read, and read at call time`() {
+        Locale.setDefault(Locale.GERMANY)
+        assertEquals(COMMA, deviceAmountFormat())
+        // No explicit format: the call itself must ask the locale again.
+        assertNull(parseAmount("10.000"))
+        assertEquals(10.0, parseAmount("10,000")!!, 0.0)
+
+        // The second half is what a file-scope `val` cannot pass: switching the
+        // default back inside the SAME test body must flip the answers back.
+        Locale.setDefault(Locale.US)
+        assertEquals(POINT, deviceAmountFormat())
+        assertEquals(10.0, parseAmount("10.000")!!, 0.0)
+        assertNull(parseAmount("10,000"))
+    }
+
+    @Test
+    fun `the complaint follows the convention`() {
+        assertEquals(
+            "Type it without the thousands separator — 10000, not 10.000.",
+            amountComplaint("10.000", COMMA),
+        )
+        assertEquals(
+            "Type it without the thousands separator — 10000, not 10,000.",
+            amountComplaint("10,000", POINT),
+        )
+        assertEquals("Not a number", amountComplaint("eight", COMMA))
+        assertEquals("Not a number", amountComplaint("eight", POINT))
+    }
+
+    @Test
+    fun `the round trip holds under a comma reader too`() {
+        // formatAmount always writes a dot — display stays out of scope — and
+        // it never groups, so what it writes always parses back under COMMA
+        // too. This is the case that would catch a comma-only parser breaking
+        // its own prefill.
+        for (v in listOf(0.0, 1.0, 2.5, 8.0, 1000.0, 0.25)) {
+            assertEquals("round trip of $v under COMMA", v, parseAmount(formatAmount(v), COMMA)!!, 0.0)
         }
     }
 }
