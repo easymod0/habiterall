@@ -703,19 +703,37 @@ try {
 
     /* ---------- clearing a note offline drops its row from the card ---------- */
 
+    // Waited for, never slept on — this whole block used fixed sleeps first
+    // and that is the rule the root `CLAUDE.md` states outright: a predicate
+    // throws naming what it wanted, where a duration is a guess in both
+    // directions. It also cost the fleet's LONGEST suite another ~13s, which
+    // is what tipped a contended CI runner into a 20s timeout on the
+    // navigation after this block.
+    //
+    // What is waited FOR is the app's own signal that the save completed —
+    // the dialog closing and the outbox growing — and deliberately NOT the
+    // notes card, which is the thing being asserted: a wait on the assertion
+    // makes the check tautological.
+    const outboxBeforeClear = await queued();
+
     // Opened through the card's own row — a real click, since each row is a
     // `<button>` calling `detailHost.editDay` directly (#297), not a shortcut.
     await ev(`[...document.querySelectorAll('#view-detail .notes-list .note-row')]
       .find(r => r.querySelector('.note-text')?.textContent === 'note to clear')?.click()`);
-    await sleep(600);
-    const clearOpened = await ev(`document.getElementById('day-dialog').open`);
-    ck('the day editor opens on the note to clear', clearOpened === true);
+    await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
+      { what: 'the day editor to open on the note to clear' });
+    ck('the day editor opens on the note to clear',
+       await ev(`document.getElementById('day-dialog').open`) === true);
     await ev(`document.getElementById('day-notes').value = ''`);
     // Re-answers the day's own state (this habit is boolean, so "Done" is what
     // is already stored) — the same PUT a plain tap would make, with the note
     // now stated as cleared rather than left alone.
     await ev(`document.querySelector('#day-boolean .day-choice[data-action="done"]').click()`);
-    await sleep(700);
+    await waitUntil(ev, `(async () =>
+      document.getElementById('day-dialog').open === false
+      && ((await import('/shared/ui/store.js')).state.pending ?? 0)
+         > ${outboxBeforeClear})()`,
+      { what: 'the queued clear to close the dialog and reach the outbox' });
 
     const afterClear = {
       rows: await noteRowTexts(),
@@ -750,12 +768,18 @@ try {
         x: addCentre.x, y: addCentre.y, button: 'right', clickCount: 1 }, sessionId);
       await send('Input.dispatchMouseEvent', { type: 'mouseReleased',
         x: addCentre.x, y: addCentre.y, button: 'right', clickCount: 1 }, sessionId);
-      await sleep(600);
-      const addOpened = await ev(`document.getElementById('day-dialog').open`);
-      ck('a contextmenu on the noteless day opens the day editor', addOpened === true);
+      const outboxBeforeAdd = await queued();
+      await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
+        { what: 'the day editor to open on the noteless day' });
+      ck('a contextmenu on the noteless day opens the day editor',
+         await ev(`document.getElementById('day-dialog').open`) === true);
       await ev(`document.getElementById('day-notes').value = 'a fresh offline note'`);
       await ev(`document.querySelector('#day-boolean .day-choice[data-action="done"]').click()`);
-      await sleep(700);
+      await waitUntil(ev, `(async () =>
+        document.getElementById('day-dialog').open === false
+        && ((await import('/shared/ui/store.js')).state.pending ?? 0)
+           > ${outboxBeforeAdd})()`,
+        { what: 'the queued add to close the dialog and reach the outbox' });
 
       const afterAdd = {
         rows: await noteRowTexts(),
@@ -780,13 +804,18 @@ try {
     // (which offline could not do) by clearing the two notes this habit now
     // has, one at a time.
     const clearNoteRow = async (text) => {
+      const before = await queued();
       await ev(`[...document.querySelectorAll('#view-detail .notes-list .note-row')]
         .find(r => r.querySelector('.note-text')?.textContent === ${JSON.stringify(text)})
         ?.click()`);
-      await sleep(600);
+      await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
+        { what: `the day editor to open on the note ${JSON.stringify(text)}` });
       await ev(`document.getElementById('day-notes').value = ''`);
       await ev(`document.querySelector('#day-boolean .day-choice[data-action="done"]').click()`);
-      await sleep(700);
+      await waitUntil(ev, `(async () =>
+        document.getElementById('day-dialog').open === false
+        && ((await import('/shared/ui/store.js')).state.pending ?? 0) > ${before})()`,
+        { what: `the queued clear of ${JSON.stringify(text)} to reach the outbox` });
     };
 
     await clearNoteRow('kept note');
@@ -813,9 +842,13 @@ try {
       return { found: !!c, display: c ? getComputedStyle(c).display : null,
                rows: [...document.querySelectorAll('#view-detail .notes-list .note-text')]
                  .map(e => e.textContent) };})()`);
+    // Hidden AND emptied: `querySelectorAll` reads through `hidden`, so a card
+    // that merely went invisible would still answer the cleared note to
+    // anything asking what it lists.
     ck("clearing the habit's LAST note offline hides the notes card rather "
        + 'than leaving an empty list',
-       noneLeft.found === true && noneLeft.display === 'none',
+       noneLeft.found === true && noneLeft.display === 'none'
+         && noneLeft.rows.length === 0,
        JSON.stringify(noneLeft));
 
     // Threaded into a check rather than discarded — `reconnectAndDrain`

@@ -1795,6 +1795,13 @@ function buildNotesCard({ habit, notesByDate }) {
     // fresh card in its place, so the existing one is hidden rather than left
     // showing an empty list.
     if (!dates.length) {
+      // Emptied as well as hidden. Hiding alone is what the user sees either
+      // way, but it would leave the last note's text sitting in a detached-
+      // looking card — and `document.querySelectorAll` reads straight through
+      // `hidden`, so anything asking what this card lists would still be told
+      // the cleared note.
+      list.replaceChildren();
+      c.querySelector(':scope > .hint')?.remove();
       c.hidden = true;
       return;
     }
