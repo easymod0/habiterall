@@ -253,6 +253,7 @@ test('a new-shape list keeps its own order, and a card left out is inserted at i
     { id: 'weekdayMonths', on: false },
     { id: 'awards', on: true },
     { id: 'calendar', on: true },
+    { id: 'notes', on: true },
     { id: 'streaks', on: true },
     { id: 'resilience', on: true },
     { id: 'weekdays', on: true },
@@ -404,6 +405,9 @@ test('the default order encodes its three arguments', () => {
     'calendar must sit directly under the score — immediately after strength');
   assert.equal(order[order.indexOf('resilience') + 1], 'awards',
     'a probability you can act on must beat a trophy — awards right after resilience');
+  assert.equal(order[order.indexOf('calendar') + 1], 'notes',
+    'notes must sit directly under the calendar — immediately after calendar, ' +
+    'issue #297');
 });
 
 test('the registry default is written in DETAIL_CARDS order', () => {

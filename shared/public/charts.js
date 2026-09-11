@@ -175,6 +175,15 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
     // Which day's cell keeps the roving tab stop — see where it is applied,
     // below the grid loop.
     tabStop = null,
+    // Object keyed by ISO date, value the note's TEXT — only TRUTHINESS is
+    // read here; the text itself is for the day editor, which this chart
+    // never opens. An object rather than a Set of dates, on purpose: the
+    // caller (`buildCalendarCard`) hands in the very map its `onPick` seeds
+    // the day editor from, and that map IS mutated after an offline save
+    // (see `ui/detail.js`'s comment at its `calRedraw` assignment) — a Set
+    // snapshotted once outside `draw` would leave an offline note write
+    // undrawn until the next refetch.
+    notes = null,
   } = opts;
 
   const level = zoomLevel(zoom);
@@ -302,6 +311,10 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   // How many cells THIS pass actually gave the continuation stroke — see
   // `data-run-marks` below, set from this count and not from `inStreak.size`.
   let runMarks = 0;
+  // Same idea, for the note dot below: what this pass actually drew, not
+  // `Object.keys(notes).length` — a note dated outside this window, or on a
+  // future day, must not be counted here.
+  let noteMarks = 0;
 
   for (let wk = 0; wk < weeks; wk++) {
     for (let dow = 0; dow < 7; dow++) {
@@ -329,6 +342,12 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       const isSkip = skips
         ? skips.has(date)
         : habit.type === 'boolean' && value === SKIP;
+
+      // Whether this day carries a note — a plain lookup rather than
+      // `notes[date]` alone, since `Object.hasOwn` is this repo's rule for a
+      // key read out of a map that was not built here. Never on a future
+      // day: nothing is written about a day that has not happened.
+      const hasNote = !isFuture && !!(notes && Object.hasOwn(notes, date) && notes[date]);
 
       let fill = empty;
       let label = `${shown}: no entry`;
@@ -408,6 +427,12 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       // and a stated lapse inside one still is.
       const inRun = inStreak.has(date) && fill === empty;
       if (inRun) label += ' — in a run';
+      // Appended, never replacing: `data-label` is hover copy and
+      // `hovercheck.mjs` asserts it with `includes(...)`. A screen reader
+      // gets only the `<title>` this becomes — a dot is invisible to it — so
+      // the FACT has to ride on the label even though the note TEXT never
+      // does.
+      if (hasNote) label += ' — has a note';
 
       // `class` via setAttribute, like every other attribute here: the
       // offline render tests drive this module against a minimal fake DOM
@@ -463,6 +488,33 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
       rect.setAttribute('data-date', date);
       rect.setAttribute('data-label', label);
       svg.appendChild(title(rect, onPick && !isFuture ? `${label} — click to edit` : label));
+
+      // A small corner dot for a day that carries a note. Drawn AFTER the
+      // cell — SVG paints in document order, the same reason the `?` glyph a
+      // few lines below is drawn after it rather than before — and sized off
+      // `CELL` rather than fixed, because the same mark has to sit in a
+      // large square at the closest zoom and a tiny one at the widest, in
+      // the style of the `?` glyph's own floor just below.
+      if (hasNote) {
+        noteMarks++;
+        const noteR = Math.max(2, Math.round(CELL * 0.16));
+        svg.appendChild(el('circle', {
+          cx: x + CELL - noteR - 1,
+          cy: y + noteR + 1,
+          r: noteR,
+          fill: themed('--surface'),
+          stroke: themed('--text-dim'),
+          'stroke-width': 1,
+          // Or the dot swallows the click the cell wants — the `?` glyph
+          // just below does exactly this, for the same reason.
+          'pointer-events': 'none',
+          // Same idiom as the `?` glyph's `data-mark-for` and the run
+          // connector's `data-link-for`: names the cell this mark belongs
+          // to, so a test (or anything else) can find the mark and its cell
+          // together.
+          'data-note-for': date,
+        }));
+      }
 
       // A day with no row at all, marked as such when the setting asks for it.
       // Drawn AFTER the cell, since SVG paints in document order — and sized
@@ -566,6 +618,11 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   // "no marks" cannot tell that apart from an older `charts.js` that never
   // wrote one at all.
   svg.setAttribute('data-run-marks', String(runMarks));
+  // Same reasoning as `data-run-marks` just above, for the note dots: set
+  // unconditionally, including `"0"`, so a caller reading a missing
+  // attribute as "no notes" cannot tell that apart from an older `charts.js`
+  // that never wrote one.
+  svg.setAttribute('data-note-marks', String(noteMarks));
 
   attachCellPopover(svg);
 
@@ -695,23 +752,26 @@ function attachCellPopover(svg) {
    */
   const raise = (cell) => {
     const parent = cell.parentNode;
-    // The `?` on an unanswered day, drawn as its own node just after the cell.
-    // Looked up before the early return, because a cell that is already last
-    // still has its mark sitting behind it after the first raise.
-    const mark = parent?.querySelector?.(
-      `[data-mark-for="${cell.getAttribute('data-date')}"]`);
-    if (!parent || (parent.lastElementChild === cell && !mark)) return;
+    // The `?` on an unanswered day and the note dot both draw as their own
+    // node just after the cell — a day can carry both at once. Looked up
+    // before the early return, because a cell that is already last still has
+    // its marks sitting behind it after the first raise.
+    const date = cell.getAttribute('data-date');
+    const marks = parent?.querySelectorAll?.(
+      `[data-mark-for="${date}"], [data-note-for="${date}"]`) ?? [];
+    if (!parent || (parent.lastElementChild === cell && marks.length === 0)) return;
 
     // Re-appending a focused element blurs it, which silently broke arrow-key
     // navigation: the handler reads document.activeElement, and after the
     // move there was nothing focused to read. Restore focus if we took it.
     const refocus = document.activeElement === cell;
     parent.append(cell);
-    // The glyph goes with it, or raising the cell buries the very thing the
-    // hovered day is being asked about: an opaque square lands on top of the `?`
-    // and the 1.45x hover scale covers what is left. Every question mark
-    // disappeared exactly under the cursor — which is where it was being read.
-    if (mark) parent.append(mark);
+    // Every mark goes with it, or raising the cell buries the very thing the
+    // hovered day is being asked about: an opaque square lands on top of the
+    // `?` or the note dot and the 1.45x hover scale covers what is left.
+    // Every question mark disappeared exactly under the cursor — which is
+    // where it was being read.
+    for (const mark of marks) parent.append(mark);
     if (refocus) cell.focus({ preventScroll: true });
   };
 

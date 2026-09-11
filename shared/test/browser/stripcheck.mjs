@@ -1052,6 +1052,120 @@ try {
          !/In a run/.test(calProbe.legendText), JSON.stringify(calProbe));
     }
   }
+
+  /* ---------- notes: the mark, and the two secondary ways into the editor (#297) ---------- */
+
+  console.log('--- notes ---');
+  // A dedicated probe habit rather than reusing `seeded.habit` — every block
+  // above has already tapped and untapped it, and this needs a day whose NOTE
+  // TEXT survives intact to be checked against, which no earlier state here
+  // promises.
+  const notesProbe = await ev(`(async () => {
+    const h = await (await fetch('/api/habits', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Strip notes probe', type: 'boolean', color: '#22c55e' }),
+    })).json();
+    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
+      return d.toISOString().slice(0, 10); };
+    const noted = iso(1), plain = iso(2);
+    const noteText = 'left half a glass, felt fine';
+    await fetch('/api/habits/' + h.id + '/entries/' + noted, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ value: 2, notes: noteText }) });
+    await fetch('/api/habits/' + h.id + '/entries/' + plain, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ value: 2 }) });
+    return { id: h.id, noted, plain, noteText };
+  })()`);
+  ck('the notes probe habit was created', !!notesProbe?.id, JSON.stringify(notesProbe));
+
+  if (notesProbe?.id) {
+    await openHabit(notesProbe.id);
+
+    /* ---------- the mark ---------- */
+
+    const cellHasNote = (date) => ev(
+      `document.querySelector('#view-detail .day-strip .check[data-date="${date}"] .check-box')`
+      + `?.classList.contains('has-note') ?? null`);
+    ck('a note-bearing day carries the mark',
+       await cellHasNote(notesProbe.noted) === true);
+    ck('a day with an entry and no note does not',
+       await cellHasNote(notesProbe.plain) === false);
+
+    /* ---------- the secondary affordance: contextmenu opens the editor, seeded truthfully ---------- */
+
+    const cellCentre = (date) => ev(`(() => {
+      const el = document.querySelector(
+        '#view-detail .day-strip .check[data-date="${date}"]');
+      if (!el) return null;
+      const b = el.getBoundingClientRect();
+      return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+    })()`);
+    // A REAL right-click, dispatched over CDP: a scripted `.click()` (or a
+    // scripted `dispatchEvent(new MouseEvent('contextmenu'))`) proves nothing
+    // about the gesture Android's long-press and a desktop right-click both
+    // arrive as — see `shared/public/CLAUDE.md`'s note on `.click()` not
+    // dispatching `pointerdown`, the same class of gap.
+    const rightClick = async (x, y) => {
+      await send('Input.dispatchMouseEvent',
+        { type: 'mousePressed', x, y, button: 'right', clickCount: 1 }, sessionId);
+      await send('Input.dispatchMouseEvent',
+        { type: 'mouseReleased', x, y, button: 'right', clickCount: 1 }, sessionId);
+    };
+
+    const notedCentre = await cellCentre(notesProbe.noted);
+    ck('the note-bearing cell is on screen to be right-clicked', !!notedCentre,
+       JSON.stringify(notedCentre));
+    if (notedCentre) {
+      await rightClick(notedCentre.x, notedCentre.y);
+      await sleep(600);
+      const opened = await ev(`({
+        open: document.getElementById('day-dialog').open,
+        notes: document.getElementById('day-notes').value,
+      })`);
+      ck('a contextmenu on a note-bearing cell opens the day editor, with '
+         + "#day-notes holding that day's real text",
+         opened.open === true && opened.notes === notesProbe.noteText, JSON.stringify(opened));
+      await ev(`document.getElementById('day-cancel').click()`);
+      await sleep(400);
+    }
+
+    /* ---------- the secondary affordance: Shift+Enter, and it must not steal the cycle ---------- */
+
+    // A REAL key event, dispatched by CDP rather than scripted from the page.
+    // A `<button>` synthesises its own `click` from a TRUSTED Enter press, and
+    // suppressing that synthesis is exactly what the handler's
+    // `preventDefault()` exists for — a `new KeyboardEvent('keydown')` fired
+    // from script never triggers the browser's own implicit-submission
+    // behaviour, so a check built on one would pass against a build with no
+    // `preventDefault()` in it at all. Same trap, same fix, as
+    // `categorycheck.mjs`'s Enter-inside-a-sub-form check.
+    const pressShiftEnter = async () => {
+      for (const type of ['keyDown', 'keyUp']) {
+        await send('Input.dispatchKeyEvent', {
+          type, key: 'Enter', code: 'Enter', modifiers: 8, // Shift
+          windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+          ...(type === 'keyDown' ? { text: '\r' } : {}),
+        }, sessionId);
+      }
+    };
+
+    const beforeShift = await stored(notesProbe.plain, notesProbe.id);
+    await ev(`document.querySelector(
+      '#view-detail .day-strip .check[data-date="${notesProbe.plain}"]').focus()`);
+    await pressShiftEnter();
+    await sleep(600);
+    const shiftOpened = await ev(`document.getElementById('day-dialog').open`);
+    ck('Shift+Enter on a focused cell opens the day editor', shiftOpened === true);
+    await sleep(800);
+    const afterShift = await stored(notesProbe.plain, notesProbe.id);
+    ck("...and the day's stored value is UNCHANGED — the proof it did not also "
+       + 'cycle the day underneath it',
+       JSON.stringify(afterShift) === JSON.stringify(beforeShift),
+       `${JSON.stringify(beforeShift)} -> ${JSON.stringify(afterShift)}`);
+    await ev(`document.getElementById('day-cancel').click()`);
+    await sleep(400);
+  }
 } catch (e) {
   ck('suite ran to completion', false, e.message);
 } finally {

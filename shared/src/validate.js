@@ -532,7 +532,11 @@ export function parseHabit(body = {}) {
  * grouped in with it, exactly as the old `??` grouped it with `undefined` —
  * and a real string, possibly `''`, when it did. `entryWrite` is what turns
  * that distinction into "leave the stored note alone" versus "clear it";
- * `parseEntry` only stops collapsing the two.
+ * `parseEntry` only stops collapsing the two. A supplied note over
+ * `LIMITS.notes` characters is rejected, not clamped — the import path
+ * clamps deliberately (a bulk restore must not abort on one long note), but
+ * a live write is a single note the caller can see and fix, so silent
+ * truncation is just data loss.
  *
  * @param {import('./types.js').Habit} habit
  * @param {{value?: unknown, status?: string, notes?: unknown}} body
@@ -542,7 +546,10 @@ export function parseHabit(body = {}) {
 export function parseEntry(habit, body = {}, { UNSET, YES, SKIP }) {
   const notes = body.notes === undefined || body.notes === null
     ? null
-    : String(body.notes).slice(0, LIMITS.notes);
+    : String(body.notes);
+  if (notes !== null && notes.length > LIMITS.notes) {
+    throw new ValidationError(`notes must be ${LIMITS.notes} characters or fewer`);
+  }
 
   // A skip may be requested explicitly, or (for boolean habits only) by the
   // legacy SKIP wire value. On a numerical habit 3 is a real amount.
@@ -682,7 +689,7 @@ export function answerBody(habit, { action, value }) {
  * browser. `test/settings.test.js` fails if the two lists drift.
  */
 export const DETAIL_CARDS = Object.freeze([
-  'recentDays', 'strength', 'calendar', 'streaks', 'resilience', 'awards',
+  'recentDays', 'strength', 'calendar', 'notes', 'streaks', 'resilience', 'awards',
   'history', 'weekdays', 'weekdayMonths', 'frequency',
 ]);
 

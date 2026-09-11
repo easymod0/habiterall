@@ -664,7 +664,10 @@ change; a string is a stated note, and `''` a stated clear, which is an ABSENT
 key in a map `render()` builds from `e.notes` being truthy. A `'clear'` takes
 the note with the row, because the note lives on the row. `ui/dashboard.js`'s
 host ignores the argument and needs no change: nothing opens the day editor
-over the list.
+over the list. **Corrected by #297: that is still true of `edit`, and only of
+`edit`.** The dashboard host's `read` now answers `hasNote` (from `/overview`'s
+per-habit `notes` array of dates) and it now implements `editDay` — see "Issue
+#297" below for why the note argument itself stays untouched.
 
 The checks are in `calcheck.mjs` rather than `stripcheck.mjs` — the action is a
 press in the calendar's own day editor, and `stripcheck` was already the
@@ -1820,3 +1823,83 @@ module link error before `start()` runs, outside `#view-error`, exactly the
 v20 case this rule already covers. `CACHE_VERSION` moves `'v30'` → `'v31'` in
 `shared/public/sw.js`; `SHELL` itself is unchanged, since no file was added or
 removed.
+
+## Issue #297
+
+A note could be stored, exported, imported and round-tripped, and could be
+*written* from exactly one place in the whole frontend — the detail page's
+calendar's `onPick` — and was drawn nowhere at all. Mark's own report: notes
+"are not readable or modifiable". Three pieces close that, and none of them
+touch `entryWrite`'s preserve-on-omit rule (#224) or the tap cycle.
+
+**The payload sends DATES, never the text.** `/overview` gains a per-habit
+`notes` array, symmetric with the existing `skips` array, pushed for a skipped
+day as well as an ordinary one — a skip is an answer, and it can carry a note
+same as any other row. The alternative — the text itself, or a Set the client
+builds once — was refused on a measurement already on this page:
+`habiterall-cloud/src/cache.js` records the `/overview` memo retaining 499 KB
+for 20 habits × 365 days, and a note is up to 500 characters. Sending the text
+would multiply that by however many days carry one, on a payload the memo
+already treats as expensive. A caller that wants the text has to ask
+`/habits/:id/entries`, unwindowed — which the detail page already does, for
+the same reason its calendar and its "Recent days" strip redraw locally
+instead of refetching (see "The day strip on a habit's own page" above).
+
+**A dot, never a colour, and never a fill.** See `shared/public/CLAUDE.md`'s
+note under "The detail view" for the reasoning in full: the four day states,
+the at-most ramp and the ghost-tick shapes already own every colour meaning
+this grid has, and a note is orthogonal to all of them. The mark is drawn
+after the cell (`data-note-for`, `pointer-events: none`, sized off `CELL`, a
+`themed`/`shade` fill and stroke only), counted on `data-note-marks`
+unconditionally including `"0"` — the same idiom `data-run-marks` already
+established, for the same reason: an absent attribute must mean an OLDER
+`charts.js`, not a quiet window. The `.check-box.has-note` mark on both strips
+follows the identical rule from the other surface's vocabulary, exactly as
+`unlogged_is_success`'s ghost tick and faint fill already split by medium.
+
+**The dashboard routes through the habit's own page rather than opening the
+editor in place, and the reason is `saveDay`'s oldest rule.** `saveDay`
+(`ui/day-dialog.js`) unconditionally sends `notes: notes.value.trim()` on every
+save — there is no "say nothing about the note" option from that dialog, only
+from a strip tap. So *any* way into the editor that cannot seed the box with
+the note's TRUE text would silently destroy whatever was there the moment it
+was saved, which is exactly the shape #224 closed for a button that never saw
+the note to begin with. The dashboard cannot seed truthfully — it holds only
+the fortnight it asked for and, by the payload decision above, never the note
+text, only which dates carry one — so `listHost.editDay` does not open the
+dialog itself. It calls `openHabit(habit.id, { editDay: date })`, i.e.
+detail's own `open`, already imported by `dashboard.js` as `openHabit`, so this
+adds no new export. `open` renders the habit's page — which holds the whole
+unwindowed history, note text included — and then opens the day editor over
+it, guarded exactly as the calendar itself is (the habit must have rendered; a
+future date is refused). One owner of the note data, no second fetch path, no
+offline hole, and the URL stays `#/habit/<id>` — no `#/habit/42/day/...` form
+that would reach Android's deep links (see "Routing" in `shared/public/CLAUDE.md`).
+
+**The affordance is a right-click/long-press plus a keyboard equivalent, with
+Android precedent.** `dayCells` wires `contextmenu` and Shift+Enter to
+`host.editDay?.(...)`, leaving the plain `click` handler and its optimistic
+cycle untouched — a SECONDARY affordance may not steal the primary tap, which
+is also why a numerical habit's count dialog has always been a separate dialog
+from the day editor (`openCountDialog`'s own comment, `day-strip.js`).
+`android-native/.../ui/DayGrid.kt` already ships the identical gesture on a day
+cell, and its own comment is why the web needed the keyboard path and the
+`title`/`aria-keyshortcuts` rather than treating the mouse gesture as enough on
+its own: a long press is not discoverable to a screen reader, and naming the
+action is what turns a secret into a control. `e.preventDefault()` before
+calling `host.editDay` on the Shift+Enter path is load-bearing rather than
+tidy — a `<button>` synthesises a `click` from Enter, so without it Shift+Enter
+both opened the editor AND cycled the day, two writes from one press.
+
+**The notes card is the third way in, and the only one that costs no
+shortcut.** It lists a habit's dated notes, newest first, capped (`NOTES_LIMIT`
+in `ui/detail.js`, 20) with a muted line naming how many earlier ones are not
+shown — a rendering cap over data already in memory, not a narrower fetch, so a
+pager can be added later with no change to what is fetched. Each row is a real
+`<button>` calling `detailHost.editDay`, keyboard-reachable by construction. It
+returns `null` for a habit with no notes, the same rule `buildResilienceCard`
+and `buildAwardsCard` already follow for their own kind of nothing, and its
+registry row (`DETAIL_CARDS`, `SETTINGS.detailCards`, `CARDS` in
+`ui/detail.js`) sits immediately after `calendar` — order is load-bearing
+there, because `parseCardList` keeps a new-shape stored list close to verbatim
+and a default written in another order is normalised away on its first write.

@@ -333,11 +333,14 @@ export function applyImport(habits, mode = 'merge', categories = []) {
           continue;
         }
 
-        // Clamped to what `parseEntry` accepts, so import cannot store a note
-        // this account's own API would truncate — and so a personal export can
-        // be read by cloud, which has always clamped, without silently losing
-        // the tail. Read from LIMITS rather than restated: two copies of a
-        // number is how the editions came to disagree about this one.
+        // `parseEntry` now REJECTS a note over LIMITS.notes instead of
+        // clamping it — a live write is one note the caller can see and fix.
+        // Import deliberately does not share that behaviour: a bulk restore
+        // of data the user already has must not abort on one long note (and
+        // Loop's own `Repetitions.notes` has no 500 limit), so this clamps
+        // rather than rejecting. Read from LIMITS rather than restated: two
+        // copies of a number is how the editions came to disagree about this
+        // one.
         const notes = String(e.notes ?? '').slice(0, LIMITS.notes);
 
         // Read once, and by TYPE — `entryValue`, not `Number()`, which read

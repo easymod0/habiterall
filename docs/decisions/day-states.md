@@ -886,3 +886,26 @@ That is untouched by #224 and is arguably right for the same reason
 but it is a real asymmetry with what the answer path now does, and anyone
 reaching for this section as precedent should know the precedent is narrower
 than it sounds.
+
+**Issue #297: the 500-character limit stopped being a silent clamp on the API
+and stayed one on import, and that is one decision, not two forgotten to
+agree.** `parseEntry` used to slice a supplied note to `LIMITS.notes` rather
+than refuse it — silent truncation, indistinguishable from the note the user
+actually typed unless they went back and counted. It now throws
+`ValidationError` for a note over the limit, matching the house style
+`parseHabit` already uses for an over-long `name`. Both editions' importers
+still clamp, deliberately and unchanged: import does not flow through
+`parseEntry` at all, and a bulk restore of data the account already has must
+not abort the whole file on one long note — Loop's own `Repetitions.notes` has
+no 500-character limit of its own to have respected in the first place, so a
+Loop export can legitimately carry a note this app never allowed a user to
+type directly. Rejecting on import would turn "you have more history than this
+app's editor lets you write in one sitting" into "your backup will not
+restore," which is the wrong failure for the wrong reason. The two paths are
+allowed to disagree because they answer different questions: `parseEntry`
+guards what a PERSON is about to type right now, where clamping and moving on
+is invisible harm; import guards what an EXISTING file is allowed to mean,
+where refusing outright is the larger harm. `shared/test/validate.test.js`
+pins the boundary at the literal 500/501, not at `LIMITS.notes`, and the two
+editions' round-trip suites still assert the import clamp truncates to exactly
+that length — nothing about the clamp itself moved.

@@ -40,8 +40,10 @@
  * than the habit — and a host captured in a closure would answer from maps a
  * rebuild has since orphaned.
  *
- * @typedef {{value: number|undefined, isSkip: boolean}} DayCell
+ * @typedef {{value: number|undefined, isSkip: boolean, hasNote: boolean}} DayCell
  *   `value: undefined` means NO ROW, which is a different day from a stored 0.
+ *   `hasNote` is read-only here — it marks the cell, and is never written
+ *   through `edit` (see `editDay` below for how a note actually changes).
  *
  * @typedef {object} StripHost
  * @property {(habitId: number) => any|null} habit  as this host holds it NOW
@@ -56,6 +58,19 @@
  *   ignores it: nothing opens the day editor over the list.
  * @property {() => void} repaint            cheap and local
  * @property {() => Promise<void>} refresh   authoritative reload
+ * @property {((habitId: number, date: string) => void)} [editDay]  open the
+ *   day editor for this cell, a SECONDARY affordance beside the plain tap
+ *   (`dayCells` wires it to a cell's `contextmenu` and Shift+Enter, never the
+ *   plain click). Optional, and the two hosts answer it differently on
+ *   purpose: `ui/detail.js`'s page holds the whole unwindowed history,
+ *   including every note's real text, so it can open the dialog directly and
+ *   seed it truthfully. `ui/dashboard.js`'s list holds only the fortnight it
+ *   asked for and never a note's TEXT — `/overview` sends only which dates
+ *   HOLD one — so opening the editor in place there would seed an empty note
+ *   over a day that has one, and `saveDay` always STATES the note on save,
+ *   which would destroy it silently on the next Save (#224). Its host routes
+ *   through `ui/detail.js`'s own `open(id, {editDay})` instead, which is the
+ *   one place holding the note that can seed the dialog honestly.
  */
 
 import { api } from '/shared/ui/api.js';
@@ -87,6 +102,11 @@ const $ = (sel) => document.querySelector(sel);
  * @param inRun        whether this date sits inside a run of `MIN_STREAK`+ days
  *   (`charts.js`'s `streakDates`) that this cell would otherwise draw as nothing
  *   at all
+ * @param hasNote      whether this day carries a note — drawn as a small corner
+ *   dot (`.has-note::after`), the checkbox medium's version of the calendar's
+ *   own corner mark (`charts.js`). `toggle`, never `add`: `repaintCells`
+ *   re-paints the SAME node, so a note that has since been cleared must lose
+ *   its dot rather than keep one from a stale paint.
  *
  * The skip flag is why this takes more than three arguments. `/overview`
  * flattens a skip onto the SKIP wire value so the grid has something paintable,
@@ -114,10 +134,16 @@ function ghostTick(box, habit) {
   box.textContent = '✓';
 }
 
-function paintCheckbox(box, habit, value, isSkip = false, showUnknown = false, inRun = false) {
+function paintCheckbox(
+  box, habit, value, isSkip = false, showUnknown = false, inRun = false, hasNote = false
+) {
   box.textContent = '';
   box.style.background = 'var(--grid-empty)';
   box.style.color = '#fff';
+  // `toggle`, not `add`: this box is repainted in place by `repaintCells`, so a
+  // note that has since been cleared has to lose its dot on the same call that
+  // would otherwise keep asserting one.
+  box.classList.toggle('has-note', hasNote);
   // Reset the two properties the branches below set conditionally. Harmless
   // when this builds a fresh span, load bearing when `repaintCells` re-runs it
   // over a cell that is already painted: a day going from 3 to done kept the
@@ -246,10 +272,15 @@ export function dayCells(host, habit, dates, todayIso, inRun = new Set()) {
 
   for (const d of dates) {
     const date = iso(d);
-    const { value, isSkip } = host.read(habit.id, date);
+    const { value, isSkip, hasNote } = host.read(habit.id, date);
     const btn = document.createElement('button');
     btn.className = 'check' + (date === todayIso ? ' today' : '');
-    btn.title = `${habit.name} — ${date}`;
+    // The secondary affordance named alongside the plain tap, so it is
+    // discoverable at all — the web has no long-press action menu the way
+    // Android's context menu makes `onLongClickLabel` discoverable, and
+    // `aria-keyshortcuts` below is the same fact for assistive tech.
+    btn.title = `${habit.name} — ${date} · hold or Shift+Enter to edit`;
+    btn.setAttribute('aria-keyshortcuts', 'Shift+Enter');
     btn.dataset.focusKey = `check:${habit.id}:${date}`;
     // Read back by `repaintCells`, which needs to know which day a cell is
     // about without re-deriving it from the focus key — that key is an
@@ -258,7 +289,8 @@ export function dayCells(host, habit, dates, todayIso, inRun = new Set()) {
 
     const box = document.createElement('span');
     box.className = 'check-box';
-    paintCheckbox(box, habit, value, isSkip, settings.get('questionMarks'), inRun.has(date));
+    paintCheckbox(
+      box, habit, value, isSkip, settings.get('questionMarks'), inRun.has(date), hasNote);
 
     const day = document.createElement('span');
     day.className = 'check-day';
@@ -266,6 +298,23 @@ export function dayCells(host, habit, dates, todayIso, inRun = new Set()) {
 
     btn.append(box, day);
     btn.addEventListener('click', () => onCheckClick(host, habit.id, date));
+    // The secondary affordance: right-click on a desktop, a long-press on
+    // Android (which fires `contextmenu` for a `<button>`), and Shift+Enter
+    // for a keyboard user with no long-press to reach for. The plain `click`
+    // handler above is untouched — this must not steal the cycle, it only
+    // adds a second way past it.
+    btn.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      host.editDay?.(habit.id, date);
+    });
+    btn.addEventListener('keydown', (e) => {
+      if (!e.shiftKey || e.key !== 'Enter') return;
+      // FIRST: a <button> synthesises a `click` from Enter, so without this a
+      // single Shift+Enter both opens the editor and cycles the day underneath
+      // it — two writes from one press.
+      e.preventDefault();
+      host.editDay?.(habit.id, date);
+    });
     checks.append(btn);
   }
 
@@ -330,9 +379,10 @@ export function repaintCells(root, host, habit, inRun = new Set()) {
     const date = /** @type {HTMLElement} */ (btn).dataset.date;
     const box = btn.querySelector('.check-box');
     if (!box) continue;
-    const { value, isSkip } = host.read(habit.id, date);
+    const { value, isSkip, hasNote } = host.read(habit.id, date);
     paintCheckbox(
-      /** @type {HTMLElement} */ (box), habit, value, isSkip, showUnknown, inRun.has(date));
+      /** @type {HTMLElement} */ (box), habit, value, isSkip, showUnknown, inRun.has(date),
+      hasNote);
   }
 }
 

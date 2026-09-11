@@ -600,6 +600,36 @@ ck('...and the permutation actually took effect',
 await rawReorder([sortCharlie.id, sortAlpha.id, sortBravo.id]);
 await put('/settings', { habitSort: 'manual' });
 
+// issue #297: `/overview` must say WHICH days hold a note, as DATES only —
+// the note TEXT stays behind the detail page's own unwindowed read (see the
+// memo-size comment at habiterall-cloud/src/api.js around :955). A skipped
+// day can still carry a note, so that arm is checked on its own: it is the
+// one dropped if the push were written inside `if (r.status === 'skip')`
+// instead of after it.
+const notesHabit = await post('/habits', { name: 'NotesHabit', type: 'boolean' });
+await put(`/habits/${notesHabit.id}/entries/${daysAgo(2)}`,
+  { value: 2, notes: 'wrote about it' });
+await put(`/habits/${notesHabit.id}/entries/${daysAgo(1)}`, { value: 2 });
+await put(`/habits/${notesHabit.id}/entries/${daysAgo(0)}`,
+  { status: 'skip', notes: 'skipped but noted' });
+
+const notesOverview = await overview({ days: 7 });
+const notesRow = notesOverview.habits.find((h) => h.id === notesHabit.id);
+ck("a day with a note has its date in that habit's notes",
+  notesRow.notes.includes(daysAgo(2)), JSON.stringify(notesRow.notes));
+ck('a day with an entry and no note does NOT have its date in notes',
+  !notesRow.notes.includes(daysAgo(1)), JSON.stringify(notesRow.notes));
+ck('a SKIPPED day with a note DOES have its date in notes',
+  notesRow.notes.includes(daysAgo(0)), JSON.stringify(notesRow.notes));
+
+const noNotesHabit = await post('/habits', { name: 'NoNotesHabit', type: 'boolean' });
+await put(`/habits/${noNotesHabit.id}/entries/${daysAgo(0)}`, { value: 2 });
+const noNotesOverview = await overview({ days: 7 });
+const noNotesRow = noNotesOverview.habits.find((h) => h.id === noNotesHabit.id);
+ck('a habit with no notes carries [] rather than an absent key',
+  Array.isArray(noNotesRow.notes) && noNotesRow.notes.length === 0,
+  JSON.stringify(noNotesRow.notes));
+
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }
 try { rmSync(workdir, { recursive: true, force: true }); } catch { /* best effort */ }

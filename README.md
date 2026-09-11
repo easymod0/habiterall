@@ -87,7 +87,14 @@ matters.
 reaches full strength whether that is daily or 3×/week.
 
 **Edit any day** — click a square in the calendar to correct history, page back
-through months, or attach a note.
+through months, or attach a note. A day with a note carries a small mark on
+both the calendar and the day-square strips, so a note is something you can
+see again rather than something you remember writing. Right-click or long-press
+a square (or focus it and press Shift+Enter) to jump straight to the day
+editor without cycling it — the same gesture the Android app already offers on
+a day cell. A habit's own page also lists every dated note it has, newest
+first, so reading back what you wrote is not a date-by-date hunt through the
+calendar — see **Notes** below.
 
 **Skips** — neither success nor failure. A skipped day bridges a streak instead
 of breaking it and holds your score steady. Use it for illness or travel.
@@ -168,6 +175,7 @@ between browsers and travels in the JSON backup.
 | **Recent days** | The dashboard's day squares for this one habit — tap to record without leaving the page. Pages back through history |
 | **Strength** | Loop's exponential-decay score, plotted by day / week / month / quarter / year |
 | **Calendar** | A clickable heatmap with streaks joined up, zoomable and pageable |
+| **Notes** | Every dated note on this habit, newest first, each one a click away from its day editor |
 | **History** | Completions by day / week / month / quarter / year, as a percentage or a count |
 | **Best streaks** | Your ten longest runs, listed newest first with the dates |
 | **Bouncing back** | What happens *after* a miss — see below |

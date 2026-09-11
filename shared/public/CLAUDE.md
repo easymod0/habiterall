@@ -344,9 +344,51 @@ one call further out.
 ## The detail view
 
 **Which cards it draws is a list of INVENTED IDS, and the server never hears
-about it.** `detailCards` gates the ten builders in `ui/detail.js`; the ids come
-from `DETAIL_CARDS` (`shared/src/validate.js`) and not titles, because a card has
-no id and the titles are English prose #144 will translate.
+about it.** `detailCards` gates the eleven builders in `ui/detail.js` (#297 added
+the notes card, below); the ids come from `DETAIL_CARDS` (`shared/src/validate.js`)
+and not titles, because a card has no id and the titles are English prose #144
+will translate.
+
+**A note's DOT is a mark, never a hue (#297).** The calendar could have painted a
+note-bearing day a different colour and did not: the four day states already own
+the colour meaning on that grid — done/skip/no/unknown, plus the at-most ramp and
+the ghost-tick shapes above — and a note is orthogonal to all of them, on any day
+state at once. Recolouring the cell would either invent a fifth meaning for a hue
+or silently steal one of the four existing ones. A small corner dot instead reuses
+exactly the idiom the `?` glyph and the run stroke already established: something
+drawn ON TOP of whatever the cell already means, `pointer-events: none` so it
+never steals the click, and read only for truthiness — never for its own colour —
+because `themecheck.mjs` exists precisely because a colour resolved with
+`getComputedStyle` at draw time freezes into the SVG and the detail view redraws
+by REFETCHING, so a frozen palette survives a theme switch. `charts.js`'s dot
+therefore reads `themed(...)`/`shade(...)` exactly as every other mark on this
+grid does, never a resolved literal.
+
+**A note gained three new ways into the day editor, and every one of them is
+SECONDARY — none may steal the plain tap (#297).** `dayCells`
+(`ui/day-strip.js`) wires `contextmenu` (right-click / long-press) and
+Shift+Enter, on both grids that share that file, to `host.editDay?.(...)` — a
+method the plain click handler never touches. The third is the notes card
+itself: each row is a real `<button>` calling `detailHost.editDay`, which is
+keyboard-reachable by construction rather than by a shortcut nobody discovers
+on their own. All three routes converge on the same rule the day editor has
+always had: `saveDay` unconditionally states the note on every save, so a way
+in that cannot seed the box with the TRUE text would silently destroy whatever
+was there (#224).
+
+**`StripHost.editDay` is optional, and the two hosts answer it differently on
+purpose — that split is the whole point of `StripHost` existing (#297).**
+`detail.js`'s `detailHost.editDay` opens the dialog directly: this page holds the
+whole unwindowed history, note text included, so it can seed the dialog
+truthfully with no second fetch. `dashboard.js`'s `listHost.editDay` cannot do
+that — the dashboard holds only the fortnight it asked for and, by design, never
+the note TEXT, only which DATES hold one (`/overview`'s per-habit `notes` array,
+dates only — a note is up to 500 characters and the payload is already
+size-managed) — so it routes through `openHabit(habit.id, { editDay: date })`,
+i.e. detail's own `open`, which opens the habit's page and then the day editor over it once the
+real note is in hand. Opening the editor in place over the dashboard with an
+empty seed would be the #224 landmine again, this time self-inflicted by the
+grid that cannot see the note it would need to seed with.
 
 **"Recent days" is the one card you ACT on, and it is first for that reason.**
 It is the dashboard's tappable day strip for one habit — `ui/day-strip.js`,

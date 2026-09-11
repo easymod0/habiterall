@@ -297,10 +297,159 @@ try {
     String(focused.popText));
   ck('the focused cell grows', focused.transform !== 'none', focused.transform);
 
-  // The re-render check above zoomed in; leave the account as it was found.
+  /* ---------- issue #297 / STEP 3b: the note dot must not be buried ---------- */
+
+  console.log('\n--- the note dot survives the raise ---');
+
+  /*
+   * `raise` moved the hovered cell to the end of its parent and carried only
+   * the `?` glyph with it (`[data-mark-for]`) — the note dot
+   * (`[data-note-for]`, added by STEP 3) was left behind, buried under the
+   * raised cell exactly the way the `?` was before `raise` existed at all.
+   * The fix widens the lookup to match both attributes and re-append every
+   * match. First proved with a REAL note, written through the API and read
+   * back by the app the same way `calcheck.mjs`'s note-mark block does.
+   */
+  const openId = await ev(
+    `(async () => (await import('/shared/ui/store.js')).state.openHabitId)()`);
+  ck('a habit is open for the note-dot check', Number.isInteger(openId), String(openId));
+
+  const noteDate = await ev(`(async () => {
+    const { addDaysISO, todayISO } = await import('/shared/ui/dates.js');
+    return addDaysISO(todayISO(), -21);})()`);
+  const NOTE = 'carried by raise';
+  const noteWritten = await ev(`fetch('/api/habits/${openId}/entries/${noteDate}', {
+    method: 'PUT', credentials: 'same-origin',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({status: 'skip', notes: ${JSON.stringify(NOTE)}})}).then(r => r.ok)`);
+  ck('the note write landed', noteWritten === true, String(noteWritten));
+
+  // A fresh, cross-document reload — same reasoning as calcheck.mjs's note-mark
+  // block: `notesByDate` is rebuilt from an unwindowed refetch inside `render()`,
+  // and reading the in-page state this suite already painted from would prove
+  // nothing about the note actually reaching the calendar.
+  const hashAfterNote = await ev(`location.hash`);
+  await reloadAndWaitFor(ev, `!!document.querySelector('[aria-label="Completion calendar"]')`, {
+    reload: () => send('Page.navigate', { url: `${APP}/?open=hovernote${hashAfterNote}` }, sessionId),
+    what: 'the detail page, reloaded, to pick up the note',
+  });
+  await sleep(400);
+
+  const noteCell = await ev(`(()=>{
+    const svg=document.querySelector('[aria-label="Completion calendar"]');
+    const cell=svg?.querySelector('rect.cal-cell[data-date="${noteDate}"]');
+    const dot=svg?.querySelector('[data-note-for="${noteDate}"]');
+    if (!cell) return {missing:true};
+    cell.scrollIntoView({block:'center'});
+    window.__noteCell=cell;
+    const b=cell.getBoundingClientRect();
+    return {hasDot:!!dot, x:Math.round(b.left+b.width/2), y:Math.round(b.top+b.height/2)};})()`);
+  ck('the note-bearing day carries the dot before it is hovered',
+    noteCell.hasDot === true, JSON.stringify(noteCell));
+  await sleep(300);
+
+  await move(noteCell.x, noteCell.y);
+  await sleep(300);
+
+  const noteRaised = await ev(`(()=>{
+    const cell=window.__noteCell;
+    const dot=cell.parentNode.querySelector('[data-note-for="${noteDate}"]');
+    // FOLLOWING, not merely present: the defect this fix closes is the dot
+    // staying BEHIND the raised cell, so its position relative to the cell —
+    // not merely its continued existence in the DOM — is the claim.
+    const dotAfterCell = dot
+      ? (cell.compareDocumentPosition(dot) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+      : false;
+    // NOT isLast: raise() appends the cell first and then re-appends every
+    // mark belonging to it, so a cell carrying a mark is never its parent's
+    // last child -- the mark is. What raise() actually promises for a marked
+    // cell is that no OTHER .cal-cell sibling comes after it.
+    const siblings = [...cell.parentNode.children];
+    const laterSiblings = siblings.slice(siblings.indexOf(cell) + 1);
+    const noCellAfter = laterSiblings.every((el) => !el.matches('.cal-cell'));
+    return {noCellAfter, hasDot: !!dot, dotAfterCell};})()`);
+  ck('the hovered cell is raised above every other cell',
+    noteRaised.noCellAfter === true, JSON.stringify(noteRaised));
+  ck('...and the note dot is carried along, positioned AFTER the cell',
+    noteRaised.hasDot === true && noteRaised.dotAfterCell === true,
+    JSON.stringify(noteRaised));
+
+  await move(5, 5);
+  await sleep(300);
+
+  /*
+   * A day carrying BOTH a `?` and a note cannot occur through the app today —
+   * a note always rides on an answered row (`entryWrite`), which is exactly
+   * what excludes the `?` (`value == null && !isSkip`). The fix is written
+   * for that combination anyway (its own comment: "a day carrying BOTH a `?`
+   * and a note would still bury one of them"), so this proves the GENERAL
+   * case the single-note check above cannot: a real `?` mark on a genuinely
+   * unanswered day, plus a second, injected `[data-note-for]` node at the
+   * same date, to prove `raise` carries every match rather than the first
+   * one `querySelector` would have found.
+   */
+  await ev(`fetch('/api/settings', {method:'PUT', credentials:'same-origin',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({questionMarks:true})}).then(r=>r.ok)`);
+
+  const markDate = await ev(`(async () => {
+    const { addDaysISO, todayISO } = await import('/shared/ui/dates.js');
+    return addDaysISO(todayISO(), -22);})()`);
+  await ev(`fetch('/api/habits/${openId}/entries/${markDate}',
+    {method:'DELETE', credentials:'same-origin'}).then(()=>true).catch(()=>true)`);
+
+  const hashForMark = await ev(`location.hash`);
+  await reloadAndWaitFor(ev, `!!document.querySelector('[aria-label="Completion calendar"]')`, {
+    reload: () => send('Page.navigate', { url: `${APP}/?open=hovermark${hashForMark}` }, sessionId),
+    what: 'the detail page, reloaded, with question marks on',
+  });
+  await sleep(400);
+
+  const markCell = await ev(`(()=>{
+    const svg=document.querySelector('[aria-label="Completion calendar"]');
+    const cell=svg?.querySelector('rect.cal-cell[data-date="${markDate}"]');
+    const mark=svg?.querySelector('[data-mark-for="${markDate}"]');
+    if (!cell || !mark) return {missing:true, hasMark:!!mark};
+    const dot=document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    dot.setAttribute('data-note-for', '${markDate}');
+    dot.setAttribute('data-injected-for-test', '1');
+    dot.setAttribute('r', '3');
+    dot.setAttribute('cx', String(mark.getAttribute('x') ?? 0));
+    dot.setAttribute('cy', String(mark.getAttribute('y') ?? 0));
+    mark.after(dot);
+    window.__markCell=cell;
+    cell.scrollIntoView({block:'center'});
+    const b=cell.getBoundingClientRect();
+    return {hasMark:true, x:Math.round(b.left+b.width/2), y:Math.round(b.top+b.height/2)};})()`);
+  ck('the unanswered day shows its "?" (the real half of the combined check)',
+    markCell.hasMark === true, JSON.stringify(markCell));
+  await sleep(300);
+
+  await move(markCell.x, markCell.y);
+  await sleep(300);
+
+  const bothRaised = await ev(`(()=>{
+    const cell=window.__markCell;
+    const after = (n) => n
+      ? (cell.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0
+      : false;
+    const mark=cell.parentNode.querySelector('[data-mark-for="${markDate}"]');
+    const dot=cell.parentNode.querySelector(
+      '[data-note-for="${markDate}"][data-injected-for-test]');
+    return {isLast: cell.parentNode.lastElementChild === cell,
+            markAfter: after(mark), dotAfter: after(dot)};})()`);
+  ck('a day carrying both a "?" and a note carries BOTH marks after the raise',
+    bothRaised.markAfter === true && bothRaised.dotAfter === true,
+    JSON.stringify(bothRaised));
+
+  await move(5, 5);
+  await sleep(300);
+
+  // The re-render check above zoomed in and this block turned question marks
+  // on; leave the account as it was found.
   await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({calendarZoom:'default'})}).then(r=>r.ok)`);
+    body:JSON.stringify({calendarZoom:'default', questionMarks:false})}).then(r=>r.ok)`);
 
 } catch (err) {
   console.log('FAIL  harness error :: ' + err.message);

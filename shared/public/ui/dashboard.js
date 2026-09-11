@@ -105,6 +105,23 @@ function setSkip(habit, date, on) {
 }
 
 /**
+ * Which dates hold a note, per habit — built in `load()` from `h.notes`,
+ * `/overview`'s array of DATES (never the text; see `shared/CLAUDE.md`'s
+ * overview payload note on why). A `Set` rather than re-reading `.includes`
+ * off the array on every cell paint, and rebuilt wholesale alongside
+ * `state.habits` rather than kept in step incrementally: nothing this list's
+ * own optimistic writes do ever touches a note (`listHost.edit` sends no
+ * `note`, matching `StripHost.edit`'s doc — a plain tap states nothing about
+ * one), so the only thing that can move it is a fresh `/overview`.
+ *
+ * A missing/undefined `h.notes` is read as empty, which is what a stale
+ * service-worker-cached `/overview` predating this field sends.
+ *
+ * @type {Map<number, Set<string>>}
+ */
+let noteDatesByHabit = new Map();
+
+/**
  * This list, as `ui/day-strip.js` reads and writes it.
  *
  * A module-level singleton rather than something built per paint: the amount
@@ -124,12 +141,13 @@ const listHost = {
 
   read(id, date) {
     const habit = this.habit(id);
-    if (!habit) return { value: undefined, isSkip: false };
+    if (!habit) return { value: undefined, isSkip: false, hasNote: false };
     return {
       // Whether the map HOLDS the date, never what it holds — see the ban on
       // `?? UNSET` in the root CLAUDE.md.
       value: Object.hasOwn(habit.entries, date) ? habit.entries[date] : undefined,
       isSkip: habit.skips?.includes(date) ?? false,
+      hasNote: noteDatesByHabit.get(id)?.has(date) ?? false,
     };
   },
 
@@ -160,6 +178,13 @@ const listHost = {
 
   repaint: () => paint(),
   refresh: () => load(),
+
+  // Routed rather than opened in place — see `StripHost.editDay`'s doc
+  // (`ui/day-strip.js`) for why: this list holds no note TEXT to seed the
+  // dialog with, only which dates hold one, and `saveDay` always STATES the
+  // note it holds on save. `openHabit` is this module's own import of
+  // `ui/detail.js`'s `open`, already in scope — no new export.
+  editDay: (id, date) => { openHabit(id, { editDay: date }); },
 };
 
 /**
@@ -304,6 +329,10 @@ export async function load() {
   // redraws from state a newer load has already moved.
   if (ticket === loadSeq) {
     state.habits = data.habits;
+    // See `noteDatesByHabit`'s own comment: a missing/undefined `h.notes` —
+    // a stale service-worker-cached `/overview` predating the field — reads
+    // as empty rather than throwing.
+    noteDatesByHabit = new Map(state.habits.map((h) => [h.id, new Set(h.notes ?? [])]));
     // The sort that actually produced `habits` above, from the SAME reply —
     // an absent key means a server with no sort feature at all, whose list
     // is already in `position` order, so `'manual'` is the right answer for

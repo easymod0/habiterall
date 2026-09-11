@@ -368,6 +368,52 @@ ck("today's window still carries its entries",
   Object.keys(rowNow.entries).length === 7,
   String(Object.keys(rowNow.entries).length));
 
+// issue #297: `/overview` must say WHICH days hold a note, as DATES only —
+// the note TEXT stays behind the detail page's own unwindowed read (see the
+// memo-size comment at habiterall-cloud/src/api.js around :955). A skipped
+// day can still carry a note, so that arm is checked on its own: it is the
+// one dropped if the push were written inside `if (r.status === 'skip')`
+// instead of after it. Mirrors habiterall-personal's
+// test/overview.integration.mjs; the two editions promise the same API.
+//
+// NOTE: not run locally by this worker — cloud integration tests need
+// Postgres, which a sibling agent owns for this branch. See the worker
+// report for issue #297 step 2.
+const putNoteEntry = (habitIdArg, date, body) => fetch(
+  `${overviewBase}/api/habits/${habitIdArg}/entries/${date}`,
+  {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }
+).then((r) => r.json());
+
+await putNoteEntry(habitId, isoDaysAgo(2), { value: 9, notes: 'wrote about it' });
+await putNoteEntry(habitId, isoDaysAgo(1), { value: 9 });
+await putNoteEntry(habitId, isoDaysAgo(0), { status: 'skip', notes: 'skipped but noted' });
+
+const notesView = await getOverview({ days: 7 });
+const notesRow = notesView.habits.find((h) => h.id === habitId);
+ck("cloud: a day with a note has its date in that habit's notes",
+  notesRow.notes.includes(isoDaysAgo(2)), JSON.stringify(notesRow.notes));
+ck('cloud: a day with an entry and no note does NOT have its date in notes',
+  !notesRow.notes.includes(isoDaysAgo(1)), JSON.stringify(notesRow.notes));
+ck('cloud: a SKIPPED day with a note DOES have its date in notes',
+  notesRow.notes.includes(isoDaysAgo(0)), JSON.stringify(notesRow.notes));
+
+const noNotesHabitRes = await fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'NoNotes 297', type: 'boolean' }),
+});
+const noNotesHabit = await noNotesHabitRes.json();
+await putNoteEntry(noNotesHabit.id, isoDaysAgo(0), { value: 2 });
+const noNotesView = await getOverview({ days: 7 });
+const noNotesRow = noNotesView.habits.find((h) => h.id === noNotesHabit.id);
+ck('cloud: a habit with no notes carries [] rather than an absent key',
+  Array.isArray(noNotesRow.notes) && noNotesRow.notes.length === 0,
+  JSON.stringify(noNotesRow.notes));
+
 /* ---- issue #223: /overview's bestStreak reads the same credit rule ----
  *
  * `score` and `currentStreak` come from `summaryStats` and so from

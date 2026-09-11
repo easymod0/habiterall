@@ -21,7 +21,7 @@ import {
   subheading, windowedChart,
 } from '/shared/ui/components.js';
 import {
-  addDaysISO, datesEndingOn, formatDateShort, formatStamp, freqLabel,
+  addDaysISO, datesEndingOn, formatDateLong, formatDateShort, formatStamp, freqLabel,
   fromISOLocal, iso, targetLabel, todayISO,
 } from '/shared/ui/dates.js';
 import { isAvoided } from '/shared/ui/toggle.js';
@@ -40,6 +40,12 @@ import * as views from '/shared/ui/views.js';
 // and then *listed* newest first, so this is "how many of your best runs to
 // show", not "how far down the leaderboard to go".
 const STREAK_LIMIT = 10;
+
+// Dated notes listed on the notes card, newest first. The notes are already
+// all in memory (this page holds the whole unwindowed history), so this is a
+// rendering choice rather than a data one — a pager could be added later with
+// no change to what is fetched. See `buildNotesCard`.
+const NOTES_LIMIT = 20;
 
 /**
  * How this account spells an amount, for the head's `targetLabel`.
@@ -131,9 +137,21 @@ let openSeq = 0;
  * version of this file over a cached other version of `app.js` behaves
  * identically either way round.
  *
+ * **`editDay` is the dashboard's route into the day editor, not a new export.**
+ * `ui/dashboard.js`'s `listHost.editDay` calls this — already imported there as
+ * `openHabit` — with `{editDay: date}`, precisely because the list holds no
+ * note TEXT to seed the dialog with and this page does (see `StripHost.editDay`
+ * above `detailHost`, and #224). The URL is never given the date —
+ * `routes.go` above still writes only `#/habit/<id>` — because a
+ * `#/habit/42/day/...` form would be a routing change reaching Android's deep
+ * links, which this is not.
+ *
+ * @param {number} id
+ * @param {{editDay?: string}} [opts]  a date to open the day editor for, once
+ *   this habit has actually rendered
  * @returns {Promise<boolean>} false only when the request failed
  */
-export async function open(id) {
+export async function open(id, { editDay } = {}) {
   // Taken before anything is awaited, so the number describes THIS request.
   const ticket = ++openSeq;
 
@@ -184,6 +202,12 @@ export async function open(id) {
       // nothing moved, not like a jump and a glide back.
       requestAnimationFrame(() => window.scrollTo(0, scroll));
     }
+    // Only once this habit has actually rendered — the render above just
+    // assigned the module-scope maps `detailHost.editDay` reads — and never
+    // for a future date, the same refusal the calendar's own onPick already
+    // makes (`isFuture`, charts.js): nothing is written about a day that has
+    // not happened.
+    if (editDay && editDay <= todayISO()) detailHost.editDay(id, editDay);
     return true;
   } catch (e) {
     toast(e.message);
@@ -325,11 +349,14 @@ const detailHost = {
   habit: (id) => (openHabit && openHabit.id === id ? openHabit : null),
 
   read(id, date) {
-    if (!openHabit || openHabit.id !== id) return { value: undefined, isSkip: false };
+    if (!openHabit || openHabit.id !== id) {
+      return { value: undefined, isSkip: false, hasNote: false };
+    }
     return {
       // Whether the map HOLDS the date, never what it holds.
       value: Object.hasOwn(openEntriesByDate, date) ? openEntriesByDate[date] : undefined,
       isSkip: openSkipSet.has(date),
+      hasNote: !!openNotesByDate[date],
     };
   },
 
@@ -434,6 +461,20 @@ const detailHost = {
   },
 
   refresh: () => refresh(openHabit?.id),
+
+  // The secondary affordance's second half — `dayCells` wires a cell's
+  // `contextmenu`/Shift+Enter to this rather than to the plain tap. This page
+  // holds the whole unwindowed history, including every note's real text
+  // (`openNotesByDate`), so it can open the dialog directly and seed it
+  // truthfully — unlike `ui/dashboard.js`'s host, which holds only the
+  // fortnight it asked for and routes through `open(id, {editDay})` instead
+  // (see the `StripHost.editDay` doc above `edit`, and #224).
+  editDay(id, date) {
+    if (!openHabit || openHabit.id !== id) return;
+    openDayDialog(
+      openHabit, date, openEntriesByDate[date], openSkipSet.has(date), openNotesByDate[date],
+      detailHost);
+  },
 };
 
 /**
@@ -652,6 +693,9 @@ const CARDS = new Map([
     // enough, on the one card anybody pages by a date rather than a window.
     forget: () => { state.calEnd = null; },
   }],
+  // No `forget`: the notes card owns no paging position, the same reason
+  // streaks/resilience/awards/weekdays omit one.
+  ['notes', { build: buildNotesCard }],
   ['streaks', { build: buildStreaksCard }],
   ['resilience', { build: buildResilienceCard }],
   ['awards', { build: buildAwardsCard }],
@@ -1187,6 +1231,11 @@ function buildCalendarCard(
       skips: skipSet,
       unknownMark: settings.get('questionMarks'),
       tabStop,
+      // The LIVE map, not a snapshot: `notesByDate` is mutated (see the
+      // comment at this card's `calRedraw = draw` assignment below), so
+      // reading it inside `draw` rather than closing over it once means an
+      // offline note write is drawn on the next redraw with no refetch.
+      notes: notesByDate,
       // Bands behind runs of 3+, so a good stretch reads as one thing rather
       // than a scatter of filled squares.
       streaks: stats.streaks,
@@ -1268,6 +1317,23 @@ function buildCalendarCard(
       sw.style.boxShadow = 'inset 0 0 0 1px ' + shade(color, 0.55);
       legend.append(sw);
       legend.append(document.createTextNode('In a run'));
+    }
+
+    // Same idiom as "In a run" just above, for the same reason: asks
+    // `calendarChart` what it actually drew rather than recomputing "does
+    // any date in `notesByDate` fall in this window" here, which would
+    // disagree with the grid on exactly the same class of case — a note
+    // months outside the drawn weeks, or a window with none in it at all. A
+    // legend advertising a mark the cells do not carry is the same defect as
+    // a mark the legend does not explain.
+    if (Number(calSvg.getAttribute('data-note-marks')) > 0) {
+      const sw = document.createElement('span');
+      sw.className = 'legend-swatch';
+      sw.style.background = 'var(--surface)';
+      sw.style.boxShadow = 'inset 0 0 0 1px var(--text-dim)';
+      sw.style.borderRadius = '50%';
+      legend.append(sw);
+      legend.append(document.createTextNode('Has a note'));
     }
 
     if (isAvoided(habit)) {
@@ -1640,6 +1706,72 @@ function buildFrequencyCard({ habit, stats, color, chartWidth }) {
     render: (slice) => frequencyChart(slice, color, { width: chartWidth }),
   });
   return fc;
+}
+
+/**
+ * A habit's dated notes, newest first — so "what did I write about this
+ * habit" is not a date-by-date hunt through the calendar.
+ *
+ * Reads `notesByDate`, the same live map `buildCalendarCard` draws its dot
+ * from and `openDayDialog` seeds from (see the note on `openNotesByDate`
+ * above `detailHost`) — this card owns no second copy of a note's text, and
+ * nothing here decides what counts as a note. Returns null for a habit with
+ * none at all, the same rule `buildResilienceCard` and `buildAwardsCard`
+ * follow for their own kind of nothing.
+ *
+ * Capped at `NOTES_LIMIT`, newest first, with a muted line naming how many
+ * earlier notes are not shown — the same shape `STREAK_LIMIT` gives the
+ * streaks card, for the same reason: a cap here is a rendering choice over
+ * data already in hand, not a narrower fetch, so nothing is lost by it and a
+ * pager can be added later with no change to what this card is handed.
+ *
+ * Each row is a `<button>`, not a `<div>` with a click handler — the only one
+ * of the three ways into the day editor that is keyboard-reachable by
+ * construction rather than by a shortcut — and it calls `detailHost.editDay`,
+ * which this page can answer truthfully because it holds the whole unwindowed
+ * history, note text included.
+ */
+function buildNotesCard({ habit, notesByDate }) {
+  const dates = Object.keys(notesByDate).sort().reverse();
+  if (!dates.length) return null;
+
+  const c = card('Notes', null);
+
+  const shown = dates.slice(0, NOTES_LIMIT);
+  const list = document.createElement('div');
+  list.className = 'notes-list';
+
+  for (const date of shown) {
+    const d = fromISOLocal(date);
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'note-row';
+    row.addEventListener('click', () => detailHost.editDay(habit.id, date));
+
+    const when = document.createElement('div');
+    when.className = 'note-date';
+    when.textContent = formatDateShort(d);
+    when.title = formatDateLong(d);
+
+    const text = document.createElement('div');
+    text.className = 'note-text';
+    // A note is user content: `textContent` only, never `innerHTML`.
+    text.textContent = notesByDate[date];
+
+    row.append(when, text);
+    list.append(row);
+  }
+  c.append(list);
+
+  const hidden = dates.length - shown.length;
+  if (hidden > 0) {
+    const more = document.createElement('p');
+    more.className = 'hint';
+    more.textContent = `${hidden} earlier note${hidden === 1 ? '' : 's'} not shown.`;
+    c.append(more);
+  }
+
+  return c;
 }
 
 export function init() {

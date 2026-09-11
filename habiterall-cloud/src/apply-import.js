@@ -407,10 +407,15 @@ export async function applyImport(userId, habits, mode = 'merge', categories = [
           continue;
         }
 
-        // Clamped to what `parseEntry` accepts, read from LIMITS rather than
-        // restated: the literal 500 that was here is the same number by
-        // coincidence rather than by construction, and personal had no clamp at
-        // all — so a note this edition truncates was one that edition stored.
+        // `parseEntry` now REJECTS a note over LIMITS.notes instead of
+        // clamping it — a live write is one note the caller can see and fix.
+        // Import deliberately does not share that behaviour: a bulk restore
+        // of data the user already has must not abort on one long note (and
+        // Loop's own `Repetitions.notes` has no 500 limit), so this clamps
+        // rather than rejecting. Read from LIMITS rather than restated: the
+        // literal 500 that was here is the same number by coincidence rather
+        // than by construction, and personal had no clamp at all — so a note
+        // this edition truncates was one that edition stored.
         const notes = String(e.notes ?? '').slice(0, LIMITS.notes);
 
         // Read once, and by TYPE — `entryValue`, not `Number()`, which read
