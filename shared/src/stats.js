@@ -721,6 +721,90 @@ function trendOver(scores, alpha) {
   return { days: TREND_LOOKBACK_DAYS, change: last.score - found.score, minWindow };
 }
 
+/* ---------- regularity ---------- */
+
+/**
+ * The SPREAD of the gaps between completions — never their mean. The mean gap
+ * is `denominator / numerator` by definition for any habit hitting its rate,
+ * so a mean-gap tile says nothing the frequency does not already say: at
+ * `freq_numerator: 3, freq_denominator: 7`, Mon/Wed/Fri gives gaps `2, 2, 3`
+ * and three consecutive days a week gives `1, 1, 5` — the same mean, 2.33,
+ * over the SAME number of completions, and the second is the habit that keeps
+ * breaking. The population standard deviation of the closed gaps is what
+ * tells them apart.
+ *
+ * **Withheld under the same gate the awards card is** — an at-most habit
+ * resolved to `success` — because under that resolution every unanswered day
+ * reads as a "completion", and the gaps between them measure how often the
+ * calendar was silent rather than anything the user did. Asked through
+ * `unansweredCounts` rather than restated, so the precedence (a habit's own
+ * `at_most_unlogged` beating the account setting) cannot drift from the one
+ * place it is decided.
+ *
+ * **Skips are transparent**, exactly as `computeMissRuns`/`computeStreaks`
+ * treat them: a planned rest day inside a run of completions must not widen
+ * the gap either side of it, or `skipDays` used correctly reports as
+ * irregular for doing the thing skips are for.
+ *
+ * **The last gap is OPEN and is not counted as a gap yet** — the same
+ * distinction `computeRecovery` draws between a closed lapse and `openRun`,
+ * reported separately for the same reason: a habit that completed five days
+ * ago has not yet "failed" a sixth-day gap, it merely has one still running.
+ *
+ * `spread` needs at least TWO closed gaps: the population standard deviation
+ * of a single sample is 0, which would claim perfect regularity from one data
+ * point. `mean` needs only one.
+ *
+ * A second walk over `dates`, calling `isCompleted` per day — roughly the
+ * cost of the coverage pass. `computeStats` has exactly one caller
+ * (`/habits/:id/stats`, one habit at a time), so that cost is accepted
+ * outright rather than hidden behind an opt-out the way `coverage` is: this
+ * is not paid per habit on the dashboard's hot path.
+ *
+ * @param {import('./types.js').Habit} habit
+ * @param {Map<string, any>} entryMap
+ * @param {string[]} dates
+ * @param {*} [unlogged]
+ * @param {string} [creditFrom] see `answeredBy`.
+ * @returns {{applicable: boolean, gaps: number, mean: number|null,
+ *            spread: number|null, openGap: number|null}}
+ */
+function regularityOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
+                        creditFrom = undefined) {
+  if (unansweredCounts(habit, unlogged)) {
+    return { applicable: false, gaps: 0, mean: null, spread: null, openGap: null };
+  }
+
+  const closedGaps = [];
+  let sinceLast = 0;
+  let everCompleted = false;
+
+  for (const date of dates) {
+    const done = isCompleted(habit, entryMap.get(date), unlogged, answeredBy(date, creditFrom));
+    if (done === null) continue; // a skip states nothing about the gap it sits inside
+
+    sinceLast += 1;
+    if (done === true) {
+      if (everCompleted) closedGaps.push(sinceLast);
+      sinceLast = 0;
+      everCompleted = true;
+    }
+  }
+
+  const gaps = closedGaps.length;
+  const mean = gaps >= 1 ? closedGaps.reduce((sum, g) => sum + g, 0) / gaps : null;
+
+  // Two is not arbitrary — the population SD of a single sample is 0, which
+  // would report PERFECT regularity from exactly one gap.
+  let spread = null;
+  if (gaps >= 2) {
+    const variance = closedGaps.reduce((sum, g) => sum + (g - mean) ** 2, 0) / gaps;
+    spread = Math.sqrt(variance);
+  }
+
+  return { applicable: true, gaps, mean, spread, openGap: everCompleted ? sinceLast : null };
+}
+
 /* ---------- on pace ---------- */
 
 /**
@@ -1886,6 +1970,7 @@ export function computeStats(habit, entries,
     score: scores.length ? scores[scores.length - 1].score : 0,
     scores,
     trend: trendOver(scores, alpha),
+    regularity: regularityOver(habit, entryMap, dates, unlogged, creditFrom),
     streaks,
     currentStreak: currentStreak(streaks, end),
     bestStreak: bestStreak(streaks),

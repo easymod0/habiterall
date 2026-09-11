@@ -1600,6 +1600,157 @@ test('TREND_CONVERGED_SCORE is the top strength band', () => {
   assert.equal(STRENGTH_BANDS[STRENGTH_BANDS.length - 1], 0.95);
 });
 
+/* ---------- regularity: the spread of the gaps between completions ---------- */
+
+const bool = (over = {}) => ({
+  type: 'boolean', target_value: 0, target_type: 'at_least', ...over,
+});
+
+test('same mean, different spread — the whole point of the feature', () => {
+  // Mon/Wed/Fri versus three consecutive days a week, both
+  // freq_numerator: 3, freq_denominator: 7 — same frequency, same number of
+  // completions. A mean-gap tile could not tell these apart, because the mean
+  // gap is denominator/numerator by definition for any habit hitting its
+  // rate. Only the SPREAD does: 2, 2, 3 repeating versus 1, 1, 5 repeating.
+  //
+  // Two full weeks plus a trailing Monday, so the window holds exactly two
+  // full CYCLES of the gap pattern rather than a truncated one — a window
+  // that stopped at the second Friday would still be missing the "3" (or
+  // "5") gap back to a third week, and the two means would not actually be
+  // equal at that truncation. 2026-06-01 is a Monday.
+  const gymHabit = { ...bool(), freq_numerator: 3, freq_denominator: 7 };
+  const end = '2026-06-15'; // the trailing Monday
+  const rows = (dates) => dates.map((date) => ({ date, value: YES, status: '' }));
+
+  const monWedFri = computeStats(gymHabit, rows([
+    '2026-06-01', '2026-06-03', '2026-06-05',
+    '2026-06-08', '2026-06-10', '2026-06-12',
+    '2026-06-15',
+  ]), { end });
+  const threeStraight = computeStats(gymHabit, rows([
+    '2026-06-01', '2026-06-02', '2026-06-03',
+    '2026-06-08', '2026-06-09', '2026-06-10',
+    '2026-06-15',
+  ]), { end });
+
+  assert.equal(monWedFri.regularity.gaps, 6);
+  assert.equal(threeStraight.regularity.gaps, 6);
+
+  assert.ok(
+    Math.abs(monWedFri.regularity.mean - threeStraight.regularity.mean) < 1e-9,
+    `expected equal means, got ${monWedFri.regularity.mean} vs ${threeStraight.regularity.mean}`
+  );
+  assert.ok(Math.abs(monWedFri.regularity.mean - 7 / 3) < 1e-9);
+
+  // Hand-computed population SDs over [2,2,3,2,2,3] and [1,1,5,1,1,5], each
+  // with mean 7/3 — pinned as literals rounded to 3 decimals, so a change to
+  // the arithmetic (a sample SD, say) shows up here even though the means
+  // still agree.
+  assert.equal(Math.round(monWedFri.regularity.spread * 1000) / 1000, 0.471);
+  assert.equal(Math.round(threeStraight.regularity.spread * 1000) / 1000, 1.886);
+  assert.notEqual(monWedFri.regularity.spread, threeStraight.regularity.spread);
+});
+
+test('a skipped day inside a gap is transparent', () => {
+  // Complete Monday, skip Tuesday, complete Wednesday: the skip must not
+  // widen the gap to 2, or a rest day taken through skipDays reports as
+  // irregular for doing the thing skips exist for.
+  const habit = bool();
+  const withSkip = computeStats(habit, [
+    { date: '2026-06-01', value: YES, status: '' },
+    { date: '2026-06-02', value: 0, status: 'skip' },
+    { date: '2026-06-03', value: YES, status: '' },
+  ], { end: '2026-06-03' });
+  assert.equal(withSkip.regularity.gaps, 1);
+  assert.equal(withSkip.regularity.mean, 1);
+
+  // The pair is the assertion: with the Tuesday row removed entirely (an
+  // UNANSWERED day, not a stated skip) the day counts against the gap, so
+  // the same two completions now read as a 2-day gap.
+  const noRow = computeStats(habit, [
+    { date: '2026-06-01', value: YES, status: '' },
+    { date: '2026-06-03', value: YES, status: '' },
+  ], { end: '2026-06-03' });
+  assert.equal(noRow.regularity.gaps, 1);
+  assert.equal(noRow.regularity.mean, 2);
+});
+
+test('the open gap is reported separately and is not counted as a gap', () => {
+  // Three completions (Mon, Wed, Fri — two closed gaps of 2) and then six
+  // silent days to `end`, so the trailing gap since the last completion is
+  // open rather than closed.
+  const habit = bool();
+  const stats = computeStats(habit, [
+    { date: '2026-06-01', value: YES, status: '' },
+    { date: '2026-06-03', value: YES, status: '' },
+    { date: '2026-06-05', value: YES, status: '' },
+  ], { end: '2026-06-11' }); // 6 days after the last completion
+  assert.equal(stats.regularity.openGap, 6);
+  assert.equal(stats.regularity.gaps, 2); // pinned: the open gap is not a third
+  assert.equal(stats.regularity.mean, 2);
+});
+
+test('one gap yields no spread', () => {
+  // Exactly two completions is exactly one closed gap, and the population SD
+  // of a single sample is 0 — which would claim PERFECT regularity from one
+  // data point. `spread` must withhold rather than report that.
+  const habit = bool();
+  const stats = computeStats(habit, [
+    { date: '2026-06-01', value: YES, status: '' },
+    { date: '2026-06-03', value: YES, status: '' },
+  ], { end: '2026-06-03' });
+  assert.equal(stats.regularity.gaps, 1);
+  assert.equal(stats.regularity.mean, 2);
+  assert.equal(stats.regularity.spread, null);
+});
+
+test('an at-most habit resolved to `success` is withheld', () => {
+  // Every unanswered day reads as a "completion" under that resolution, so a
+  // gap between them measures how often the calendar was silent rather than
+  // anything the user did — the same habit shape the awards gate withholds
+  // its whole card for, and it wants the same answer.
+  const entries = [
+    { date: '2026-06-01', value: 0, status: '' },
+    { date: '2026-06-03', value: 0, status: '' },
+  ];
+  const end = '2026-06-03';
+
+  const withheld = computeStats(atMostHabit, entries, { end, unlogged: 'success' });
+  assert.equal(withheld.regularity.applicable, false);
+  assert.equal(withheld.regularity.gaps, 0);
+  assert.equal(withheld.regularity.mean, null);
+  assert.equal(withheld.regularity.spread, null);
+  assert.equal(withheld.regularity.openGap, null);
+
+  // The pair is the assertion: the SAME habit under `unlogged: 'miss'`
+  // resolves real figures instead.
+  const kept = computeStats(atMostHabit, entries, { end, unlogged: 'miss' });
+  assert.equal(kept.regularity.applicable, true);
+  assert.equal(kept.regularity.gaps, 1);
+  assert.equal(kept.regularity.mean, 2);
+
+  // And the habit's OWN `at_most_unlogged: 'success'` override beats the
+  // account's `unlogged: 'miss'` — proving `unansweredCounts` was asked
+  // rather than the account setting read directly.
+  const overridden = { ...atMostHabit, at_most_unlogged: 'success' };
+  const stillWithheld = computeStats(overridden, entries, { end, unlogged: 'miss' });
+  assert.equal(stillWithheld.regularity.applicable, false);
+});
+
+test('never completed', () => {
+  // Only stated lapses (rows holding 0, not skips) — the habit has never
+  // once been completed, so there is no gap to report at all.
+  const habit = bool();
+  const stats = computeStats(habit, [
+    { date: '2026-06-01', value: 0, status: '' },
+    { date: '2026-06-02', value: 0, status: '' },
+  ], { end: '2026-06-02' });
+  assert.equal(stats.regularity.gaps, 0);
+  assert.equal(stats.regularity.mean, null);
+  assert.equal(stats.regularity.spread, null);
+  assert.equal(stats.regularity.openGap, null);
+});
+
 /* ---------- summaryStats: the two-field entry point /overview uses ---------- */
 
 test('summaryStats matches the score and currentStreak computeStats would return', () => {

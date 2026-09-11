@@ -125,6 +125,9 @@
  * @property {ScorePoint[]} scores
  * @property {Trend} trend             how the score moved over the trailing
  *   window — see `Trend` for the units and the floor.
+ * @property {Regularity} regularity   the spread of the gaps between
+ *   completions — see `Regularity` for why spread and not mean, and for the
+ *   at-most/`success` shape it is withheld for.
  * @property {Streak[]} streaks
  * @property {number} currentStreak
  * @property {number} bestStreak
@@ -287,6 +290,34 @@
  *   null when the habit has not yet reached `minWindow`
  * @property {number} minWindow        the earliest day count `change` can be
  *   trusted from, derived from where this habit's own curve converges
+ */
+
+/**
+ * The SPREAD of the gaps between completions, not their mean — a mean gap is
+ * `denominator / numerator` by definition for any habit hitting its rate, so
+ * only the spread says anything the frequency does not. `applicable: false`
+ * is the at-most/`success` shape: under that resolution every unanswered day
+ * reads as a completion, so a gap between them is not a measure of anything,
+ * and the whole awards card is withheld for the identical reason. Every
+ * `null` figure here is the ABSENCE of a claim, not a zero — `mean`/`spread`
+ * null under `applicable: true` still means "not enough data", never "no
+ * gap". `openGap` is the trailing, still-running gap since the last
+ * completion, reported apart from `gaps`/`mean`/`spread` because it has not
+ * closed yet — the same distinction `Resilience`'s `openRun` draws against a
+ * closed lapse.
+ * @typedef {object} Regularity
+ * @property {boolean} applicable      false only for an at-most habit
+ *   resolved to `success` (`unansweredCounts`) — every figure below is null
+ *   in that case
+ * @property {number} gaps             count of CLOSED gaps between
+ *   completions; skipped days are transparent and widen nothing
+ * @property {number|null} mean        unrounded mean of the closed gaps, in
+ *   days; null when `gaps < 1`
+ * @property {number|null} spread      unrounded population standard
+ *   deviation of the closed gaps, in days; null when `gaps < 2` — the SD of
+ *   one sample is 0, which would claim perfect regularity from a single gap
+ * @property {number|null} openGap     days since the last completion, not
+ *   yet a closed gap; null when the habit has never been completed at all
  */
 
 /**
