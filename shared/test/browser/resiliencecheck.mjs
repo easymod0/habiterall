@@ -404,7 +404,8 @@ try {
         ck('Average lapse is the dash, not a figure',
           tileVal('Average lapse') === '—', String(tileVal('Average lapse')));
         // Deliberate, not a bug this change introduces: `worstLapse` counts
-        // the OPEN run (see `shared/CLAUDE.md`) while `recovery.averageLength`
+        // the OPEN run (`docs/decisions/awards.md`, which refuses it for the
+        // award ladder on exactly that ground) while `recovery.averageLength`
         // does not, so this habit shows a 1d longest lapse beside a dashed
         // average — the exact pair the issue describes as reading oddly.
         ck('Longest lapse counts the open run',

@@ -135,7 +135,11 @@ test('averageLength is the MEAN of the closed lapses, not the median', () => {
 
 test('averageLength is null, not 0, when there are no closed lapses', () => {
   const r = recoveryOf('xxxxx');
-  assert.equal(r.averageLength, null);
+  // `strictEqual`, not `equal`: loose equality makes `undefined == null` true,
+  // so the looser assertion also passed when the key was dropped from the
+  // empty-closed branch altogether — which is the half of "null, not 0" that
+  // this test exists to pin.
+  assert.strictEqual(r.averageLength, null);
   assert.ok(r.averageLength !== 0, 'null must not read as zero');
 });
 
