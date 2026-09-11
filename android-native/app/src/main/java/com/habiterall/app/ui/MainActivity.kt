@@ -1601,9 +1601,20 @@ internal fun CountDialog(
         mutableStateOf(initial?.let { formatAmount(it) } ?: formatAmount(habit.targetValue))
     }
     val parsed = parseAmount(text)
-    // Non-blank only: a box mid-typing that happens to be empty is not an
-    // error to shout about, and Save stays gated on `parsed != null` exactly
-    // as before this — matching `HabitFormScreen`'s treatment.
+    // Non-blank only: a box mid-typing that happens to be empty is not an error
+    // to shout about, and Save stays gated on `parsed != null` exactly as it was
+    // before this.
+    //
+    // Be exact about what that leaves, because a first version of this comment
+    // claimed parity with `HabitFormScreen` and there is none to claim: there a
+    // blank Target is VALID (`targetOk` admits `draft.target.isBlank()`, and Save
+    // stays enabled — a habit with no target is a real habit), so that screen has
+    // no silent-refusal state to match. Here blank is not a valid amount, so an
+    // emptied box is still a dead Save with nothing said. That is master's own
+    // behaviour and not a regression, and Clear is the control for the thing an
+    // empty box looks like it means; it is left alone rather than grown a
+    // sentence, because "type a number" under an empty box somebody is halfway
+    // through emptying is noise.
     val showComplaint = text.isNotBlank() && parsed == null
 
     AlertDialog(

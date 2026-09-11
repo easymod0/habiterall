@@ -564,17 +564,26 @@ resolves its own locale and a browser on the same device would resolve the
 same one, with nothing to carry over the wire.
 
 What that leaves open, plainly: an account that has explicitly CHOSEN `point`
-or `comma` is honoured in the browser and not here. That half is knowingly
-unfixed, and the reason a mirror is not a better trade is bounded by
-`parseAmount` itself — its `format` argument only decides which SPELLING of a
-thousands group is refused, never what is accepted, since a group is refused
-under both conventions and neither accepts one. So a wrong guess at the
-device's convention can only ever refuse a spelling loudly (a phone in the
-wrong convention shows "Type it without the thousands separator" on an input
-that was actually fine); it can never silently store a row out by a factor of a
-thousand. A sixth hand-written mirror would buy a better refusal message on an
-explicit-choice account, not a correct row — not the trade the root CLAUDE.md's
-mirror rule is for.
+or `comma` is honoured in the browser and not here. **State that cost the way
+the second review round corrected it, not the flatter way it was first
+written.** The first version of this paragraph said a wrong guess at the
+convention "can only ever refuse a spelling loudly, never silently store a row
+out by a thousand", and concluded a mirror would buy only a better message.
+That is false for one input class, and it is the input class the issue is named
+for: `point` chosen on a comma-locale phone, typing `10,000` and meaning ten
+thousand. The web refuses it as ambiguous; `deviceAmountFormat()` says COMMA,
+so that is not a group here, and it is read as **ten** and stored. Silently.
+So a mirror would buy a correct ROW for that account, not merely a sentence.
+
+What remains true, and is the actual reason the device tier was still the right
+call: under `auto` — the setting's own default and almost every account — the
+convention is resolved from the same device the typing happens on, so the
+reader and the typist agree by construction and the mismatch cannot arise at
+all. The exposure is explicit-choice accounts whose phone locale disagrees with
+what they chose, which is the half of #157 deliberately left open rather than a
+property the design lacks by accident. Anyone re-opening the mirror question
+should read this paragraph and `docs/decisions/amounts.md`'s `#157` section
+before re-deriving it.
 
 **The habit ORDER and the reorder GATE used to arrive from two different
 requests, and there was a narrow window where they could disagree — fixed

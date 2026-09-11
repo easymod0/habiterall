@@ -236,11 +236,20 @@ class CountDialogWiringGuard {
         )
         assertTrue(
             "`CountDialog` must show `amountComplaint(...)` when its refusal is " +
-                "non-blank, matching `HabitFormScreen`'s treatment — this is the " +
-                "one of the three amount surfaces that cannot be driven by a " +
-                "behavioural test (see the comment block above), so this guard is " +
-                "the only thing that can pin it.",
+                "non-blank — this is the one of the three amount surfaces that " +
+                "cannot be driven by a behavioural test (see the comment block " +
+                "above), so this guard is the only thing that can pin it.",
             body.contains("amountComplaint("),
+        )
+        // Both halves, because they fail differently and separately: the text
+        // without `isError` is an explanation in the default colour under a
+        // field that does not look wrong, which review noted this guard would
+        // have passed.
+        assertTrue(
+            "`CountDialog` must mark the field itself `isError` and not only " +
+                "print the complaint under it — a supporting line in the default " +
+                "colour under an unmarked box is not a refusal anyone reads.",
+            body.contains("isError"),
         )
     }
 

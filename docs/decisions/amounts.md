@@ -335,22 +335,43 @@ asks to be justified every time one is proposed. **The device tier** — resolve
 gets `auto` (the setting's own default, and almost everybody's value) exactly
 right, at the cost of ignoring an account's explicit choice on this one client.
 
-**The device tier is what shipped**, for a reason specific to this parser and not
-a general argument against mirrors: the cost of being wrong is bounded by
-construction. `parseAmount`'s `format` argument decides only which SPELLING of a
-thousands group is refused — `10,000` under `POINT`, `10.000` under `COMMA` —
-and never what is accepted, because a group is refused under BOTH conventions
-and neither accepts one. `8,5` and `8.5` are eight and a half either way. So a
-wrong guess at the device's own convention can only ever refuse a spelling
-loudly (an account on `comma` but a phone whose OS is set to `en-US` sees "Type
-it without the thousands separator" on an input that was actually fine); it can
-never silently store a row out by a factor of a thousand, which is the failure
-mode #108 and this issue both exist to close. A mirror would buy a better
-refusal message on that one mismatched phone, not a correct row — not the trade
-the root CLAUDE.md's mirror rule is for. `numberFormat` therefore stays in
-`AppSettingsDefaultsTest`'s `notMirrored` map; only the reason string changed,
-from "three readers that do not agree" to "one reader, by design, nothing
-crosses the wire."
+**The device tier is what shipped.** `parseAmount`'s `format` decides which
+SPELLING of a thousands group is refused — `10,000` under `POINT`, `10.000`
+under `COMMA` — and for everything anyone ordinarily types it is inert, because
+a group is exactly three digits and `8,5` and `8.5` are eight and a half under
+both. `numberFormat` therefore stays in `AppSettingsDefaultsTest`'s
+`notMirrored` map; only the reason string changed, from "three readers that do
+not agree" to "one reader, by design, nothing crosses the wire."
+
+**The first version of this section justified that with a safety property the
+design does not have, and the second review round caught it. Record the
+correction rather than the claim.** What was written was: a wrong guess at the
+convention "can only ever refuse a spelling loudly; it can never silently store
+a row out by a factor of a thousand", and therefore "a mirror would buy a better
+refusal message, not a correct row". The counter-example is the input this issue
+is named for. An account that has chosen `point`, on a phone whose locale is
+German:
+
+```
+web,     numberFormat = 'point':       parseAmount('10,000', 'point') → null (refused as ambiguous)
+Android, deviceAmountFormat() = COMMA: parseAmount("10,000", COMMA)   → 10.0  (stored, silently)
+```
+
+Ten where ten thousand was meant, with nothing on screen — the exact failure
+mode #108 exists to close, arriving on the client that declined the mirror. So a
+mirror WOULD buy that account a correct row.
+
+What survives the correction, and is the real reason the device tier was still
+right: the exposure is **explicit-choice accounts whose phone locale disagrees
+with the choice**, and nothing else. Under `auto` — the setting's own default
+and almost every account — the convention is resolved from the same device the
+typing happens on, so the reader and the typist agree by construction and the
+mismatch is unreachable rather than merely unlikely. That is a real and narrow
+scope, and it is `auto`'s own definition rather than a hopeful estimate. But it
+is a scope, not a proof of safety, and this section should not be read as the
+latter. `Amount.kt`'s `parseAmount` KDoc and `android-native/CLAUDE.md` both
+carry the corrected wording; all three were written wrong together and fixed
+together.
 
 **What is knowingly left open**: an account that has explicitly set `point` or
 `comma` — rather than leaving it on `auto` — is honoured in the browser and not

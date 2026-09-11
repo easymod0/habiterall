@@ -269,14 +269,22 @@ class AppSettingsDefaultsTest {
         // `point` or `comma` is honoured in the browser and not here. That half
         // is knowingly unfixed.
         //
-        // Why a sixth mirror is not the fix anyway: `parseAmount`'s `format`
-        // only decides which SPELLING of a thousands group is refused, never
-        // what is accepted — a group is refused under both conventions, and
-        // neither accepts one. So a wrong guess at the device's convention can
-        // only ever refuse a spelling loudly; it can never store a row out by a
-        // thousand. A sixth hand-written mirror would buy a better refusal
-        // message on an explicit-choice account, not a correct row — not the
-        // trade the root CLAUDE.md's mirror rule is for.
+        // What that costs is a ROW and not merely a message, and this comment
+        // said otherwise until the second review round. It claimed a wrong
+        // guess at the convention "can only ever refuse a spelling loudly,
+        // never store a row out by a thousand", and that is false for exactly
+        // the input the issue is named for: `point` chosen, phone locale
+        // German, user types `10,000` meaning ten thousand. The web refuses it
+        // as ambiguous. Here `deviceAmountFormat()` says COMMA, so it is not a
+        // group, and it reads as TEN and is stored. A mirror would buy that
+        // account a correct row.
+        //
+        // What is still true, and is why the device tier was nonetheless the
+        // right call: under `auto` the convention comes from the same device
+        // the typing happens on, so reader and typist agree by construction and
+        // the mismatch is unreachable. The exposure is explicit-choice accounts
+        // whose phone disagrees with what they chose — #157's deliberately open
+        // half, not an accident. Do not restate the flatter claim.
         "numberFormat" to "device tier by design (#157): one reader, nothing crosses the wire",
     )
 

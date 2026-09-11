@@ -1,5 +1,6 @@
 package com.habiterall.app.ui
 
+import java.math.BigDecimal
 import java.text.DecimalFormatSymbols
 import java.util.Locale
 
@@ -44,9 +45,35 @@ internal fun deviceAmountFormat(): AmountFormat =
  * [parseAmount]'s own domain rather than producing the one form it refuses.
  * There is no thousands separator to get right here, only which character is
  * the decimal point.
+ *
+ * **And it is a PLAIN string, never Java's exponent form, which is the second
+ * half of staying inside that domain and was missed the first time.**
+ * `Double.toString` switches to scientific notation below 1e-3 and at or above
+ * 1e7, so it wrote `5.0E-4` for an amount of 0.0005 and `1.23456785E7` for one
+ * of 12345678.5 — and [DECIMAL] admits no exponent, so the box was prefilled
+ * with a string its own parser refused. Same shape as the comma bug beside it
+ * and reachable on the same three surfaces: a habit whose target is under a
+ * thousandth opened with the whole form unsaveable, and (once these two dialogs
+ * started going through [parseAmount] at all) a DAY whose recorded amount is
+ * under a thousandth opened with Save dead over the number the user themselves
+ * recorded. Both values are ones [parseAmount] accepts as TYPED input, so this
+ * is a formatter that could not show back what its own parser had just taken.
+ *
+ * `BigDecimal.valueOf` takes `Double.toString`'s canonical shortest digits and
+ * `toPlainString` spells them without an exponent; `stripTrailingZeros` plus the
+ * `scale() <= 0` branch is what keeps `3.0` reading as `3` rather than `3.0` or
+ * `3E+1`-style scientific for a large integral. Nothing here bounds the domain
+ * the way `shared/public/ui/amount.js` does — that file quantises to six places
+ * and refuses past 1e12, and the two deliberately part there — this only makes
+ * sure that whatever IS shown can be read back.
  */
 internal fun formatAmount(v: Double, format: AmountFormat = deviceAmountFormat()): String {
-    val text = if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
+    if (!v.isFinite()) return v.toString()
+    val plain = BigDecimal.valueOf(v).stripTrailingZeros()
+    // `scale() <= 0` is a whole number, and `toPlainString` on one of those can
+    // still carry a trailing `.0`-shaped scale; go through the integer form so
+    // "3" is "3".
+    val text = if (plain.scale() <= 0) plain.toBigInteger().toString() else plain.toPlainString()
     return if (format == AmountFormat.COMMA) text.replace('.', ',') else text
 }
 
@@ -71,15 +98,29 @@ internal fun formatAmount(v: Double, format: AmountFormat = deviceAmountFormat()
  * non-zero integer part is required, so it fires on "10,000" and not on "0,255"
  * or ",255", where there are no thousands to separate.
  *
- * **[format] decides which spelling is a group, and never what is accepted.**
- * A group is refused under every convention, and neither convention accepts
- * one: "8,5" and "8.5" are both eight and a half under both, because a group is
- * exactly three digits. So a wrong guess at the device's convention can only
- * ever refuse something loudly; it can never store a row out by a thousand.
- * The consequence worth stating plainly: under [AmountFormat.COMMA], "10,000"
- * is **ten** (ten and zero thousandths) — which is what
- * `shared/public/ui/amount.js` answers for the same input on a comma account.
- * That is the convention working, not a regression.
+ * **[format] decides which spelling is a group, and it decides ONE input class
+ * in both directions — say the second one out loud, because a first version of
+ * this KDoc claimed it away.** Neither convention ever ACCEPTS its own group:
+ * "8,5" and "8.5" are eight and a half under both, since a group is exactly
+ * three digits, so for everything anyone ordinarily types the convention is
+ * inert. Where it bites is a three-digit group, and there it cuts both ways.
+ * Under [AmountFormat.COMMA], "10,000" is **ten** (ten and zero thousandths) —
+ * the same answer `shared/public/ui/amount.js` gives for that input on a comma
+ * account, and correct for a reader whose decimal point IS a comma.
+ *
+ * So the honest safety statement is conditional, not absolute. Under `auto` —
+ * the `numberFormat` default and almost every account — the convention is
+ * resolved from the same device the typing happens on, so the reading and the
+ * typist agree by construction and a wrong guess is not reachable. What IS
+ * reachable is the mismatch this client knowingly does not close: an account
+ * that has explicitly chosen `point` on a comma-locale phone types "10,000"
+ * meaning ten thousand, the web refuses it as ambiguous, and THIS reader takes
+ * it as ten and stores it. That is a silent row out by a thousand, for that one
+ * account class and that one input class — it is what a mirror would buy, and
+ * it is more than "a better refusal message". Do not restate the older, flatter
+ * claim that a wrong guess can only ever refuse: `android-native/CLAUDE.md` and
+ * `docs/decisions/amounts.md` both carry the corrected version, and #157's own
+ * open half is exactly this.
  *
  * `toDoubleOrNull` is generous in other ways nobody types into a goal box:
  * "1e3" is a thousand, "0x10" is sixteen, "Infinity" and "NaN" both parse, and

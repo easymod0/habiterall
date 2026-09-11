@@ -172,7 +172,23 @@ class HabitAmountTest {
         // own COMMA parser a string it refused. Without these four the property
         // this test claims to hold was never exercised by a value that could
         // have broken it.
-        val values = listOf(0.0, 1.0, 2.5, 8.0, 1000.0, 0.25, 2.345, 5.234, 1.005, 72.125)
+        val values = listOf(
+            0.0, 1.0, 2.5, 8.0, 1000.0, 0.25,
+            // The comma slice: a non-zero integer part with exactly three
+            // decimals matches GROUP_COMMA, so an always-dot formatter handed
+            // its own COMMA parser a string it refused.
+            2.345, 5.234, 1.005, 72.125,
+            // The EXPONENT slice, and it is the same trap one interval over —
+            // found by the second review round, against a list every value of
+            // which sat inside [0.001, 1e7), the exact range where
+            // `Double.toString` never reaches for scientific notation. Below
+            // and above it, it wrote "5.0E-4" and "1.23456785E7", which
+            // `DECIMAL` refuses outright. Every one of these is a value
+            // `parseAmount` accepts as TYPED input, so a formatter that could
+            // not spell them was one that could not show back what its own
+            // parser had just taken.
+            0.0005, 0.001, 1.0E-7, 12345678.5, 1.0E7, 1.0E20,
+        )
         for (v in values) {
             assertRoundTrips(v, POINT)
             assertRoundTrips(v, COMMA)
@@ -264,7 +280,23 @@ class HabitAmountTest {
         // passed against a `formatAmount` that always wrote a dot, which its
         // own COMMA parser then refused: 2.345, 5.234, 1.005 and 72.125 are
         // that shape.
-        val values = listOf(0.0, 1.0, 2.5, 8.0, 1000.0, 0.25, 2.345, 5.234, 1.005, 72.125)
+        val values = listOf(
+            0.0, 1.0, 2.5, 8.0, 1000.0, 0.25,
+            // The comma slice: a non-zero integer part with exactly three
+            // decimals matches GROUP_COMMA, so an always-dot formatter handed
+            // its own COMMA parser a string it refused.
+            2.345, 5.234, 1.005, 72.125,
+            // The EXPONENT slice, and it is the same trap one interval over —
+            // found by the second review round, against a list every value of
+            // which sat inside [0.001, 1e7), the exact range where
+            // `Double.toString` never reaches for scientific notation. Below
+            // and above it, it wrote "5.0E-4" and "1.23456785E7", which
+            // `DECIMAL` refuses outright. Every one of these is a value
+            // `parseAmount` accepts as TYPED input, so a formatter that could
+            // not spell them was one that could not show back what its own
+            // parser had just taken.
+            0.0005, 0.001, 1.0E-7, 12345678.5, 1.0E7, 1.0E20,
+        )
         for (v in values) {
             assertRoundTrips(v, POINT)
             assertRoundTrips(v, COMMA)
