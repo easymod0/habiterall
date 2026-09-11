@@ -528,6 +528,45 @@ try {
   // directly and never run `ui/detail.js` at all.
   await ev(`fetch('/api/habits/${seeded.habit}/entries/${seeded.day3}',
     { method: 'DELETE' })`);
+
+  // #297's notes fixture rides on THIS habit and inside THIS block's own
+  // offline episode — see the long note above the notes-card checks below for
+  // why it is not a probe habit of its own any more.
+  //
+  // Every write re-states the value it FOUND rather than choosing one, and the
+  // days are ones this habit has already logged, so the only thing that moves
+  // is the note. That is what makes folding safe: no row is created, no value
+  // changes, and the block clears every note it added before it ends, so the
+  // habit leaves this block exactly as it arrived.
+  const notesSeed = await ev(`(async () => {
+    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
+      return d.toISOString().slice(0, 10); };
+    const kept = iso(10), toClear = iso(11), toAdd = iso(12);
+    const rows = await (await fetch('/api/habits/${seeded.habit}/entries')).json();
+    const at = (date) => rows.find(e => e.date === date) ?? null;
+    const usable = (date) => !!at(date) && at(date).status !== 'skip';
+    const put = (date, notes) => {
+      const row = at(date);
+      if (!row) return false;
+      return fetch('/api/habits/${seeded.habit}/entries/' + date, {
+        method: 'PUT', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ value: row.value, notes }) }).then(r => r.ok);
+    };
+    const ok = [await put(kept, 'kept note'), await put(toClear, 'note to clear')];
+    return { kept, toClear, toAdd, seeded: ok.every(Boolean),
+             logged: [kept, toClear, toAdd].every(usable),
+             values: [kept, toClear, toAdd].map(d => at(d) && at(d).value) };
+  })()`);
+  // Asserted rather than assumed: the shared fixtures log this habit every day
+  // but every ninth (i % 9, fixtures.mjs), so 10/11/12 all carry a value — and
+  // if that ever changes, this says so instead of quietly testing a day with
+  // no row, where attaching a note WOULD move something.
+  ck('#297: the three days the notes fixture uses are already logged on this '
+     + 'habit, so attaching a note moves nothing but the note',
+     notesSeed.logged === true, JSON.stringify(notesSeed));
+  ck('#297: ...and both seeded notes landed', notesSeed.seeded === true,
+     JSON.stringify(notesSeed));
+
   await openHabit();
 
   // Scoped to the Calendar card by TITLE, never `document`: `windowedChart`
@@ -638,6 +677,168 @@ try {
      `range ${pagedRange} -> ${heldRange}, calEnd `
      + `${JSON.stringify(pagedEnd)} -> ${JSON.stringify(heldEnd)}`);
 
+  /* ---------- and so does the notes card (#297, review round) ---------- */
+
+  // Folded into the block above rather than standing on its own, and the
+  // reason is CI rather than tidiness. As its own block this cost a probe
+  // habit, a second full `openHabit()` boot and a second offline/reconnect
+  // cycle, and `Browser suites` then failed 3 runs out of 3 on this branch
+  // while staying green on 9 out of 9 elsewhere, including branches sharing
+  // the same runners — so it was caused by the change and not by a contended
+  // runner. Here it reuses the page, the habit and the offline episode that
+  // are already open: no habit created, no boot, no second reconnect.
+  //
+  // It belongs in THIS block on the merits too. The claim is the same one —
+  // offline, everything drawn from `notesByDate`/`entriesByDate` moves with
+  // the write, because `writeDay` never reaches the refetch that used to hide
+  // it (#230) — and the notes card is simply the third drawing of it, after
+  // the strip and the calendar.
+  //
+  // Placed after every calendar assertion above so it can perturb none of
+  // them, and before the reconnect so the writes are genuinely queued. The
+  // saves go through the day editor's own boolean choice, which re-states
+  // YES over days that already hold it, so no value moves here either.
+  console.log('--- offline, the notes card follows the note ---');
+
+  const noteRowTexts = () => ev(`[...document.querySelectorAll(
+    '#view-detail .notes-list .note-text')].map(e => e.textContent)`);
+  const hasNoteMark = (date) => ev(
+    `document.querySelector('${cellSel(date)} .check-box')`
+    + `?.classList.contains('has-note') ?? null`);
+
+  const beforeRows = await noteRowTexts();
+  ck('#297: the card starts with both notes, so it exists throughout this block',
+     beforeRows.includes('kept note') && beforeRows.includes('note to clear'),
+     JSON.stringify(beforeRows));
+
+  // Waited for, never slept on. What is waited FOR is the app's own signal
+  // that the save completed — the dialog closing and the outbox having GROWN
+  // past a count taken before the press — and deliberately not the notes card,
+  // which is the thing being asserted: a wait on the assertion would make the
+  // check tautological.
+  const noteSettle = async (before, what) => {
+    await waitUntil(ev, `(async () =>
+      document.getElementById('day-dialog').open === false
+      && ((await import('/shared/ui/store.js')).state.pending ?? 0) > ${before})()`,
+      { what });
+  };
+  /** Opens the editor from the card's own row — a real `<button>` click. */
+  const openNoteRow = async (text) => {
+    await ev(`[...document.querySelectorAll('#view-detail .notes-list .note-row')]
+      .find(r => r.querySelector('.note-text')?.textContent === ${JSON.stringify(text)})
+      ?.click()`);
+    await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
+      { what: `the day editor to open on the note ${JSON.stringify(text)}` });
+  };
+  /** Re-answers the day as done — the value it already holds — with no note. */
+  const saveCleared = async (what) => {
+    const before = await queued();
+    await ev(`document.getElementById('day-notes').value = ''`);
+    await ev(`document.querySelector('#day-boolean .day-choice[data-action="done"]').click()`);
+    await noteSettle(before, what);
+  };
+
+  /* clearing a note offline drops its row from the card */
+
+  await openNoteRow('note to clear');
+  ck('#297: the day editor opens on the note to clear',
+     await ev(`document.getElementById('day-dialog').open`) === true);
+  await saveCleared('the queued clear to close the dialog and reach the outbox');
+
+  const afterClear = {
+    rows: await noteRowTexts(),
+    dot: await hasNoteMark(notesSeed.toClear),
+    outbox: await queued(),
+  };
+  ck('#297: the cleared note was queued rather than sent', afterClear.outbox >= 1,
+     JSON.stringify(afterClear));
+  ck('#297: ...and its row is gone from the notes card in the SAME repaint that '
+     + 'drops its dot from the strip — not left showing the old text',
+     !afterClear.rows.includes('note to clear') && afterClear.dot === false,
+     JSON.stringify(afterClear));
+  ck('#297: ...while the OTHER note stays, which is the proof the card was '
+     + 'REDRAWN rather than emptied outright',
+     afterClear.rows.includes('kept note'), JSON.stringify(afterClear));
+
+  /* adding a note offline, to a day that had none, draws a row */
+
+  const addCentre = await ev(`(() => {
+    const el = document.querySelector('${cellSel(notesSeed.toAdd)}');
+    if (!el) return null;
+    const b = el.getBoundingClientRect();
+    return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+  })()`);
+  ck('#297: the day with no note is on screen to be right-clicked', !!addCentre,
+     JSON.stringify(addCentre));
+  if (addCentre) {
+    // A REAL right-click over CDP, not a scripted `dispatchEvent` — a
+    // synthetic one proves nothing about the gesture a desktop right-click and
+    // an Android long-press both arrive as.
+    const beforeAdd = await queued();
+    await send('Input.dispatchMouseEvent', { type: 'mousePressed',
+      x: addCentre.x, y: addCentre.y, button: 'right', clickCount: 1 }, sessionId);
+    await send('Input.dispatchMouseEvent', { type: 'mouseReleased',
+      x: addCentre.x, y: addCentre.y, button: 'right', clickCount: 1 }, sessionId);
+    await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
+      { what: 'the day editor to open on the noteless day' });
+    ck('#297: a contextmenu on the noteless day opens the day editor',
+       await ev(`document.getElementById('day-dialog').open`) === true);
+    await ev(`document.getElementById('day-notes').value = 'a fresh offline note'`);
+    await ev(`document.querySelector('#day-boolean .day-choice[data-action="done"]').click()`);
+    await noteSettle(beforeAdd, 'the queued add to close the dialog and reach the outbox');
+
+    const afterAdd = {
+      rows: await noteRowTexts(),
+      dot: await hasNoteMark(notesSeed.toAdd),
+      outbox: await queued(),
+    };
+    ck('#297: the added note was queued rather than sent', afterAdd.outbox >= 1,
+       JSON.stringify(afterAdd));
+    ck('#297: ...and a row for it appears in the notes card, in the same '
+       + 'repaint that lights its dot',
+       afterAdd.rows.includes('a fresh offline note') && afterAdd.dot === true,
+       JSON.stringify(afterAdd));
+  }
+
+  /* clearing the LAST note offline hides the card */
+
+  // The branch nothing else in the repo reaches. `buildNotesCard` returns null
+  // for a habit with no notes, so a repaint that empties the map has to HIDE
+  // the card it cannot un-build — a promise made in `detail.js`, in
+  // `shared/public/CLAUDE.md` and in the archive, and until this case it rested
+  // on nothing. Clearing the two notes this habit now has also restores it to
+  // the note-free state the fixtures left it in.
+  const notesCardDisplay = () => ev(`(() => {
+    const c = [...document.querySelectorAll('#view-detail .card')]
+      .find(x => x.querySelector('.card-title')?.textContent === 'Notes');
+    return { found: !!c, display: c ? getComputedStyle(c).display : null,
+             rows: [...document.querySelectorAll('#view-detail .notes-list .note-text')]
+               .map(e => e.textContent) };})()`);
+
+  await openNoteRow('kept note');
+  await saveCleared('the queued clear of the kept note to reach the outbox');
+  const oneLeft = await notesCardDisplay();
+  ck('#297: with ONE note left the card is still shown, which is what makes '
+     + 'the hide below a hide and not a card that was never there',
+     oneLeft.rows.length === 1 && oneLeft.found === true
+       && oneLeft.display !== 'none',
+     JSON.stringify(oneLeft));
+
+  await openNoteRow('a fresh offline note');
+  await saveCleared('the queued clear of the last note to reach the outbox');
+  // `getComputedStyle(...).display`, never `.hidden` — the attribute is set
+  // either way and what carries it is `[hidden] { display: none !important }`
+  // in the stylesheet, so a property read would stay green with that rule
+  // gone. Hidden AND emptied: `querySelectorAll` reads through `hidden`, so a
+  // card that merely went invisible would still answer the cleared note to
+  // anything asking what it lists.
+  const noneLeft = await notesCardDisplay();
+  ck("#297: clearing the habit's LAST note offline hides the notes card rather "
+     + 'than leaving an empty list',
+     noneLeft.found === true && noneLeft.display === 'none'
+       && noneLeft.rows.length === 0,
+     JSON.stringify(noneLeft));
+
   const drainedDay3 = await reconnectAndDrain();
   // The optimistic redraw is only honest if the write it drew actually lands,
   // which is the `unknowncheck.mjs` model this suite already follows: ask the
@@ -646,218 +847,21 @@ try {
   ck('and the queued write lands on reconnect, so the redraw told the truth',
      day3Flushed !== null && day3Flushed.value === 2,
      `${JSON.stringify(day3Flushed)}${drainedDay3}`);
-
-  /* ---------- offline, the notes card redraws with the tap (#297, review round) ---------- */
-
-  console.log('--- offline, the notes card follows the note ---');
-  // A dedicated probe with TWO notes already stored, so the card exists before
-  // this block goes offline and stays up throughout — clearing one of the two
-  // must not be confused with the card never having been built at all. Dates
-  // ten-plus days back, untouched by any tap elsewhere in this file.
-  const notesRedrawProbe = await ev(`(async () => {
-    const h = await (await fetch('/api/habits', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ name: 'Strip notes redraw probe', type: 'boolean',
-        color: '#0ea5e9' }),
-    })).json();
-    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
-      return d.toISOString().slice(0, 10); };
-    const kept = iso(10), toClear = iso(11), toAdd = iso(12);
-    // YES is 2, and a boolean habit accepts ONLY 0, 2 or 3 (parseEntry) -- a
-    // 1 here is a 400 and no row at all, which is a seed that fails in
-    // silence and takes every assertion below with it. Hence the ok array: a
-    // fixture this block's whole claim rests on has to say that it landed.
-    // (No backticks in here: this whole source is a template literal.)
-    const put = (date, body) => fetch('/api/habits/' + h.id + '/entries/' + date, {
-      method: 'PUT', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body) }).then(r => r.ok);
-    const ok = [
-      await put(kept, { value: 2, notes: 'kept note' }),
-      await put(toClear, { value: 2, notes: 'note to clear' }),
-      await put(toAdd, { value: 2 }),
-    ];
-    return { id: h.id, kept, toClear, toAdd, seeded: ok.every(Boolean) };
-  })()`);
-  ck('the notes-redraw probe habit was created', !!notesRedrawProbe?.id,
-     JSON.stringify(notesRedrawProbe));
-  ck('...and all three of its seed rows actually landed',
-     notesRedrawProbe?.seeded === true, JSON.stringify(notesRedrawProbe));
-
-  if (notesRedrawProbe?.id) {
-    await openHabit(notesRedrawProbe.id);
-
-    const noteRowTexts = () => ev(`[...document.querySelectorAll(
-      '#view-detail .notes-list .note-text')].map(e => e.textContent)`);
-    const hasNoteMark = (date) => ev(
-      `document.querySelector('${cellSel(date)} .check-box')`
-      + `?.classList.contains('has-note') ?? null`);
-
-    const beforeRows = await noteRowTexts();
-    ck('the card starts with both notes, so it exists throughout this block',
-       beforeRows.includes('kept note') && beforeRows.includes('note to clear'),
-       JSON.stringify(beforeRows));
-
-    await send('Network.enable', {}, sessionId);
-    await send('Network.emulateNetworkConditions',
-      { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 }, sessionId);
-
-    /* ---------- clearing a note offline drops its row from the card ---------- */
-
-    // Waited for, never slept on — this whole block used fixed sleeps first
-    // and that is the rule the root `CLAUDE.md` states outright: a predicate
-    // throws naming what it wanted, where a duration is a guess in both
-    // directions. It also cost the fleet's LONGEST suite another ~13s, which
-    // is what tipped a contended CI runner into a 20s timeout on the
-    // navigation after this block.
-    //
-    // What is waited FOR is the app's own signal that the save completed —
-    // the dialog closing and the outbox growing — and deliberately NOT the
-    // notes card, which is the thing being asserted: a wait on the assertion
-    // makes the check tautological.
-    const outboxBeforeClear = await queued();
-
-    // Opened through the card's own row — a real click, since each row is a
-    // `<button>` calling `detailHost.editDay` directly (#297), not a shortcut.
-    await ev(`[...document.querySelectorAll('#view-detail .notes-list .note-row')]
-      .find(r => r.querySelector('.note-text')?.textContent === 'note to clear')?.click()`);
-    await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
-      { what: 'the day editor to open on the note to clear' });
-    ck('the day editor opens on the note to clear',
-       await ev(`document.getElementById('day-dialog').open`) === true);
-    await ev(`document.getElementById('day-notes').value = ''`);
-    // Re-answers the day's own state (this habit is boolean, so "Done" is what
-    // is already stored) — the same PUT a plain tap would make, with the note
-    // now stated as cleared rather than left alone.
-    await ev(`document.querySelector('#day-boolean .day-choice[data-action="done"]').click()`);
-    await waitUntil(ev, `(async () =>
-      document.getElementById('day-dialog').open === false
-      && ((await import('/shared/ui/store.js')).state.pending ?? 0)
-         > ${outboxBeforeClear})()`,
-      { what: 'the queued clear to close the dialog and reach the outbox' });
-
-    const afterClear = {
-      rows: await noteRowTexts(),
-      dot: await hasNoteMark(notesRedrawProbe.toClear),
-      outbox: await queued(),
-    };
-    ck('the cleared note was queued rather than sent', afterClear.outbox >= 1,
-       JSON.stringify(afterClear));
-    ck('...and its row is gone from the notes card in the SAME repaint that '
-       + "drops its dot from the strip — not left showing the old text",
-       !afterClear.rows.includes('note to clear') && afterClear.dot === false,
-       JSON.stringify(afterClear));
-    ck('...while the OTHER note stays, which is the proof the card was '
-       + 'REDRAWN rather than emptied outright',
-       afterClear.rows.includes('kept note'), JSON.stringify(afterClear));
-
-    /* ---------- adding a note offline, to a day that had none, draws a row ---------- */
-
-    const addCentre = await ev(`(() => {
-      const el = document.querySelector('${cellSel(notesRedrawProbe.toAdd)}');
-      if (!el) return null;
-      const b = el.getBoundingClientRect();
-      return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
-    })()`);
-    ck('the day with no note is on screen to be right-clicked', !!addCentre,
-       JSON.stringify(addCentre));
-    if (addCentre) {
-      // A REAL right-click over CDP, not a scripted `dispatchEvent` — see the
-      // note beside the later `rightClick` helper for why a synthetic one
-      // proves nothing about the gesture this handler exists for.
-      await send('Input.dispatchMouseEvent', { type: 'mousePressed',
-        x: addCentre.x, y: addCentre.y, button: 'right', clickCount: 1 }, sessionId);
-      await send('Input.dispatchMouseEvent', { type: 'mouseReleased',
-        x: addCentre.x, y: addCentre.y, button: 'right', clickCount: 1 }, sessionId);
-      const outboxBeforeAdd = await queued();
-      await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
-        { what: 'the day editor to open on the noteless day' });
-      ck('a contextmenu on the noteless day opens the day editor',
-         await ev(`document.getElementById('day-dialog').open`) === true);
-      await ev(`document.getElementById('day-notes').value = 'a fresh offline note'`);
-      await ev(`document.querySelector('#day-boolean .day-choice[data-action="done"]').click()`);
-      await waitUntil(ev, `(async () =>
-        document.getElementById('day-dialog').open === false
-        && ((await import('/shared/ui/store.js')).state.pending ?? 0)
-           > ${outboxBeforeAdd})()`,
-        { what: 'the queued add to close the dialog and reach the outbox' });
-
-      const afterAdd = {
-        rows: await noteRowTexts(),
-        dot: await hasNoteMark(notesRedrawProbe.toAdd),
-        outbox: await queued(),
-      };
-      ck('the added note was queued rather than sent', afterAdd.outbox >= 1,
-         JSON.stringify(afterAdd));
-      ck('...and a row for it appears in the notes card, in the same repaint '
-         + 'that lights its dot',
-         afterAdd.rows.includes('a fresh offline note') && afterAdd.dot === true,
-         JSON.stringify(afterAdd));
-    }
-
-    /* ---------- clearing the LAST note offline hides the card ---------- */
-
-    // The branch nothing else in the repo reaches. `buildNotesCard` returns
-    // null for a habit with no notes, so a repaint that empties the map has
-    // to HIDE the card it cannot un-build — the promise made in `detail.js`,
-    // in `shared/public/CLAUDE.md` and in the archive, and until this case it
-    // rested on nothing. Reached from inside this block without navigating
-    // (which offline could not do) by clearing the two notes this habit now
-    // has, one at a time.
-    const clearNoteRow = async (text) => {
-      const before = await queued();
-      await ev(`[...document.querySelectorAll('#view-detail .notes-list .note-row')]
-        .find(r => r.querySelector('.note-text')?.textContent === ${JSON.stringify(text)})
-        ?.click()`);
-      await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
-        { what: `the day editor to open on the note ${JSON.stringify(text)}` });
-      await ev(`document.getElementById('day-notes').value = ''`);
-      await ev(`document.querySelector('#day-boolean .day-choice[data-action="done"]').click()`);
-      await waitUntil(ev, `(async () =>
-        document.getElementById('day-dialog').open === false
-        && ((await import('/shared/ui/store.js')).state.pending ?? 0) > ${before})()`,
-        { what: `the queued clear of ${JSON.stringify(text)} to reach the outbox` });
-    };
-
-    await clearNoteRow('kept note');
-    const oneLeft = await ev(`(() => {
-      const c = [...document.querySelectorAll('#view-detail .card')]
-        .find(x => x.querySelector('.card-title')?.textContent === 'Notes');
-      return { rows: [...document.querySelectorAll('#view-detail .notes-list .note-text')]
-                 .map(e => e.textContent),
-               display: c ? getComputedStyle(c).display : null };})()`);
-    ck('with ONE note left the card is still shown, which is what makes the '
-       + 'hide below a hide and not a card that was never there',
-       oneLeft.rows.length === 1 && oneLeft.display !== 'none' && oneLeft.display !== null,
-       JSON.stringify(oneLeft));
-
-    await clearNoteRow('a fresh offline note');
-    // `getComputedStyle(...).display`, never `.hidden` — the attribute is set
-    // either way, and what carries it is `[hidden] { display: none !important }`
-    // in the stylesheet. A check reading the property would stay green with
-    // that rule gone, which is the exact shape of the class-only mistake this
-    // same review round found on the strip's own mark.
-    const noneLeft = await ev(`(() => {
-      const c = [...document.querySelectorAll('#view-detail .card')]
-        .find(x => x.querySelector('.card-title')?.textContent === 'Notes');
-      return { found: !!c, display: c ? getComputedStyle(c).display : null,
-               rows: [...document.querySelectorAll('#view-detail .notes-list .note-text')]
-                 .map(e => e.textContent) };})()`);
-    // Hidden AND emptied: `querySelectorAll` reads through `hidden`, so a card
-    // that merely went invisible would still answer the cleared note to
-    // anything asking what it lists.
-    ck("clearing the habit's LAST note offline hides the notes card rather "
-       + 'than leaving an empty list',
-       noneLeft.found === true && noneLeft.display === 'none'
-         && noneLeft.rows.length === 0,
-       JSON.stringify(noneLeft));
-
-    // Threaded into a check rather than discarded — `reconnectAndDrain`
-    // REPORTS its timeout instead of throwing precisely so the message lands
-    // in a check's evidence, which is only true of a caller that reads it.
-    const notesDrained = await reconnectAndDrain();
-    ck('the notes-card probe drained its outbox on reconnect',
-       notesDrained === '', notesDrained);
-  }
+  // The notes above rode the same drain, and this is the `unknowncheck.mjs`
+  // model applied to them: the card said the notes were gone, so the rows had
+  // better say so too. It also confirms the habit left this block as it
+  // arrived — every note cleared, every value still YES.
+  const notesFlushed = await ev(`(async () => {
+    const rows = await (await fetch('/api/habits/${seeded.habit}/entries')).json();
+    const pick = (d) => { const r = rows.find(e => e.date === d);
+      return r ? { notes: r.notes, value: r.value } : null; };
+    return { kept: pick('${notesSeed.kept}'), toClear: pick('${notesSeed.toClear}'),
+             toAdd: pick('${notesSeed.toAdd}') };})()`);
+  ck('#297: and the queued note clears land too, leaving the rows noted-free '
+     + 'with their values untouched',
+     ['kept', 'toClear', 'toAdd'].every((k) =>
+       notesFlushed[k] && !notesFlushed[k].notes && notesFlushed[k].value === 2),
+     JSON.stringify(notesFlushed));
 
   /* ---------- paging, and forgetting where it was ---------- */
 
