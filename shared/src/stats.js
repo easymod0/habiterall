@@ -1299,28 +1299,48 @@ function daysInMonth(month) {
  * @returns {Array<{month: string, answered: number, days: number}>} oldest first
  */
 export function computeCoverage(entryMap, start, end) {
-  return coverageOver(entryMap, boundedRange(start, end));
+  return coverageOver(entryMap, boundedRange(start, end)).months;
 }
 
 /**
  * The private core behind `computeCoverage` — see the note on `scoresOver`
  * for why it takes `dates` and is not exported.
+ *
+ * Also folds the WINDOW's own answered/days count, over every date in
+ * `dates` rather than only the months `months` reports — and that is not a
+ * derivable quantity from `months`. `months` excludes any month the window
+ * does not entirely contain, so a window opening on the 12th of one month and
+ * closing on the 20th of a month two later has a partial month at BOTH ends:
+ * summing `months` reports on a shorter span than every other figure on the
+ * page, and for a habit under 60 days old — no month yet entirely
+ * contained — `months` can be empty while the window itself is not. `window`
+ * is therefore counted in the same loop rather than derived from `months`
+ * afterward, at no extra walk.
+ *
+ * @returns {{months: Array<{month: string, answered: number, days: number}>,
+ *            window: {answered: number, days: number}}}
  */
 function coverageOver(entryMap, dates) {
   const months = new Map();
+  let windowAnswered = 0;
 
   for (const date of dates) {
     const month = date.slice(0, 7);
     if (!months.has(month)) months.set(month, { month, answered: 0, days: 0 });
     const m = months.get(month);
     m.days += 1;
-    if (entryMap.has(date)) m.answered += 1;
+    if (entryMap.has(date)) {
+      m.answered += 1;
+      windowAnswered += 1;
+    }
   }
 
   // A month is entirely inside the window exactly when the window holds all of
   // its days — which needs no comparison against `start` and `end` and stays
   // right when `boundedRange` clamps the far edge.
-  return [...months.values()].filter((m) => m.days === daysInMonth(m.month));
+  const monthsInside = [...months.values()].filter((m) => m.days === daysInMonth(m.month));
+
+  return { months: monthsInside, window: { answered: windowAnswered, days: dates.length } };
 }
 
 /* ---------- top-level summary ---------- */
@@ -1756,6 +1776,11 @@ export function computeStats(habit, entries,
     ([date, v]) => date >= from && date <= end && isCompleted(habit, v) === true
   ).length;
 
+  // Computed once and read twice below, rather than once per key — the note
+  // on `coverageOver` above is why `coverageWindow` cannot be derived from
+  // `coverage` after the fact instead.
+  const cov = coverage ? coverageOver(entryMap, dates) : null;
+
   return {
     score: scores.length ? scores[scores.length - 1].score : 0,
     scores,
@@ -1777,8 +1802,12 @@ export function computeStats(habit, entries,
     // about what "ever" means.
     //
     // ...and spread rather than assigned, so a caller that declined it gets no
-    // key at all. See the note on the parameter.
-    ...(coverage ? { coverage: coverageOver(entryMap, dates) } : {}),
+    // key at all. See the note on the parameter. `coverageWindow` rides under
+    // the same opt-out as `coverage` — both absent when the caller declined,
+    // since an absent key is the absence of a claim and an empty one is a
+    // claim (see `CoverageWindow` in types.js for why it is not the sum of
+    // `coverage`'s buckets).
+    ...(cov ? { coverage: cov.months, coverageWindow: cov.window } : {}),
   };
 }
 

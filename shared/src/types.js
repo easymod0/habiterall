@@ -137,6 +137,13 @@
  *   that does not read it — see `computeStats`. `/overview`, in both editions,
  *   no longer calls `computeStats` at all: it calls `summaryStats` once per
  *   habit and keeps `score` and `currentStreak`.
+ * @property {CoverageWindow} [coverageWindow] answered/days over the WHOLE
+ *   window, absent under the same opt-out as `coverage` and for the same
+ *   reason — see `CoverageWindow`. It is NOT the sum of `coverage`'s monthly
+ *   buckets: `coverage` reports only months the window entirely contains, so
+ *   a window with a partial month at either end (or, for a habit under 60
+ *   days old, no whole month at all) sums to a shorter span than the window
+ *   itself.
  */
 
 /**
@@ -250,6 +257,15 @@
  * @property {string} month            'YYYY-MM'
  * @property {number} answered         days holding a row
  * @property {number} days             days in the month
+ */
+
+/**
+ * The same answered/days question `CoverageMonth` asks, but over the WHOLE
+ * window rather than only the months it entirely contains — the figure a
+ * habit under 60 days old still has even though `coverage` may be empty.
+ * @typedef {object} CoverageWindow
+ * @property {number} answered         days in the window holding a row
+ * @property {number} days             days in the window
  */
 
 /**

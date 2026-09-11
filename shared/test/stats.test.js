@@ -1401,6 +1401,82 @@ test('coverage is over the same window every other figure uses', () => {
     { '2026-02': '28/28' });
 });
 
+/* ---------- coverageWindow: the ratio over the WHOLE window ---------- */
+
+test('the window ratio is not the sum of the monthly buckets', () => {
+  // 2026-01-12 to 2026-03-20: both ends are partial months (January loses its
+  // first 11 days, March loses its last 11), and February alone is entirely
+  // contained. A sum over `coverage` therefore reports on February only —
+  // 28 days — where `coverageWindow` reports on the whole 68-day stretch.
+  const start = '2026-01-12', end = '2026-03-20';
+  // Three missing rows, one inside each month, so `answered` is not simply
+  // `days` a second time and the month boundaries are crossed by a DAY.
+  const missing = new Set(['2026-01-15', '2026-02-10', '2026-03-05']);
+  const rows = dateRange(start, end)
+    .filter((d) => !missing.has(d))
+    .map((date) => ({ date, value: YES, status: '' }));
+
+  const stats = computeStats(boolHabit, rows, { start, end });
+
+  // Literal, hand-counted: Jan 12-31 (20) + Feb 1-28 (28) + Mar 1-20 (20).
+  assert.equal(stats.coverageWindow.days, 68);
+  assert.equal(stats.coverageWindow.answered, 65);
+
+  // Only February is entirely inside [start, end].
+  assert.deepEqual(stats.coverage.map((m) => m.month), ['2026-02']);
+
+  const bucketDays = stats.coverage.reduce((n, m) => n + m.days, 0);
+  const bucketAnswered = stats.coverage.reduce((n, m) => n + m.answered, 0);
+  assert.notEqual(bucketDays, stats.coverageWindow.days);
+  assert.notEqual(bucketAnswered, stats.coverageWindow.answered);
+});
+
+test('the four states, asked directly, over coverageWindow', () => {
+  // One window, four days, one of each state: `done`, a stated `skip`, a
+  // stated lapse (a row holding 0) and a missing row. Three of the four are
+  // rows; only the missing one is not, which is the membership test this
+  // asserts — rewriting it as a VALUE test (truthy `value`, or `!= null`)
+  // would report 2, not 3, because the lapse row holds 0.
+  const rows = [
+    { date: '2026-04-01', value: YES, status: '' },
+    { date: '2026-04-02', value: 0, status: 'skip' },
+    { date: '2026-04-03', value: 0, status: '' },
+    // 2026-04-04 has no row at all.
+  ];
+  const stats = computeStats(boolHabit, rows, { start: '2026-04-01', end: '2026-04-04' });
+  assert.equal(stats.coverageWindow.days, 4);
+  assert.equal(stats.coverageWindow.answered, 3);
+});
+
+test('one ancient imported row collapses coverage, and that is the model working', () => {
+  // A single row 400 days before an otherwise-dense recent cluster opens the
+  // window all the way back to it — `from = firstEntry` — so `days` stretches
+  // to cover the whole gap and the ratio reads as almost entirely unanswered.
+  // This is the same "a stored lapse can move window-derived figures"
+  // property the root CLAUDE.md documents elsewhere, not a bug to close.
+  const end = '2026-09-01';
+  const ancient = addDays(end, -400);
+  const rows = [
+    { date: ancient, value: YES, status: '' },
+    ...dateRange(addDays(end, -9), end).map((date) => ({ date, value: YES, status: '' })),
+  ];
+  const stats = computeStats(boolHabit, rows, { end });
+
+  const expectedDays = daysBetween(ancient, end) + 1;
+  assert.equal(stats.coverageWindow.days, expectedDays);
+  // 1 (the ancient row) + 10 (the recent cluster, inclusive of both ends).
+  assert.equal(stats.coverageWindow.answered, 11);
+  assert.ok(stats.coverageWindow.answered / stats.coverageWindow.days < 0.03,
+    'one imported row over a 400-day gap should read as almost entirely unanswered');
+});
+
+test('a caller that declined coverage gets neither key', () => {
+  const rows = monthRows('2026-01');
+  const stats = computeStats(boolHabit, rows, { end: '2026-01-31', coverage: false });
+  assert.equal(Object.hasOwn(stats, 'coverage'), false);
+  assert.equal(Object.hasOwn(stats, 'coverageWindow'), false);
+});
+
 /* ---------- summaryStats: the two-field entry point /overview uses ---------- */
 
 test('summaryStats matches the score and currentStreak computeStats would return', () => {
@@ -3269,6 +3345,15 @@ test('computeStats agrees, field for field, with each pass called independently 
   assert.deepEqual(stats.resilience,
     computeResilience(habit, entryMap, streaks, from, end, opts.unlogged, creditFrom));
   assert.deepEqual(stats.coverage, computeCoverage(entryMap, from, end));
+
+  // `coverageWindow` shares the identical clamped `dates` every other field
+  // here does — independently rebuilt via `boundedRange`, not read back off
+  // `stats` itself — and `answered` is counted here by a second, independent
+  // walk rather than by re-deriving it from `stats.coverage`.
+  const windowDates = boundedRange(from, end);
+  assert.equal(stats.coverageWindow.days, windowDates.length);
+  assert.equal(stats.coverageWindow.answered,
+    windowDates.filter((date) => entryMap.has(date)).length);
 });
 
 test('computeStats and summaryStats each build the shared `dates` array with exactly one boundedRange( call, with its own inventory', () => {
