@@ -381,6 +381,30 @@ const server = await start();
 // `api.js`, never post to a real webhook" — is now structural rather than a
 // convention: the start is in a module none of those suites import at all.
 
+// One line per boot, at info, and it is a SIGNPOST rather than a status: this
+// process cannot tell whether a notifier container exists, and that is exactly
+// the hole worth leaving a breadcrumb for.
+//
+// An operator upgrading an existing deployment runs `docker compose pull && up
+// -d` against THEIR OWN compose file, which has an `app` and no `notifier`.
+// Nothing then fails: the app boots healthy, every account's settings still
+// show its destinations, `channelConfigured` still says yes, and `POST
+// /api/notify/test` — the one diagnostic anybody reaches for — still works,
+// because a test send runs in THIS process. Only the schedule is gone, and
+// scheduled delivery failing is indistinguishable from a quiet week.
+//
+// Keyed on nothing, deliberately. The obvious version warns when
+// `HABITERALL_NOTIFY` is set here, which is the copied-old-block case — and it
+// misses the worse one, because the variable is opt-OUT: an operator whose
+// compose never named it had reminders working and loses them with no
+// misconfiguration to detect. So this is an unconditional statement of where
+// the job lives, in the log of the process an operator opens first.
+log.info('notify.delivered_elsewhere', {
+  by: 'the notifier container (node src/notifier-entry.js)',
+  consequence: 'this process sends no scheduled reminders and takes no backups; '
+    + 'a deployment with no notifier service delivers none at all',
+});
+
 // One line a minute, and the one to graph: event-loop lag is what turns a heavy
 // dashboard into everybody's latency, and pool exhaustion is what a replica
 // count that outgrew Postgres looks like.

@@ -844,6 +844,17 @@ services:
       # process signs every ntfy answer code with it, and the app's
       # `/notify/ntfy/answer` route verifies the signature with its own copy.
       # A mismatch fails every ntfy button closed, silently.
+      #
+      # And it is not the only one: every variable named in BOTH blocks is now
+      # a value two processes have to agree on. NTFY_ALLOWED_HOSTS is checked
+      # twice on purpose — the app validates a topic URL when it is saved, the
+      # notifier re-checks it at send time, since an operator may narrow the
+      # list months later — so narrowing it on one service alone gives either
+      # stored URLs that are refused at delivery or URLs the dialog accepts
+      # and that never arrive. PUBLIC_URL decides whether a reminder carries
+      # buttons at all. Every one of them is interpolated from the same .env
+      # entry here and in the app, which is what keeps the two equal; edit
+      # this file by hand and that guarantee is yours to keep.
       SESSION_SECRET: ${SESSION_SECRET:?openssl rand -base64 36}
       PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
@@ -862,9 +873,14 @@ services:
       # knowingly, to turn backups on; see "Scheduled backups" in the README
       # and cloud.env.example for what to add and what it costs. Until you do,
       # this container logs an error naming the missing credential and writes
-      # no backups. Add the same credential to `app` as well only if you also
-      # want ⚙ → Backup and restore to report backups as on — that dialog
-      # reads the APP's own environment, and the app never dumps.
+      # no backups. Do NOT also add it to `app` to make the in-app dialog
+      # agree: `GET /api/backup/status` reads the APP's own environment, where
+      # HABITERALL_BACKUP_DIR is deliberately absent, so it reports `enabled:
+      # false` on every cloud deployment and adding the credential there
+      # changes nothing except putting an RLS-bypassing role on the process
+      # that is reachable from the internet. Nothing visible is lost: that one
+      # bit has never rendered in this edition anyway, because the dialog also
+      # needs a `last` outcome and cloud has none to give (api.js).
       HABITERALL_BACKUP_DIR: ${HABITERALL_BACKUP_DIR:-}    # e.g. /backups; empty is off
       HABITERALL_BACKUP_SCHEDULE: ${HABITERALL_BACKUP_SCHEDULE:-}  # 03:00
       HABITERALL_BACKUP_KEEP: ${HABITERALL_BACKUP_KEEP:-}  # 7
@@ -882,11 +898,18 @@ services:
       LOG_FORMAT: ${LOG_FORMAT:-}
       LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}
       LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}
-    # Not on-failure alone by convention: with HABITERALL_NOTIFY=off and no
-    # backup directory configured, this container has nothing to run and its
-    # entry point exits 0 having said so. `unless-stopped` would restart that
-    # forever; a genuine crash is a non-zero exit and still restarts.
-    restart: on-failure
+    # The SAME policy as `app`, and that is the point of it rather than
+    # tidiness. This was `on-failure` first, so that the nothing-to-run case
+    # (HABITERALL_NOTIFY=off with no backup directory) could exit 0 without
+    # restarting for ever. What that missed is the case that actually happens:
+    # a host reboot or a `systemctl restart docker` SIGTERMs every container,
+    # this one drains and exits 0, and when the daemon returns it restarts the
+    # `unless-stopped` ones and leaves the `on-failure` one down, because 0 is
+    # not a failure. The site comes back, the dashboards work, every account's
+    # settings still say reminders are on — and none is ever delivered again,
+    # with nothing in any log to find. So the entry point PARKS instead of
+    # exiting when it has nothing to do, and this policy is the ordinary one.
+    restart: unless-stopped
     stop_grace_period: 10s
 
 volumes:
@@ -1156,13 +1179,18 @@ HABITERALL_BACKUP_KEEP=7
 # silently and it never falls back to the restricted role.
 #
 # `GET /api/backup/status` is answered by the APP, from the app's OWN
-# environment — so if you put DATABASE_URL_ADMIN on `notifier` alone, backups
-# run correctly while ⚙ → Backup and restore reports them as off. Add the same
-# credential to `app` as well, purely so that dialog can say backups are on;
-# the app never dumps with it.
+# environment — which names none of the HABITERALL_BACKUP_* variables — so it
+# reports `enabled: false` on every cloud deployment, backups running or not.
+# Do NOT try to make it agree by adding DATABASE_URL_ADMIN to `app`: that
+# would put a role able to read every tenant's rows on the one process
+# reachable from the internet, and it still would not change the answer
+# without HABITERALL_BACKUP_DIR there too. Nothing visible is lost either way
+# — ⚙ → Backup and restore needs a last-run outcome to draw that line at all,
+# and this edition keeps none (see "There is NO status table" in
+# habiterall-cloud/CLAUDE.md). The notifier's own log is the record.
 #
-# Two ways to keep the app from ever holding that credential at all: run
-# `pg_dump` from outside the app on your own schedule (see SETUP.md for the
+# Two ways to keep either container from ever holding that credential at all:
+# run `pg_dump` from outside the stack on your own schedule (see SETUP.md for the
 # manual command), or create a dedicated least-privilege dump role instead of
 # handing over the owner credential. This exact grant list was MEASURED, not
 # merely suggested — twice, independently: a NOSUPERUSER role with BYPASSRLS,
@@ -1452,6 +1480,17 @@ services:
       # process signs every ntfy answer code with it, and the app's
       # `/notify/ntfy/answer` route verifies the signature with its own copy.
       # A mismatch fails every ntfy button closed, silently.
+      #
+      # And it is not the only one: every variable named in BOTH blocks is now
+      # a value two processes have to agree on. NTFY_ALLOWED_HOSTS is checked
+      # twice on purpose — the app validates a topic URL when it is saved, the
+      # notifier re-checks it at send time, since an operator may narrow the
+      # list months later — so narrowing it on one service alone gives either
+      # stored URLs that are refused at delivery or URLs the dialog accepts
+      # and that never arrive. PUBLIC_URL decides whether a reminder carries
+      # buttons at all. Every one of them is interpolated from the same .env
+      # entry here and in the app, which is what keeps the two equal; edit
+      # this file by hand and that guarantee is yours to keep.
       SESSION_SECRET: ${SESSION_SECRET:?openssl rand -base64 36}
       PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
@@ -1470,9 +1509,14 @@ services:
       # knowingly, to turn backups on; see "Scheduled backups" in the README
       # and cloud.env.example for what to add and what it costs. Until you do,
       # this container logs an error naming the missing credential and writes
-      # no backups. Add the same credential to `app` as well only if you also
-      # want ⚙ → Backup and restore to report backups as on — that dialog
-      # reads the APP's own environment, and the app never dumps.
+      # no backups. Do NOT also add it to `app` to make the in-app dialog
+      # agree: `GET /api/backup/status` reads the APP's own environment, where
+      # HABITERALL_BACKUP_DIR is deliberately absent, so it reports `enabled:
+      # false` on every cloud deployment and adding the credential there
+      # changes nothing except putting an RLS-bypassing role on the process
+      # that is reachable from the internet. Nothing visible is lost: that one
+      # bit has never rendered in this edition anyway, because the dialog also
+      # needs a `last` outcome and cloud has none to give (api.js).
       HABITERALL_BACKUP_DIR: ${HABITERALL_BACKUP_DIR:-}    # e.g. /backups; empty is off
       HABITERALL_BACKUP_SCHEDULE: ${HABITERALL_BACKUP_SCHEDULE:-}  # 03:00
       HABITERALL_BACKUP_KEEP: ${HABITERALL_BACKUP_KEEP:-}  # 7
@@ -1490,11 +1534,18 @@ services:
       LOG_FORMAT: ${LOG_FORMAT:-}
       LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}
       LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}
-    # Not on-failure alone by convention: with HABITERALL_NOTIFY=off and no
-    # backup directory configured, this container has nothing to run and its
-    # entry point exits 0 having said so. `unless-stopped` would restart that
-    # forever; a genuine crash is a non-zero exit and still restarts.
-    restart: on-failure
+    # The SAME policy as `app`, and that is the point of it rather than
+    # tidiness. This was `on-failure` first, so that the nothing-to-run case
+    # (HABITERALL_NOTIFY=off with no backup directory) could exit 0 without
+    # restarting for ever. What that missed is the case that actually happens:
+    # a host reboot or a `systemctl restart docker` SIGTERMs every container,
+    # this one drains and exits 0, and when the daemon returns it restarts the
+    # `unless-stopped` ones and leaves the `on-failure` one down, because 0 is
+    # not a failure. The site comes back, the dashboards work, every account's
+    # settings still say reminders are on — and none is ever delivered again,
+    # with nothing in any log to find. So the entry point PARKS instead of
+    # exiting when it has nothing to do, and this policy is the ordinary one.
+    restart: unless-stopped
     stop_grace_period: 10s
 
 volumes:

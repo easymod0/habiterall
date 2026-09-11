@@ -150,13 +150,15 @@ function connectRefused(port) {
 let state = null;
 
 try {
-  /* ---------- 1. HABITERALL_NOTIFY=off, no backup dir -> exits 0 ---------- */
+  /* ---------- 1. HABITERALL_NOTIFY=off, no backup dir -> idles, LOUDLY ---------- */
 
   try {
     state = spawnNotifier({ HABITERALL_NOTIFY: 'off' });
 
-    const exited = await waitFor(() => state.exit !== null, Date.now() + 5000);
-    check('1. the process exits on its own with nothing to run', exited,
+    const said = await waitFor(
+      () => state.exit !== null || findLine(state.logs, 'notifier.nothing_to_run') !== undefined,
+      Date.now() + 5000);
+    check('1. it says it has nothing to run', said && state.exit === null,
       JSON.stringify(state.logs.slice(-300)));
 
     const disabled = findLine(state.logs, 'notify.disabled');
@@ -164,7 +166,35 @@ try {
     check('1. notify.disabled names HABITERALL_NOTIFY=off',
       disabled?.reason === 'HABITERALL_NOTIFY=off', JSON.stringify(disabled));
 
-    check('1. the process exits with code 0, not a signal',
+    // Its own wait: `startup` is logged a line AFTER `notifier.nothing_to_run`,
+    // so reading it off the buffer that answered the poll above is a race
+    // against the pipe rather than an assertion.
+    await waitFor(
+      () => state.exit !== null || findLine(state.logs, 'startup') !== undefined,
+      Date.now() + 5000);
+    const idle = findLine(state.logs, 'startup');
+    check('1. and the startup line says which of the two states it is in',
+      idle?.running === 'idle', JSON.stringify(idle));
+
+    // **It must NOT exit, and this is the check that had to be turned round.**
+    // The first version of this branch exited 0 and the compose files carried
+    // `restart: on-failure` so that would not loop. The case that misses is a
+    // host reboot or a `systemctl restart docker`: every container gets a
+    // SIGTERM, this one drains and exits 0, and the daemon then restarts the
+    // `unless-stopped` services and leaves the `on-failure` one down, because
+    // 0 is not a failure. The site returns, the dashboards work, and no
+    // reminder is ever delivered again with nothing in any log to find. So
+    // this process parks and the policy is the ordinary one. A settle rather
+    // than a poll: the assertion is that something did NOT happen.
+    await sleep(500);
+    check('1. and it PARKS rather than exiting — an exit-0 container is one a '
+      + 'daemon restart leaves down for ever', state.exit === null,
+      JSON.stringify(state.exit));
+
+    // And a signal still ends it, which parking must not have cost.
+    state.child.kill('SIGTERM');
+    await waitFor(() => state.exit !== null, Date.now() + 5000);
+    check('1. and SIGTERM still ends it cleanly',
       state.exit?.code === 0 && state.exit?.signal === null,
       `code=${state.exit?.code} signal=${state.exit?.signal}`);
   } catch (err) {
@@ -322,13 +352,22 @@ try {
     // `server.js` would have lost.
     state = spawnNotifier({ HABITERALL_NOTIFY: 'off', HABITERALL_BACKUP_DIR: halfDir });
 
-    const exited = await waitFor(() => state.exit !== null, Date.now() + 5000);
+    const said = await waitFor(
+      () => state.exit !== null || findLine(state.logs, 'notifier.nothing_to_run') !== undefined,
+      Date.now() + 5000);
     check('3b. a backup dir with no admin credential is not a backup hook',
-      exited && state.exit?.code === 0, JSON.stringify(state.logs.slice(-300)));
+      said && state.exit === null, JSON.stringify(state.logs.slice(-300)));
 
     const missing = findLine(state.logs, 'backup.admin_url_missing');
-    check('3b. and the missing credential is named, loudly, before it goes',
+    check('3b. and the missing credential is named, loudly',
       missing?.level === 'error', JSON.stringify(missing));
+
+    // Parks like case 1, for the same reason: this is the state a shipped
+    // example leaves an operator in the moment they set the directory, and a
+    // container that exits here is one a daemon restart never brings back.
+    await sleep(500);
+    check('3b. and it parks rather than exiting', state.exit === null,
+      JSON.stringify(state.exit));
   } catch (err) {
     check('3b. a backup dir with no admin credential', false, String(err?.stack ?? err));
   } finally {

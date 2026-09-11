@@ -138,21 +138,49 @@ const notifier = startNotifier(process.env, backup ? { onTick: backup } : {});
 // `start()` returns `null` only when `HABITERALL_NOTIFY=off` AND there is no
 // backup hook — it has already logged `notify.disabled` itself. There is
 // nothing left for this container to do: no tick, no gateway, no dump.
+//
+// **It parks rather than exiting, and that is a restart-policy decision, not a
+// style one.** The first version of this exited 0 and the compose files
+// carried `restart: on-failure`, so that this state would not restart for
+// ever. The case that reasoning did not cover is the one that actually
+// happens: on a host reboot or a `systemctl restart docker`, EVERY container
+// gets a SIGTERM and this one drains and exits 0 — and when the daemon comes
+// back it restarts the `unless-stopped` ones (`app`, `db`) and leaves the
+// `on-failure` one down, because a 0 is not a failure. The site would come
+// back up, the dashboards would work, every account's settings would still say
+// reminders were on, and no reminder would ever be delivered again, with
+// nothing in any log to find: this process's last line would be a correct,
+// clean `shutdown.early`. That is the same shape as the `unref` defect this
+// file's own history records — a process stopping for a reason that looks like
+// success — and it is the worse version, because it happens once, unwatched,
+// and stays.
+//
+// So the policy is `unless-stopped`, matching `app`, and nothing here may exit
+// on its own. Parking costs an idle container; the alternative cost a
+// deployment its reminders silently.
 if (!notifier) {
-  log.info('notifier.nothing_to_run', {
-    consequence: 'reminders are off and no backup directory is configured; stop running this container',
+  log.warn('notifier.nothing_to_run', {
+    reason: 'HABITERALL_NOTIFY=off and no HABITERALL_BACKUP_DIR',
+    consequence: 'this container will idle until it is stopped; it delivers nothing and dumps nothing',
   });
-  await closePool();
-  // 0: nothing was dropped, nothing was ever accepted. This is what pairs
-  // with `restart: on-failure` in the compose files — `unless-stopped` here
-  // would restart a container that intends to exit cleanly, forever.
-  process.exit(0);
 }
+
+// The one ref'd handle when there is no tick. `watchRuntime`'s own timer is
+// unref'd (`shared/src/observe.js`) and so cannot hold a process open, and
+// `startNotifier`'s is unref'd unless asked — see `keepAlive` there. Node
+// leaves when nothing refs the loop, and this process leaving is exactly what
+// must not happen; a signal still ends it through the arm at the top of this
+// file, which calls `process.exit` regardless of what is pending.
+const parked = notifier ? null : setInterval(() => {}, 60_000);
 
 logStartup(log, {
   edition: 'cloud-notifier',
   // No `port`: this process listens on nothing, and a `port` field here would
   // read as a claim that something else could connect to it.
+  //
+  // `running` is the field an operator reads to tell the idle case above from
+  // the working one, since both are a container that stays up.
+  running: notifier ? 'tick' : 'idle',
   pg_pool_max: Number(process.env.PG_POOL_MAX) || 10,
   ...poolTimeouts(),
   notify: (process.env.HABITERALL_NOTIFY ?? 'on').toLowerCase(),
@@ -170,11 +198,13 @@ const runtime = watchRuntime(log, {
   extra: () => poolGauge(),
 });
 
-// Assigned only now that both exist, which is what the mutable binding at the
-// top of this file is for: a signal landing before this line still closes the
-// pool; one landing after it also stops the tick and the runtime watcher.
+// Assigned only now that everything exists, which is what the mutable binding
+// at the top of this file is for: a signal landing before this line still
+// closes the pool; one landing after it also stops the tick, the runtime
+// watcher and the idle handle.
 cleanup = async () => {
   runtime.stop();
-  notifier.stop();
+  notifier?.stop();
+  if (parked) clearInterval(parked);
   await closePool();
 };
