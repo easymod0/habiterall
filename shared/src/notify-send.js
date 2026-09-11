@@ -186,6 +186,10 @@ function stateKey(o) {
  * @property {number} [deliveryConcurrency] how many accounts `runTick` delivers
  *   to at once — see the comment on `DELIVERY_CONCURRENCY`, below, for why this
  *   is edition business and not a literal in this file. Unset means 8.
+ * @property {(instant: Date|number) => Promise<any>|any} [onTick] the process
+ *   has one timer, and a periodic job joins it here rather than growing a
+ *   second one — called once per tick, after reminder delivery, with the same
+ *   instant `runTick` used.
  */
 
 /**
@@ -1021,10 +1025,33 @@ export function startNotifier(ctx) {
   const tick = async () => {
     if (running) return;
     running = true;
+    // Computed here, once, rather than left to `runTick`'s own `ctx.instant
+    // ?? new Date()` fallback — `onTick` below has to see the identical
+    // instant `runTick` used, not a second, slightly later clock read.
+    const instant = ctx.instant ?? new Date();
     try {
-      await runTick({ ...ctx, log });
-    } catch (err) {
-      log.error?.('notify: tick failed:', err);
+      try {
+        await runTick({ ...ctx, instant, log });
+      } catch (err) {
+        log.error?.('notify: tick failed:', err);
+      }
+      // A separate `try` from `runTick`'s, and run after it — i.e. after
+      // reminder delivery — regardless of how that went: a `runTick` that
+      // throws must still let `onTick` run, because a Discord outage must
+      // not silently stop the nightly backup. Still inside the `running`
+      // guard (it clears in the outer `finally` below, once both have
+      // settled) so a slow export cannot let a second tick start a second
+      // export on the strength of a claim the first has not written yet.
+      // And a throwing or rejecting `onTick` is caught here and must not
+      // take the tick down, exactly as `runTick`'s own failure already is
+      // not.
+      if (ctx.onTick) {
+        try {
+          await ctx.onTick(instant);
+        } catch (err) {
+          log.error?.('notify: onTick failed:', err);
+        }
+      }
     } finally {
       running = false;
     }

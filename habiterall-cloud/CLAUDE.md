@@ -627,6 +627,159 @@ Gotcha: `docker compose run --rm migrate` uses a cached image. After adding a
 migration, `docker compose build migrate` first or it will report "already up
 to date".
 
+## Scheduled backups (issue #75)
+
+`src/backup.js` runs a nightly whole-database `pg_dump` on the same tick
+`notifier.js` already ticks on — no `setInterval` of its own. It is deliberately
+**one dump, instance-level**, not a per-account export: this edition holds many
+accounts in one Postgres database, so a per-account loop would mean a
+`withNotifierScope` scan just to enumerate them, an RLS question for every one
+of those reads, and a cross-tenant surface this file does not want to own. A
+whole-database dump asks none of that — one child process, one file.
+
+**The role has to BYPASS row-level security, and being the table owner is NOT
+enough.** Every tenant table here carries `FORCE ROW LEVEL SECURITY`
+(`001_initial.sql`, and 008/010/015 for the tables added since), and `FORCE`
+applies the policy to the table's OWNER too — a plain owner-role dump still
+gets RLS'd. What the role needs is superuser, or `BYPASSRLS`. Measured against
+this schema, at the time this was written:
+
+| role | flags | `pg_dump` | result |
+|---|---|---|---|
+| `owner` | superuser | default | exit 0, canary row present, 24,545 bytes |
+| a `NOBYPASSRLS` role with `SELECT` on everything | — | default | exit 1, `ERROR: query would be affected by row-level security policy for table "categories"` — but 9,435 bytes of partial output were already written first |
+| same role | — | `--enable-row-security` | exit 0, 24,508 bytes, **zero rows in every `COPY` block** |
+| `habiterall_app` (the app role) | — | default | exit 1, `permission denied for table schema_migrations` |
+
+**`--enable-row-security` must never be passed, and the second row is why.**
+It is the one flag that turns a wrong-role dump from a loud failure into a
+complete-looking file with nothing in it — 37 bytes smaller than the real
+dump, so no size check could ever catch it either. This repo's signature
+defect class, reproduced inside its own backup feature; `runBackup` never
+passes it, and a source-text guard greps the module for the flag and prints
+what it searched so an empty offender list means something. The THIRD row is
+the reason a failed dump's partial bytes must never survive on disk: the
+`.tmp`-then-rename is what stops that 9KB of truncated SQL sitting in the
+backup directory looking like a backup.
+
+**Enabling this hands the app container the OWNER credential
+(`DATABASE_URL_ADMIN`), and that is a deliberate, OPERATOR-MADE widening, not
+something the shipped examples do for them.** Neither
+`examples/docker-compose.cloud.yml` nor `docker-compose.cloud-authentik.yml`
+puts `DATABASE_URL_ADMIN` on the `app` service — only `migrate` holds it,
+which runs once per deploy and never inside the long-lived app process — and
+that is on purpose: the app not being able to change the schema, or read past
+row-level security, is part of this edition's security model, and it stays
+true by default even with `HABITERALL_BACKUP_DIR` set. Turning scheduled
+backups on means an operator adding that credential to the app service
+themselves, in their own compose override, which is the moment the credential
+capable of reading every tenant's rows starts living beside the restricted
+`DATABASE_URL` one for as long as backups are on. There is no fallback to
+`DATABASE_URL` in this path — `migrate.js` has one (`DATABASE_URL_ADMIN ??
+DATABASE_URL`) and copying it here would silently dump as the RLS-restricted
+app role, the same wrong-role failure the measured table above shows arriving
+loudly instead. A `HABITERALL_BACKUP_DIR` set with no usable admin URL is
+refused loudly (`backup.admin_url_missing`, at error) rather than either
+silently doing nothing or silently dumping nothing useful — which is exactly
+the state an unmodified example is in: `HABITERALL_BACKUP_DIR` can be set, but
+with no `DATABASE_URL_ADMIN` on the app the feature refuses itself at boot
+until the operator adds it.
+
+**The password reaches the child as `PGPASSWORD`, never in argv.**
+`pgDumpConnection` rebuilds the connection string from the parts it already
+validated, with the password stripped out, and hands the password back
+separately for the caller to put in the child's environment — argv is visible
+in `ps` to anything else on the box, an environment variable handed to one
+`spawn()` is not.
+
+**There is NO status table, and cloud's last outcome lives only in the
+module's own memory (`lastAttemptDate`, for dedupe) — the operator's log is
+the durable record.** Three reasons, and all three have to survive together:
+
+- **Not on `users`.** A nightly write there risks bumping `data_version` —
+  `test:dataversion` asserts only a WRITE does that — which would invalidate
+  every account's dashboard cache every night for a job none of them can see.
+  It would also put a nightly job through the `habits -> users` lock order
+  `withUserWrite` exists to protect, for no reason a habit write has.
+- **Not a new table.** This is instance-level operator state with no owning
+  account. A table would mean a migration, an RLS decision, an exact grant
+  list and a tenancy case — for state no tenant may read anyway. `session` and
+  `schema_migrations` are the only two non-per-user tables today and neither
+  has a tenancy case; a third needs a better reason than convenience.
+- **What it costs, stated rather than hidden**: the outcome is lost on a
+  restart, which personal's `backup_status` row is not. That is the trade, and
+  it is why `GET /api/backup/status` here answers only
+  `{enabled, schedule: null, keep: null, last: null}` — the one bit
+  (`backupEnabled()`) is genuinely all there is to hand back, and there is no
+  operator identity in this edition (`requireAuth` gives `req.session.user`
+  and nothing more) to hang a fuller answer on even if the state existed.
+
+**The tick is non-blocking, on purpose, and that is the opposite of how
+personal's backup hook behaves.** `startNotifier` awaits `onTick` inside its
+`running` guard, which is right for personal's synchronous millisecond JSON
+write — but cloud's dump is a child process whose duration is the size of the
+whole database, and awaiting it would suppress the reminder tick for **every
+account on the instance** for that entire time. So `backupTask` returns
+promptly and keeps its own `inFlight` promise as the "no two runs at once"
+guarantee instead of relying on the shared hook's `await` to provide it. The
+dedupe combines that in-memory flag with the filesystem: today's file existing
+on disk is the crash-safe record that the day succeeded (so a redeploy at
+14:00 does not re-dump), and the in-memory attempt date is what stops a FAILED
+run being retried every minute for the rest of the day while still trying
+again once, after a restart, if the operator has fixed the problem.
+
+**This edition is multi-replica and nothing here serialises the dump across
+processes — that is a deliberate, stated assumption, not an oversight.** Each
+run's temporary file carries a random, per-run suffix rather than a fixed
+`.tmp` name, so two replicas can no longer interleave their bytes into one
+corrupt file that still gets logged as `backup.ok` on both sides — but that
+fix only removes the CORRUPTION, not the RACE: two replicas both pointed at
+one `HABITERALL_BACKUP_DIR` will still both see `todaysFileExists` false, both
+dump the whole database, and both `renameSync` onto the same final name — one
+wins, one's work is simply thrown away. The no-two-runs-at-once guarantee
+(`inFlight`, `lastAttemptDate`) is **per-process module state**, not a lock
+over the directory, and cannot coordinate a second process by construction.
+Exactly ONE replica may own a backup directory; `examples/cloud.env.example`
+and the README say so in the operator-facing words.
+
+**A crashed run's own `.tmp` is reclaimed at the START of the next run, and
+only because of an age gate.** The per-run UUID suffix above stopped a `.tmp`
+from being overwritten by a second writer, but it also made a crashed run's
+leftover un-namable by anything ever again — invisible to `prunableBackups`
+(anchored, deliberately) and to `todaysFileExists`, so `HABITERALL_BACKUP_KEEP`
+stopped bounding it and a dump-sized file per crash sat on the volume forever.
+`reclaimStaleTmp` deletes one only once it is older than
+`BACKUP_TIMEOUT_MS + KILL_GRACE_MS` — this module's own upper bound on how
+long a LIVE run can hold its `.tmp` open — so by construction nothing that old
+can belong to a run still in progress, and reclaiming it can never race a live
+writer the way a blanket "delete any `.tmp`" would.
+
+**A fix round following review of 13aa15d changed two things worth reading
+before touching this file again, because neither is visible from the diff
+alone:**
+
+- **`backupConfig` is deliberately free of logging side effects.**
+  `GET /backup/status` calls `backupEnabled()` -> `backupConfig()` on every
+  request, so a version of `backupConfig` that logged `backup.admin_url_missing`
+  as a side effect of computing `enabled` meant any ONE of N tenants opening
+  the "Backup and restore" dialog could drive an error-level line into the
+  operator's log, repeatedly, in exactly the state this feature ships
+  deliberately (a directory set before `DATABASE_URL_ADMIN` is added).
+  `backupConfig` now only classifies what it found (`scheduleInvalid`,
+  `keepInvalid`, `adminUrlMissing`, plus the raw values); `reportBackupConfig`
+  is the separate function that actually logs, called exactly ONCE, at boot,
+  from `server.js`, never from a route.
+- **A write-stream failure now kills the child.** Without it, `pg_dump`
+  writing to a destination that has started erroring (e.g. `ENOSPC`) blocks on
+  its own `write()` once the OS pipe fills (64 KiB), and nothing notices until
+  `BACKUP_TIMEOUT_MS` (two hours) finally kills it — for those two hours the
+  child holds its `REPEATABLE READ` snapshot open, which pins the xmin horizon
+  and bloats every table `pg_dump` has already touched, while `inFlight` blocks
+  every later attempt for the rest of that window. `runBackup` now destroys
+  `child.stdout` (closing the pipe's read end, so the child's next write fails
+  with `EPIPE`) and sends `SIGKILL` the moment the write stream errors, rather
+  than waiting on the timeout to notice.
+
 ## Local stack
 
 `docker compose up -d` brings up Postgres, Authentik (server + worker), the

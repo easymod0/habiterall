@@ -434,4 +434,242 @@ answered at 00:05 names yesterday, and is right to — the notification is about
 that day — but the widget has moved on, and taking it would blank today to paint
 a day that is over.
 
+## The stats widget
+
+**A second widget, and the issue proposing it had the wrong premise for what
+it would cost.** The issue said the score "lives on the server ... reached
+through `GET /api/habits/:id/stats`", and a comment on it argued
+`Api.stats(habitId)` plus a new Kotlin model was a roughly 150-line
+prerequisite this work would have to build first. Neither exists in this
+change. `/api/overview` already returns, per habit and in both editions,
+`score`, `currentStreak`, `bestStreak` and `totalCompleted`, and `Api.kt`'s
+`Habit` already deserializes all four — `ui/DayGrid.kt` was already rendering
+`currentStreak` off it. The widget's data source is the `Overview` response the
+widget-refresh path already fetched, so the "prerequisite" the issue described
+turned out to be nothing this widget needed. #171 genuinely does need
+`Api.stats()` — for the `scores` series, `history`, `weekdays`, `frequency` and
+`resilience`, none of which `/overview` carries — but that is a different
+issue's cost, not this one's.
+
+**The obvious extraction of the checkmark widget's fill colour was wrong, and a
+mutation is what caught it.** `HabitWidget.fill`'s numerical arm read
+`record.value` — the record's ONE day — to decide a cell's partial-credit
+shading. Lifted unchanged into a per-cell call for a seven-day strip, every
+numerical cell in the strip would have shaded off the SAME day's number: seven
+dates, one figure. The fix changes `fill`'s signature to take the per-day
+value explicitly instead of the whole record, with `HabitWidget.render`
+passing `record.value` for its own one cell (always about `record.date`) and
+`StatsWidget.render` passing each cell's own resolved value. The mutation that
+proves the test would have caught the naive version — putting `record.value`
+back at the `StatsWidget` call site for every cell — failed with
+
+```
+a partial day is the faint alpha variant of it
+expected:<1497072374> but was:<-1580820>
+```
+
+— the partial cell painted as an empty cell instead of its own faint tint,
+because the record's one day (`null`, for that test's third and unanswered
+date) was standing in for six other dates' worth of value.
+
+**No `Bitmap`s, and three hazard classes that decision removes.** `RemoteViews`
+cannot draw, so a history strip drawn as one image would need
+`setImageViewBitmap` — which brings the marshalled-transaction size ceiling
+`RemoteViews` enforces on a bundle, and forces a full re-render on every
+resize, every theme change and every density change, because a baked bitmap
+does not itself adapt to any of the three. The strip is a fixed row of
+`ImageView`s over an opaque `@drawable/widget_cell`, tinted per cell with
+`setColorFilter`; the score is a `TextView` plus `RemoteViews.setProgressBar`
+rather than a hand-drawn arc. None of those three hazards exist for a tint or a
+platform-drawn bar.
+
+**`WidgetSync.refreshFromServer` asked for one day, and a strip needs seven.**
+It called `api.overview(days = 1)`, correct while its only consumer was the
+checkmark widget reading `today`. `Widgets.encodeHistory` reads
+`habit.entries`/`habit.skips` over the fetched window, so a one-day fetch left
+every date but the current one absent from the encoded history — the strip
+would have populated as all-unknown on every six-hourly sync, silently, with
+nothing failing loudly enough to say why. The fix is
+`days = Widgets.MAX_STRIP_DAYS` (7); `WidgetConfigActivity`'s own fetch,
+already wider than one day, is widened to the same constant so a freshly
+placed stats widget draws a populated strip immediately rather than waiting
+for the next sync.
+
+**`redraw` and `armMidnight` were hard-coded to one provider, and the second
+failure mode was the sharper one.** Both asked
+`getAppWidgetIds(ComponentName(app, HabitWidget::class.java))` — the checkmark
+provider by name, from before `StatsWidget` existed. Left alone, a stats
+widget would never be redrawn by any of the five triggers; and with ONLY a
+stats widget on a home screen, `armMidnight`'s `wanted` read false off that
+same hard-coded question and CANCELLED the one alarm that would ever redraw
+anything at midnight — not a missed redraw but an actively cancelled alarm.
+The fix is one helper answering "the live ids, per provider" for both
+`redraw` and `armMidnight`, with `redraw` drawing each id through the renderer
+for the provider that actually holds it and `armMidnight`'s `wanted` true if
+EITHER provider has ids. One alarm still serves both; this did not become a
+second alarm per provider.
+
+**A test-only dependency: `mockwebserver`.** `StatsWidgetTest` needs to assert
+the actual query string `WidgetSync.refreshFromServer` sends, rather than trust
+the call site's `days = Widgets.MAX_STRIP_DAYS` the way a stub `Api` would, so
+`testImplementation("com.squareup.okhttp3:mockwebserver:5.5.0")` joined
+`build.gradle.kts` — pinned to the same version as the `okhttp` implementation
+dependency it embeds a client for. It is test-only, and it buys a real local
+server the request can be read back from rather than asserted by inspection of
+the call site. The JDK's own `com.sun.net.httpserver.HttpServer` would be the
+dependency-free alternative, if pulling in OkHttp's test artifact is ever
+worth avoiding.
+
+**`Widgets.encodeHistory` had no test, and a KDoc claimed one that did not
+exist — this repo's most-shipped defect, worked in full.** The function was
+correct. What was missing was a test reaching it: grep the test tree at the
+time of review and the only line naming `encodeHistory` was a KDoc comment in
+`StatsWidgetTest.kt` claiming `WidgetTest` pinned it. It did not. Every strip
+test in that file hand-wrote a `history` literal, and the one test that
+reached the real encoder (`refreshedOrGone carries the stats figures from the
+habit`) used a habit with no entries at all, so `history` came out `""`
+regardless of what the encoder did with a gap. Twelve strip tests passed. The
+mutation that survives this gap is the one the root `CLAUDE.md` names —
+collapsing `unknown` into `no`:
+
+```kotlin
+// the surviving mutation
+else "$date:${habit.valueOn(date) ?: 0.0}"
+```
+
+An unanswered day then encodes as `date:0.0` instead of being left out of the
+string, decodes to a real `0.0`, and `Grid.dayStateOf` no longer short-circuits
+to `UNKNOWN` — it computes a state from that `0.0` the same as it would from a
+stated lapse. Measured on `avoidedHabit()` (`at_most`, target `2.0`, the
+fixture already used elsewhere in this suite): `0.0` is always `isMet` on an
+`at_most` habit — the smallest possible value against a nonnegative limit — so
+the mutated cell painted `DONE` (the habit's own colour, a "clean" day), not
+`NO`/`SLIP` as an inline read of "collapsing unknown into no" might suggest.
+That is the *other* direction root `CLAUDE.md` already names — "which spend
+identically on an at-least habit and oppositely on an at-most one" — false
+CREDIT on an at-most habit, a full-marks week manufactured for days nobody
+answered, rather than a false slip. The test that catches it does not need to
+predict the exact wrong colour, only that the cell must be
+`widget_cell_empty` and it is not: it fails either way. The fix was three
+tests directly on `encodeHistory` (a gap dropped, a stored zero kept, a skip
+encoded as `s`) plus one end-to-end render test building `history` through the
+real encoder rather than a literal, and the false KDoc claim was corrected
+once the claim became true. The lesson this restates rather than introduces:
+an inventory a guard or a comment claims is part of what has to be checked,
+and twelve green tests said nothing about the one path none of them reached.
+
+**`Record.figuresStale`, and why `record.date` alone could not answer
+"are the figures current".** `record.date` names the day the entry is about;
+`score` and `currentStreak` are the account's figures as of the last
+`/api/overview` fetch, and nothing kept those two in step. Named case: a
+morning sync returns `score = 0.30, currentStreak = 0` because yesterday was
+missed; at 09:00 the user presses Yes in the notification shade, which moves
+`record.date` to today with no fetch. `StatsWidget.render`'s old condition,
+`record.date != today`, then read false — "current" — while the strip's
+newest cell had just changed colour beside a note line asserting nothing was
+wrong, for up to six hours until the next heartbeat. The fix is a field, not a
+smarter read of the one that existed: the note line's condition became
+`record.gone || record.date != today || record.figuresStale`, and the
+`figuresStale`-only case gets its own sentence (`stats_figures_behind`) rather
+than the dated one, because naming a date would be a false claim when the day
+itself is not the stale part.
+
+The field's DEFINITION took a second round to land on. The first cut set it
+"wherever the strip moves without a fetch" — `Widgets.answered`'s ordinary
+branch and `WidgetSync.noteRefused` both move `record.date`, so both set it —
+and cleared it only in `Widgets.refreshed`. That definition was satisfied BY
+CONSTRUCTION on `answered`'s early-return branch, the one that hands the
+record back with `date`/`value` unchanged because the incoming answer named a
+day OLDER than `record.date` already held: nothing there moves, so "wherever
+the strip moves" was vacuously true and the flag stayed whatever it already
+was — which is exactly wrong for a notification still in the shade about
+yesterday, answered after this morning's sync had cleared the flag: an answer
+WAS just recorded with no fetch behind it, and the note line went on reading
+"current" regardless. The rule that now holds is what `StatsWidget.render` —
+the field's one reader — actually needs to know: `figuresStale` means an
+ANSWER has been recorded with no fetch behind it, set on BOTH of `answered`'s
+branches, including the early return. A refusal (`WidgetSync.noteRefused`) is
+the one answer-shaped path that does NOT set it — but a later review of the
+call graph found the justification for that as first written was false.
+Every path that can produce a refusal — the shade's buttons, the number pad,
+a widget's own tap — reaches `noteRefused` only after `WidgetSync.noteAnswer`
+(or `Widgets.answered` directly) has already run and already set the flag, so
+`stats_figures_behind` is already on screen before the refusal is even known
+about; leaving the flag untouched changes nothing there. The one path this
+decision is not a no-op for is `MainActivity`'s own list-screen tap, which
+enqueues the write without ever calling `noteAnswer`. The choice is still
+right, for a narrower reason: a refusal never reached the server, so it is
+neither evidence the figures are behind nor evidence they are current, and a
+boolean cannot distinguish "the answer THIS refusal just rolled back" from
+"an earlier answer that landed and has not been re-fetched since" — so the
+flag is left exactly as found rather than set or cleared, and over-reporting
+staleness is the fail-safe direction. The lesson this restates: a field is
+defined by what its one reader asks of it, not by whichever mechanism happens
+to make it true elsewhere — "the strip moved" and "an answer was recorded
+with nothing behind it" agree everywhere except the one branch that
+mattered.
+
+**The ghost-kept fill, and why it lives beside `fill` rather than inside
+it.** `Widgets.markFor` already has an arm for `state == UNKNOWN &&
+habit.unloggedIsSuccess` — a ghost `✓`, because on such a habit an unanswered
+day already counts as kept, not merely unknown. `HabitWidget.fill` has no such
+arm; it did not need one, because the big cell carries that information in
+the glyph `markFor` draws beside it. The strip has no glyphs at all, so a
+strip built from plain `fill` painted that same day `widget_cell_empty` —
+named case: `show_as = "avoid"`, `at_most`, `target_value = 2`,
+`unlogged_is_success = true`, no entries in the last seven days, and
+`/overview` answering `score: 1.0, currentStreak: 7`. The widget drew "100%",
+"🔥 7" and seven empty cells: a full-marks week rendered as a blank one, beside
+a red cell for a day that really was a slip, teaching the reader that empty
+means "nothing happened". This is explicitly not the strip's already-accepted
+collapse (`UNKNOWN`, `SKIPPED` and a yes/no `NO` all read as empty) — a
+ghost-kept day is a fourth thing, on the other side of that line, and the
+model itself disagrees that the day is blank. The fix, `HabitWidget.stripFill`,
+draws the SAME faint alpha variant a numerical partial-credit day already
+uses — no new colour invented — and sits as a thin wrapper beside `fill`
+rather than a new arm inside it, specifically so the big cell's rendering and
+`HabitWidget`'s existing tests stay untouched; only `StatsWidget` calls it. A
+ghost-kept day and a numerical partial day now read identically on the strip,
+which is accepted as a smaller, deliberate loss next to a kept day painting as
+if nothing happened.
+
+The tint was the whole of the first fix, and for a round it was also the whole
+of the bug: `StatsWidget.render` built each cell's content description from
+`HabitWidget.describe`, which still answers `widget_unanswered` for
+`UNKNOWN` regardless of `unloggedIsSuccess` — so the ghost-kept cell painted
+kept and announced itself unanswered, the screen and the screen reader
+disagreeing about the same day. `HabitWidget.describeStrip` is the same shape
+of fix as `stripFill` above and lives beside `describe` for the identical
+reason: the big cell's one description stays right as it is (a `✓` right next
+to the word), so `describe` gains no new arm, and only `StatsWidget` calls the
+wrapper.
+
+**`gone` hides the figures as well as the strip, for the same reason the
+strip blanks itself.** The first cut of the stats widget blanked every strip
+cell for a `gone` record with a comment arguing that drawing the old strip
+beside "Removed" would be a second, contradicting claim about the same
+widget — but left the score percentage, the progress bar and the streak
+drawn from that same stale record, which is exactly the claim the comment
+just refused to make, on the other half of the layout. `refreshedOrGone`
+keeps a gone record's last figures in storage rather than zeroing them (the
+same reasoning as everywhere else in this file: a record quietly wiped is a
+record that cannot recover if the habit comes back), so `record.score` and
+`record.currentStreak` are still sitting there to be drawn. The fix hides
+`stats_score`, `stats_score_bar` and `stats_streak` under the same `gone`
+check the strip already uses, leaving only the name and the note line — what
+the checkmark widget already does with its one mark.
+
+**A known limitation, left alone rather than fixed here: an answer about a day
+OLDER than `record.date` does not repaint that day's cell on the strip
+either.** The asymmetry already written down for the checkmark widget's own
+cell (`Widgets.answered` ignores an answer about an older day, so the record
+is not rewound to paint a day that is over) reaches the strip the same way,
+because the strip's own-day cell reads `record.value`/`record.skip` and
+nothing else moves them for an older date. A reminder answered after midnight
+about yesterday, while the strip has already rolled to today, leaves
+yesterday's strip cell exactly as it was until the next `/overview` fetch
+lands. Self-healing, and no data is lost — the write itself still goes
+through the outbox to the correct date — so this is recorded rather than
+patched.
+
 

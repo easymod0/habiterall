@@ -1,5 +1,6 @@
 package com.habiterall.app.data
 
+import java.time.LocalDate
 import java.time.ZonedDateTime
 
 /**
@@ -72,6 +73,65 @@ object Widgets {
          * that have gone rather than only on the ones that remain.
          */
         val gone: Boolean = false,
+        /**
+         * The SERVER's score, as of [date] — cached, not recomputed. `/api/overview`
+         * already returns it per habit, and the arithmetic behind it (Loop's
+         * `0.5^(sqrt(frequency)/13)` decay, the most intricate figure in the
+         * project) is deliberately NOT mirrored here: a second implementation
+         * would drift from the first invisibly. See the comment on [refreshed],
+         * where this is taken from the fetch.
+         */
+        val score: Double = 0.0,
+        /**
+         * The SERVER's current streak, as of [date] — the same cached-answer
+         * rule as [score], and for the same reason: the streak arithmetic is
+         * not this client's to compute a second time.
+         */
+        val currentStreak: Int = 0,
+        /**
+         * The stats widget's history strip, encoded — see [encodeHistory] /
+         * [decodeHistory]. Only the dates the habit has a STATED answer for;
+         * an absent date is unknown, never "no" (root `CLAUDE.md`: never
+         * collapse the two).
+         */
+        val history: String = "",
+        /**
+         * Whether [score]/[currentStreak] are known to be behind an ANSWER
+         * this phone has recorded — not whether the strip itself has moved.
+         *
+         * [date] names the day the ENTRY is about; it does not say when the
+         * figures were last fetched, and [answered] can record an answer with
+         * no network at all — a notification's buttons, its number pad, or
+         * the checkmark widget's own tap. Left unset, a local answer left the
+         * score and streak exactly what the last `/overview` fetch said, and
+         * `record.date == today` then read as "everything here is current"
+         * when only the strip was. Set wherever an ANSWER IS RECORDED without
+         * a fetch — both of [answered]'s branches, including the one that
+         * hands the record back with `date`/`value` unchanged because the
+         * answer named an older day than the record already held: something
+         * was still recorded there (a notification still in the shade,
+         * answered after a sync), so the figures are exactly as behind as
+         * they were the instant before. The definition used to be "wherever
+         * the strip moves", which the early-return branch satisfied by
+         * construction — nothing moved — while leaving exactly the case
+         * above presenting stale figures as current; the field is defined by
+         * what its one reader (`StatsWidget.render`) asks of it, not by the
+         * mechanism that happens to make it true elsewhere. Cleared in
+         * [refreshed] — a successful fetch is exactly what makes the figures
+         * current again. `WidgetSync.noteRefused` is the one exception: a
+         * refusal never reached the server, so the last fetch's figures are
+         * unaffected by it, and it leaves this flag exactly as it found it.
+         *
+         * Defaults to `false`, same fail-safe direction as
+         * [unloggedIsSuccess] — but not because a record from before this
+         * field existed cannot hold a local answer the figures have not
+         * caught up with; it can, from a tap on the previous build waiting on
+         * its first fetch under this one. `false` is still the right
+         * default: `true` would put a spurious note on every widget on every
+         * upgrading phone, and the window `false` leaves open is one
+         * pre-upgrade local answer, closing at the very next fetch.
+         */
+        val figuresStale: Boolean = false,
     ) {
         /**
          * Enough of a habit for the rules that decide a tap and its colour.
@@ -234,6 +294,120 @@ object Widgets {
     }
 
     /**
+     * How many strip cells a widget of this width should draw.
+     *
+     * Explicit thresholds rather than an arithmetic formula, because there is
+     * no calculation to justify — this is a designer's answer to "how many
+     * cells fit", pinned as literals so a test asserts the literals and not a
+     * constant that could drift with the layout unnoticed.
+     */
+    const val MAX_STRIP_DAYS = 7
+
+    fun stripDays(minWidthDp: Int): Int = when {
+        minWidthDp >= 250 -> 7
+        minWidthDp >= 210 -> 6
+        minWidthDp >= 170 -> 5
+        minWidthDp >= 130 -> 4
+        else -> 3
+    }
+
+    /**
+     * The stats widget's history strip, encoded into one field of [Record].
+     *
+     * Comma-separated `date:value` tokens, or `date:s` for a skip — only for
+     * dates the habit has a STATED answer for; an absent date means unknown,
+     * never "no" (root `CLAUDE.md`: never collapse the two). Read through
+     * `habit.isSkipped`/`valueOn`, the same pair [refreshed] itself reads, so
+     * a Loop SKIP sentinel and the out-of-band skip list resolve to the same
+     * date only once.
+     *
+     * Machine-built from dates and doubles, so unlike [Record.name] or
+     * [Record.unit] this can never itself hold `|`, `\n` or `\r` — there is
+     * nothing here [flatten] would ever have to strip.
+     */
+    fun encodeHistory(habit: Habit, endDate: String, days: Int): String {
+        val end = LocalDate.parse(endDate)
+        return (0 until days)
+            .map { end.minusDays(it.toLong()).toString() }
+            .mapNotNull { date ->
+                if (habit.isSkipped(date)) "$date:s"
+                else habit.valueOn(date)?.let { "$date:$it" }
+            }
+            .joinToString(",")
+    }
+
+    /**
+     * The reverse of [encodeHistory]: date -> (value, isSkip).
+     *
+     * A malformed token is skipped rather than fatal, [decode]'s own rule
+     * applied one field deeper — one bad token in the strip must not cost the
+     * rest of it.
+     */
+    fun decodeHistory(s: String): Map<String, Pair<Double?, Boolean>> {
+        if (s.isEmpty()) return emptyMap()
+        return s.split(",").mapNotNull { token ->
+            val parts = token.split(":")
+            if (parts.size != 2) return@mapNotNull null
+            val (date, v) = parts
+            if (v == "s") date to (null as Double? to true)
+            else v.toDoubleOrNull()?.let { date to (it as Double? to false) }
+        }.toMap()
+    }
+
+    /**
+     * The strip's resolution: [columns] days, oldest first, ending at [today].
+     *
+     * `record.date` is the one exception to reading [decodeHistory]: it
+     * resolves from `record.value`/`record.skip` instead, because that pair is
+     * what `WidgetSync.noteAnswer` keeps current — the notification's buttons
+     * and its number pad map over every record for the habit, so an answer
+     * given there has to show on every one of its widgets immediately, or two
+     * widgets for the same habit on one home screen would disagree about the
+     * same day. A widget's own tap does NOT reach that far: `HabitWidget.tap`
+     * writes back only its own record (`putWidgets(listOf(...))`, and
+     * `Settings.putWidgets` upserts keyed by `widgetId`), so a second widget
+     * for the same habit is untouched by it and the two stay disagreeing
+     * until the next fetch — the carve-out below is still worth having for
+     * the case it actually closes, `noteAnswer`'s. [stateOn] already draws
+     * exactly that distinction (unknown unless the date matches
+     * `record.date`), so it is reused rather than a fifth opinion about what
+     * a stored day means.
+     *
+     * A date with no answer — including every date AFTER `record.date` on a
+     * stale record, [today] itself among them — is UNKNOWN, never NO.
+     *
+     * No `questionMarks` parameter: the strip has no glyphs (see the comment
+     * on `StatsWidget.render`), so there is nothing here for the setting to
+     * govern, and the tap cycle it otherwise feeds (`Grid.nextState`) is
+     * unreachable from a read-only widget. STEP 1 carried it to match this
+     * function's brief signature; it was unused, and an unused parameter is a
+     * false claim that the function honours the setting.
+     */
+    fun stripStates(
+        record: Record,
+        today: String,
+        columns: Int,
+    ): List<Pair<String, Grid.DayState>> {
+        val history = decodeHistory(record.history)
+        val end = LocalDate.parse(today)
+        val dates = (0 until columns).map { end.minusDays(it.toLong()).toString() }.reversed()
+        return dates.map { date ->
+            val state = if (date == record.date) {
+                stateOn(record, date)
+            } else {
+                val entry = history[date]
+                if (entry == null) Grid.DayState.UNKNOWN
+                else Grid.dayStateOf(
+                    entry.first,
+                    entry.second,
+                    record.habit.isMet(entry.first, entry.second) == true,
+                )
+            }
+            date to state
+        }
+    }
+
+    /**
      * The record after a refresh, whether or not the habit is still there.
      *
      * A null [habit] means the account no longer has it — deleted, or archived,
@@ -273,6 +447,18 @@ object Widgets {
         // Server-resolved, and not this client's to compute — see
         // `Habit.unloggedIsSuccess`.
         unloggedIsSuccess = habit.unloggedIsSuccess,
+        // The cached ANSWER, not the rule: `/api/overview` already computed
+        // these, and the decay behind `score` and the arithmetic behind
+        // `currentStreak` are deliberately NOT reimplemented here — see the
+        // KDoc on `Record.score`. This is the one place the figures are taken
+        // from the fetch; if "make the strip update between syncs" ever looks
+        // tempting, the answer is still no.
+        score = habit.score,
+        currentStreak = habit.currentStreak,
+        history = encodeHistory(habit, today, MAX_STRIP_DAYS),
+        // A successful fetch is exactly what makes the figures current
+        // again — see the KDoc on `Record.figuresStale`.
+        figuresStale = false,
     )
 
     /**
@@ -291,8 +477,23 @@ object Widgets {
      * widget has already moved on to.
      */
     fun answered(record: Record, date: String, value: Double?, skip: Boolean) =
-        if (date < record.date) record else
-        record.copy(date = date, value = value, skip = skip)
+        if (date < record.date) {
+            // `date`/`value` stay put — an older answer must not rewind the
+            // record — but an ANSWER was still just recorded with no fetch
+            // behind it: a notification still in the shade about yesterday,
+            // pressed after this morning's sync. `figuresStale` is defined by
+            // that, not by whether the strip moved, so it is set here too.
+            // Handing back `record` unchanged used to leave the flag exactly
+            // as it was before this answer — `false`, if the morning's fetch
+            // had cleared it — presenting the 08:00 score and streak as
+            // current while this write sits in the outbox.
+            record.copy(figuresStale = true)
+        } else {
+            // The strip has moved too; the score and streak have not —
+            // nothing here re-fetched `/overview`, so `figuresStale` records
+            // that the two have parted ways until the next one does.
+            record.copy(date = date, value = value, skip = skip, figuresStale = true)
+        }
 
     /**
      * `widgetId|habitId|name|type|target|targetType|showAs|color|unit|date|value|skip`.
@@ -327,6 +528,18 @@ object Widgets {
         // end: a record written before this one existed has thirteen fields
         // and must still draw.
         if (r.unloggedIsSuccess) "1" else "0",
+        // Fields 14-15-16, the stats widget's cached figures. Same rule again:
+        // a record written before these existed has fourteen fields and must
+        // still draw, reading `0.0` / `0` / "" back for them.
+        r.score.toString(),
+        r.currentStreak.toString(),
+        // Not `flatten`ed: `encodeHistory` builds this from dates and doubles
+        // only, so it never contains `|`, `\n` or `\r` to strip.
+        r.history,
+        // Field 17, same append-only rule as 14-16: a record written before
+        // this existed has seventeen fields and must still draw, reading
+        // `false` back — the strip's own currency, not the figures'.
+        if (r.figuresStale) "1" else "0",
     ).joinToString("|")
 
     /**
@@ -371,6 +584,25 @@ object Widgets {
             // known to be kept" — the fail-safe direction, same as `Habit`'s
             // own default — rather than a claim either way.
             unloggedIsSuccess = f.getOrNull(13) == "1",
+            // Fields 14-15-16. A record written before the stats widget
+            // existed has fourteen fields; a junk token in any of these three
+            // (a future field this build does not understand shifting them,
+            // or plain corruption) falls back rather than throwing — a bad
+            // score must not cost the whole record the way a bad widgetId or
+            // habitId already does above.
+            score = f.getOrNull(14)?.toDoubleOrNull() ?: 0.0,
+            currentStreak = f.getOrNull(15)?.toIntOrNull() ?: 0,
+            history = f.getOrNull(16) ?: "",
+            // Field 17. Absent defaults to `false` — not because a record
+            // from before this field existed cannot hold a local answer the
+            // figures have not caught up with (it can: a tap on the previous
+            // build, still waiting on its first fetch under this one), but
+            // because `true` instead would put a spurious note on every
+            // widget on every upgrading phone. The window `false` leaves
+            // open is one pre-upgrade local answer, closing at the very next
+            // fetch — same fail-safe direction as `unloggedIsSuccess` above,
+            // for a real and bounded cost rather than none.
+            figuresStale = f.getOrNull(17) == "1",
         )
     }
 

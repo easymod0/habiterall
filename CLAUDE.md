@@ -80,15 +80,15 @@ only defaults, and why `compileSdk` is 37 while `targetSdk` stays 36.
 |---|---|---|
 | `shared/src/` | `shared/CLAUDE.md` | `docs/decisions/day-states.md`, `awards.md`, `import-and-loop.md`, `categories.md`, `phantom-dates.md` |
 | `shared/public/` | `shared/CLAUDE.md`, `shared/public/CLAUDE.md` | `dashboard-and-detail.md`, `routing.md`, `amounts.md`, `notifications-web.md`, `categories.md`, `caching.md`, `phantom-dates.md` |
-| `android-native/` | `android-native/CLAUDE.md` | `android.md`, `routing.md`, `caching.md` |
+| `android-native/` | `android-native/CLAUDE.md` | `android.md`, `routing.md`, `caching.md`, `android-stats-screen.md` |
 | `habiterall-personal/` | `habiterall-personal/CLAUDE.md` | `auth.md`, `caching.md` |
 | `habiterall-cloud/` | `habiterall-cloud/CLAUDE.md` | `auth.md`, `connectivity.md`, `caching.md`, `sharing-and-rls.md` |
 | reminders, any channel | `shared/CLAUDE.md` | `reminders.md`, `discord.md`, `timezones.md`, `outbound-urls.md`, `icons.md` |
 | `site/`, habiterall.ca | `site/CLAUDE.md` | `site.md` |
 | `examples/`, compose, env | `examples/CLAUDE.md` | `compose-and-env.md` |
-| settings, client mirrors, and what may never be one | here, below | `settings-and-mirrors.md`, `must-stay-fixed.md` |
+| settings, client mirrors, and what may never be one | here, below | `settings-and-mirrors.md`, `must-stay-fixed.md`, `translations.md` |
 | a habit's `icon`, any tier | `shared/CLAUDE.md`, `android-native/CLAUDE.md` | `icons.md` |
-| performance, or "should this be another language" | `shared/CLAUDE.md` | `runtime.md`, `caching.md` |
+| performance, or "should this be another language" | `shared/CLAUDE.md` | `runtime.md`, `caching.md`, `materialized-figures.md` |
 | `shared/test/browser/` | here, below | `testing.md` |
 
 ## Rules that reach everywhere
@@ -348,6 +348,7 @@ Several layers, and they catch different things:
 | The same, over SQLite | `npm run test:summarycache -w habiterall-personal` | nothing |
 | The same cache under a FORCED race | `npm run test:summaryrace -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
+| The scheduled backup, and what it prunes | `npm run test:backup -w habiterall-personal` | nothing |
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
 | Award inputs, from storage | `npm run test:awards -w habiterall-personal` | nothing |
 | Whose day a route judges by | `npm run test:callerday -w habiterall-personal` | nothing |
@@ -359,6 +360,7 @@ Several layers, and they catch different things:
 | Cloud SIGTERM drains, and the pool closes | `npm run test:drain -w habiterall-cloud` | Postgres |
 | Which claim names the account | `npm run test:claims -w habiterall-cloud` | Postgres |
 | Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |
+| The scheduled dump, and what it prunes | `npm run test:backup -w habiterall-cloud` | Postgres |
 | Query plans and schema invariants | `npm run test:plans -w habiterall-cloud` | Postgres |
 | Tenancy | `npm run test:tenancy` | Postgres |
 | Compose files | `npm run docs:compose -- --check`, and the CI `compose` job | Docker, for the job |

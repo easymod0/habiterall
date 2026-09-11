@@ -132,9 +132,37 @@
         </receiver>
 
         <!--
+          One habit's score, streak and a seven-day strip. Read-only —
+          decision 3, no new tap/write semantics — and a second provider over
+          the SAME record store as `HabitWidget` (decision 5): the same three
+          recoverability mechanisms (`remap`/`onRestored`, `refreshedOrGone`,
+          the encode/decode fail-safes) cover it for free, which is why this
+          is not a second store.
+
+          The same two clock actions as `HabitWidget`, for the same reason —
+          see the comment there for why `DATE_CHANGED` is deliberately absent
+          and `TIME_SET`/`TIMEZONE_CHANGED` are kept.
+        -->
+        <receiver
+            android:name=".widget.StatsWidget"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/stats_widget_info" />
+        </receiver>
+
+        <!--
           Asks which habit a newly-placed widget is for. Exported, because the
           launcher starts it: that is what a configuration activity is, and
           the only thing it can be told is a widget id the launcher just made.
+          Shared by both providers — it is now the configure activity for
+          `StatsWidget` too, and there is no second `APPWIDGET_CONFIGURE`
+          declaration to add.
         -->
         <activity
             android:name=".widget.WidgetConfigActivity"

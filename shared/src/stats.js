@@ -884,10 +884,13 @@ export function computeMissRuns(habit, entryMap, start, end, unlogged = UNLOGGED
  * not go back to the entries for them: the window every figure in a stats
  * response is computed over (`from = start ?? firstEntry`, clamped) is derived
  * inside `computeStats` and never returned, so a second derivation is a second
- * answer waiting to disagree with this one.
+ * answer waiting to disagree with this one. `averageLength` joins that same
+ * convention: the mean over the CLOSED runs, like `longest` and `lastEnd`, and
+ * `null` rather than 0 for an empty set — a maximum over no lapses is a
+ * meaningful 0, but an average over none is undefined.
  *
  * @returns {{rate: number|null, recovered: number, lapses: number, openRun: number,
- *            longest: number, lastEnd: string|null}}
+ *            longest: number, lastEnd: string|null, averageLength: number|null}}
  *   `rate` is null when nothing has ever been missed — undefined, not 100%.
  */
 export function computeRecovery(missRuns, end) {
@@ -900,7 +903,10 @@ export function computeRecovery(missRuns, end) {
   const openRun = isOpen ? last.length : 0;
 
   if (!closed.length) {
-    return { rate: null, recovered: 0, lapses: 0, openRun, longest: 0, lastEnd: null };
+    return {
+      rate: null, recovered: 0, lapses: 0, openRun, longest: 0, lastEnd: null,
+      averageLength: null,
+    };
   }
   const recovered = closed.filter((r) => r.length === 1).length;
   return {
@@ -914,6 +920,9 @@ export function computeRecovery(missRuns, end) {
     // already draws for the rate.
     longest: closed.reduce((max, r) => Math.max(max, r.length), 0),
     lastEnd: closed[closed.length - 1].end,
+    // Unrounded — the tile that renders it rounds, the same way `rate` is
+    // rounded at the tile rather than here.
+    averageLength: closed.reduce((sum, r) => sum + r.length, 0) / closed.length,
   };
 }
 

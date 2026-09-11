@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  One habit's score, streak and recent days — read-only (decision 3: a tap
+  opens the app on that habit, the widget itself answers nothing). Built from
+  the same four colour roles `widget_habit.xml` uses, so a cell here and a
+  cell in the app read as the same thing.
+
+  This widget follows the LAUNCHER's light/dark configuration, never the
+  account's `theme` setting — `res/values-night/colors.xml` is the only
+  `values-night` in the app, and that has always been the behaviour; this
+  comment is decision 6, writing it down as a choice rather than leaving it
+  the default nobody chose.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/stats_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center_horizontal"
+    android:padding="8dp"
+    android:background="@drawable/widget_background">
+
+    <TextView
+        android:id="@+id/stats_name"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textSize="12sp"
+        android:textColor="@color/widget_text"
+        android:paddingBottom="4dp"
+        android:text="@string/app_name" />
+
+    <!--
+      Only ever visible for a stale or gone record (decision 2). A widget has
+      no `onResume`, so the figures below can be several syncs old with
+      nothing else on screen able to say so — and a `setContentDescription`
+      alone already shipped that exact bug once
+      (docs/decisions/android.md).
+    -->
+    <TextView
+        android:id="@+id/stats_note"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textSize="10sp"
+        android:textColor="@color/widget_text"
+        android:paddingBottom="4dp"
+        android:visibility="gone" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingBottom="2dp">
+
+        <TextView
+            android:id="@+id/stats_score"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="@color/widget_text"
+            android:paddingEnd="6dp"
+            android:text="0%" />
+
+        <ProgressBar
+            android:id="@+id/stats_score_bar"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="0dp"
+            android:layout_height="8dp"
+            android:layout_weight="1"
+            android:max="100"
+            android:progress="0" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/stats_streak"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:textSize="12sp"
+        android:textColor="@color/widget_text"
+        android:paddingBottom="4dp" />
+
+    <!--
+      MAX_STRIP_DAYS (`Widgets.MAX_STRIP_DAYS`) cells, oldest on the left,
+      ending at today. Colour-only — no glyphs at this size — so UNKNOWN,
+      SKIPPED and a yes/no NO all tint to `widget_cell_empty` and are not
+      told apart here; that collapse is accepted (the per-day answer is one
+      tap away in the app). The avoided-habit inversion still applies: a
+      clean day is the habit's own colour and a slip is `HabitWidget.SLIP`
+      red, from the SAME `fill` the checkmark widget uses, applied once.
+      Cells beyond what `Widgets.stripDays` asks for are set GONE at
+      render time rather than removed here, so a resize can reveal them
+      again without re-inflating the layout.
+    -->
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center">
+
+        <ImageView
+            android:id="@+id/stats_cell_0"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:layout_margin="2dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+
+        <ImageView
+            android:id="@+id/stats_cell_1"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:layout_margin="2dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+
+        <ImageView
+            android:id="@+id/stats_cell_2"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:layout_margin="2dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+
+        <ImageView
+            android:id="@+id/stats_cell_3"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:layout_margin="2dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+
+        <ImageView
+            android:id="@+id/stats_cell_4"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:layout_margin="2dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+
+        <ImageView
+            android:id="@+id/stats_cell_5"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:layout_margin="2dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+
+        <ImageView
+            android:id="@+id/stats_cell_6"
+            android:layout_width="20dp"
+            android:layout_height="20dp"
+            android:layout_margin="2dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+    </LinearLayout>
+</LinearLayout>

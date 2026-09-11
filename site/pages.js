@@ -95,7 +95,7 @@ export const PAGES = [
     slug: 'backup',
     title: 'Backup and restore',
     blurb: 'Every export format, and what merge and replace each do.',
-    claims: ['Backup and restore'],
+    claims: ['Backup and restore', 'Scheduled backups'],
   },
   {
     slug: 'upgrading',

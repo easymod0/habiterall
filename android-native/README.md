@@ -98,6 +98,16 @@ the device (`Widgets.Record`), the write goes to the outbox like a notification'
 does, and the cell repaints the moment you tap it rather than when the server
 agrees.
 
+A second widget is read-only: place it and pick a habit the same way, and it
+shows that habit's score, current streak and a seven-day strip instead of a tap
+target — nothing about it ever writes. The figures are the server's own
+(`score`, `currentStreak` from `/api/overview`), never recomputed on the phone.
+The strip is colour only, one cell per day: a clean day is the habit's own
+colour, a slip on a habit you're avoiding is red, and an unanswered day, a
+skipped one and a logged "no" all draw the same empty cell — there is no room
+for a symbol at this size, and the exact answer for any one day is one tap
+away in the app, which is what tapping the widget opens.
+
 Two things are worth knowing before changing it:
 
 - **The record says which DAY it is about.** A widget has no `onResume`, so a
@@ -123,6 +133,11 @@ Two things are worth knowing before changing it:
   habits — and a record simply dropped would leave the last cell on screen,
   still tappable, recording writes that 404 forever. The widget says *Removed*
   under the habit's name and its tap opens the app.
+- **The stats widget says when its own figures are stale**, on a line under the
+  habit's name — "As of \<date\>" — rather than showing a day-old score as if
+  it were current. A widget has no `onResume` to notice on its own that a sync
+  hasn't landed since; the redraw triggers above are what update the line, the
+  same as everything else on the widget.
 
 ## Requirements
 
@@ -467,6 +482,13 @@ change.
 
 ## Roadmap
 
-- The other widgets Loop ships — frequency, score, history. The checkmark is
-  the one that replaces opening the app, and it is done
+- The widgets Loop ships that this app does not. Score and history are done —
+  the stats widget carries both, a percentage and a seven-day strip — and the
+  checkmark, the one that replaces opening the app, was done before it. What is
+  left is **frequency**, and the **overview** widget of issue #145: every habit
+  down one side and the last few days across, which is a third cache shape
+  (many habits × several days, where the reminder cache holds only habits
+  carrying a reminder and the widget cache holds one habit each) and a bound
+  nobody has chosen yet — a home screen cannot show forty rows, so it is either
+  the first N by position or a configuration screen
 - Porting individual screens from web to native where it clearly helps

@@ -123,6 +123,34 @@ test('a habit that never recovers scores zero', () => {
   assert.equal(r.lapses, 2);
 });
 
+test('averageLength is the MEAN of the closed lapses, not the median', () => {
+  // Closed lapses: four 1-day ones and one 10-day one. Mean = 14/5 = 2.8;
+  // the median of the same set is 1 — a median implementation would fail
+  // this assertion.
+  const r = recoveryOf('x.x.x.x.x..........x');
+  assert.equal(r.rate, 4 / 5, 'the fixture\'s shape: rate');
+  assert.equal(r.longest, 10, 'the fixture\'s shape: longest');
+  assert.equal(r.averageLength, 2.8);
+});
+
+test('averageLength is null, not 0, when there are no closed lapses', () => {
+  const r = recoveryOf('xxxxx');
+  // `strictEqual`, not `equal`: loose equality makes `undefined == null` true,
+  // so the looser assertion also passed when the key was dropped from the
+  // empty-closed branch altogether — which is the half of "null, not 0" that
+  // this test exists to pin.
+  assert.strictEqual(r.averageLength, null);
+  assert.ok(r.averageLength !== 0, 'null must not read as zero');
+});
+
+test('an open lapse is not counted in the average', () => {
+  // One closed 1-day lapse, then an open 4-day one. Counting the open run
+  // would give (1 + 4) / 2 = 2.5; only the closed run counts, so 1.
+  const r = recoveryOf('x.xx....');
+  assert.equal(r.openRun, 4);
+  assert.equal(r.averageLength, 1);
+});
+
 /* ---------- distribution ---------- */
 
 test('miss runs land in the right buckets', () => {
@@ -353,6 +381,8 @@ test('computeStats exposes resilience', () => {
   assert.equal(stats.resilience.applicable, true);
   assert.equal(stats.resilience.recovery.rate, 1, 'the single 1-day lapse was recovered');
   assert.equal(stats.resilience.worstLapse, 1);
+  assert.equal(stats.resilience.recovery.averageLength, 1,
+    'the payload reaches computeStats, not just computeRecovery in isolation');
 });
 
 test('resilience survives a habit with no entries at all', () => {
@@ -382,6 +412,8 @@ test('a trailing skip does not close an ongoing lapse', () => {
       `"${withSkip}" reported rate ${b.rate}, but "${plain}" reports ${a.rate}`);
     assert.equal(b.lapses, a.lapses, `lapses differ for "${withSkip}"`);
     assert.equal(b.openRun, a.openRun, `openRun differs for "${withSkip}"`);
+    assert.equal(b.averageLength, a.averageLength,
+      `averageLength differs for "${withSkip}"`);
   }
 });
 

@@ -26,6 +26,12 @@ const SUMMARY_WINDOW_DAYS = 400;
 import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
 import { applyImport } from './apply-import.js';
 import { deliveryStatus, sendTest } from './notifier.js';
+// `backupStatus`/`backupConfig` only — never `runBackup` or anything that
+// touches the filesystem, and this import must stay one-way: `backup.js`
+// imports `buildBackupPayload` from THIS module, so importing anything back
+// from `backup.js` that itself reached into `api.js` would close a cycle.
+// See `habiterall-personal/src/backup.js` for the resolution.
+import { backupStatus, backupConfig } from './backup.js';
 import {
   parseHabit, parseEntry, parseSettings, portableSettings, entryWrite, assertDate,
   assertNotFuture, parseCategory, parseCategoryId, foldCategoryName, LIMITS,
@@ -1173,9 +1179,53 @@ api.get('/notify/status', (req, res) => {
   res.json({ channels: deliveryStatus() });
 });
 
+/**
+ * The scheduled backup's own status — same shape of question as
+ * `/notify/status`, for the same reason: a job nobody watches is a job
+ * failing in silence. `enabled`/`schedule`/`keep` come from `backupConfig`,
+ * `last` from the one `backup_status` row (`backupStatus`), never from
+ * `api.js` reaching into the filesystem or the environment itself.
+ *
+ * The directory path must NEVER appear in this response, and `last.file` is
+ * a basename only, comma-joined when a run wrote more than one
+ * (`HABITERALL_BACKUP_FORMAT=both`) with `last.bytes` the total across them.
+ * The operator chose the directory in their own compose file and does not
+ * need the app to read it back to them; on an edition whose password is
+ * optional, disclosing a server filesystem path buys nothing. This is not
+ * the settings blob and is never carried by `/api/export` — see `db.js`'s
+ * comment above `backup_status`.
+ */
+api.get('/backup/status', (req, res) => {
+  const cfg = backupConfig(process.env);
+  const row = backupStatus();
+  res.json({
+    enabled: cfg.enabled,
+    schedule: cfg.enabled ? cfg.schedule : null,
+    keep: cfg.enabled ? cfg.keep : null,
+    last: row
+      ? {
+        date: row.date,
+        state: row.state,
+        error: row.error,
+        file: row.file,
+        bytes: row.bytes,
+        pruned: row.pruned,
+        at: row.at,
+      }
+      : null,
+  });
+});
+
 /* ---------- export / import ---------- */
 
-api.get('/export', (req, res) => {
+/**
+ * The full-fidelity JSON backup payload — everything needed to restore an
+ * account, byte for byte the same body `GET /export` sends. Exported so the
+ * scheduled backup (`habiterall-personal/src/backup.js`) can call the exact
+ * same builder rather than a second copy of it: **one code path**, so the
+ * scheduled file is provably what the button produces.
+ */
+export function buildBackupPayload() {
   const habits = q.allHabits.all(0).concat(q.allHabits.all(1));
   // The backup carries a category by NAME, not by id: an id is meaningless
   // once restored somewhere else (or nowhere, on a Loop round trip), and a
@@ -1186,7 +1236,7 @@ api.get('/export', (req, res) => {
   // them separately.
   const categories = /** @type {any[]} */ (q.allCategories.all());
   const categoryNames = new Map(categories.map((c) => [c.id, c.name]));
-  const payload = {
+  return {
     version: 1,
     app: 'habiterall',
     exported_at: new Date().toISOString(),
@@ -1208,13 +1258,15 @@ api.get('/export', (req, res) => {
     // to themselves, and `discordWebhook` is a bearer capability for a channel.
     settings: portableSettings(readSettings()),
   };
+}
 
+api.get('/export', (req, res) => {
   if (req.query.download === 'true') {
     const stamp = today();
     res.setHeader('Content-Disposition',
       `attachment; filename="habiterall-backup-${stamp}.json"`);
   }
-  res.json(payload);
+  res.json(buildBackupPayload());
 });
 
 /**

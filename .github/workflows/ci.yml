@@ -476,6 +476,39 @@ jobs:
           ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
         run: node test/summary-race.integration.mjs
 
+      # The FIRST package install in this workflow. `pg_dump` refuses to dump
+      # a server newer than itself, and the runner image's own client is not
+      # pinned by this repo — it has historically been older than the
+      # `postgres:17-alpine` server above. Installed from PGDG rather than
+      # trusted to whatever the runner image happens to carry, so the pin
+      # here is explicit: a Postgres major bump in this repo means bumping
+      # this pin AND the image's (`habiterall-cloud/Dockerfile`) together.
+      - name: Install a Postgres 17 client (for the scheduled backup suite)
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | \
+            sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+
+      # The scheduled whole-database `pg_dump` (issue #75): the schedule and
+      # retention math over a real Postgres, the pure functions that keep the
+      # password out of argv and `--enable-row-security` out of the call
+      # entirely, the coupling with reminders being off, and the route's
+      # disclosure. `HABITERALL_PG_DUMP` is pinned to the client installed
+      # above rather than left to `PATH` ordering.
+      - name: The scheduled dump, and what it prunes
+        working-directory: habiterall-cloud
+        env:
+          DATABASE_URL: postgres://habiterall_app:apptestpw@localhost:5432/habiterall
+          ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
+          DATABASE_URL_ADMIN: postgres://owner:testpw@localhost:5432/habiterall
+          HABITERALL_PG_DUMP: /usr/lib/postgresql/17/bin/pg_dump
+        run: node test/backup.integration.mjs
+
   roundtrip:
     name: Backup round-trip (personal)
     runs-on: ubuntu-latest
@@ -564,6 +597,15 @@ jobs:
       - name: A write clears the habit summary cache (SQLite)
         working-directory: habiterall-personal
         run: node test/summary-cache.integration.mjs
+
+      # The nightly JSON export (issue #75): the scheduled file must be
+      # byte-for-byte what the in-app button produces, the dedupe and
+      # retention survive a real tick, an unwritable directory is reported
+      # rather than fatal, and HABITERALL_NOTIFY=off must not silently take
+      # the backup down with it.
+      - name: Scheduled backups, and what they prune
+        working-directory: habiterall-personal
+        run: node test/backup.integration.mjs
 
   compose:
     name: Compose files

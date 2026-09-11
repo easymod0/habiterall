@@ -15,8 +15,10 @@ const {
   zonedClock, AUTO_ZONE, DEVICE_ZONE_HEADER,
 } = await import('../src/notify.js');
 
-const { deliverAccount, mapWithLimit, postWebhook, resetSaid, runTick, sendToChannel, warnUnreachable } =
-  await import('../src/notify-send.js');
+const {
+  deliverAccount, mapWithLimit, postWebhook, resetSaid, runTick, sendToChannel, startNotifier,
+  warnUnreachable,
+} = await import('../src/notify-send.js');
 
 const { parseSettings } = await import('../src/validate.js');
 
@@ -2434,4 +2436,97 @@ test('a tick with one ntfy account behaves exactly as before — the gate is a n
     if (before === undefined) delete process.env.NTFY_ALLOWED_HOSTS;
     else process.env.NTFY_ALLOWED_HOSTS = before;
   }
+});
+
+/* ---------- startNotifier's one generic hook, for a periodic job that isn't
+   reminders ---------- */
+
+test('onTick runs once per tick, after collect, with the same instant runTick used', async () => {
+  const order = [];
+  const instant = utc(2026, 8, 13, 8, 0);
+  let resolveDone;
+  const done = new Promise((resolve) => { resolveDone = resolve; });
+
+  const notifier = startNotifier({
+    collect: () => { order.push('collect'); return []; },
+    mark: () => {},
+    recordOutcome: () => {},
+    instant,
+    intervalMs: 1000,
+    onTick: (i) => {
+      order.push('onTick');
+      assert.equal(i, instant, 'onTick must see the same instant runTick used, not a second clock read');
+      resolveDone();
+    },
+  });
+
+  await done;
+  notifier.stop();
+
+  assert.deepEqual(order, ['collect', 'onTick']);
+});
+
+test('an onTick that rejects is caught and logged, and does not take the tick down — a later tick still calls collect', async () => {
+  const errors = [];
+  let collectCalls = 0;
+  let resolveSecond;
+  const second = new Promise((resolve) => { resolveSecond = resolve; });
+
+  const notifier = startNotifier({
+    collect: () => {
+      collectCalls += 1;
+      if (collectCalls === 2) resolveSecond();
+      return [];
+    },
+    mark: () => {},
+    intervalMs: 1000,
+    onTick: () => Promise.reject(new Error('disk full')),
+    log: { error: (event, err) => errors.push([event, err?.message]) },
+  });
+
+  // Getting here at all is half the assertion: `startNotifier` returns
+  // `{stop}` synchronously and never rejects, however `onTick` behaves.
+  await second;
+  notifier.stop();
+
+  assert.ok(
+    errors.some(([event, msg]) => event === 'notify: onTick failed:' && msg === 'disk full'),
+    `expected a logged onTick failure, got ${JSON.stringify(errors)}`,
+  );
+  assert.ok(collectCalls >= 2, 'a rejecting onTick must not stop the next tick from running');
+});
+
+test('a collect that throws still lets onTick run — the same symmetry the other way', async () => {
+  // `runTick` already catches a failing `collect` itself and resolves
+  // normally (see the comment on `notify.collect_failed`), so this pins the
+  // outer requirement directly: `onTick` runs after `runTick` regardless of
+  // how the tick went, not only when nothing inside it failed.
+  //
+  // What this does NOT prove: because `runTick` swallows a throwing `collect`
+  // internally and always resolves, this case never actually exercises
+  // `startNotifier`'s own `try` around `await runTick(...)` — `runTick` never
+  // throws OUT to it, here or under any input this suite can construct
+  // (`runTick` is imported directly rather than injected, so there is no seam
+  // to force it to throw past its own catch). That outer `try` is therefore
+  // defensive against a `runTick` that cannot currently throw; this test pins
+  // the real and useful property above (a reminder-side failure does not stop
+  // the backup) but does not, and cannot, pin the ORDERING against a `runTick`
+  // that throws past its own catch — a mutation moving `onTick` inside that
+  // `try` passes every case here.
+  const order = [];
+  let resolveDone;
+  const done = new Promise((resolve) => { resolveDone = resolve; });
+
+  const notifier = startNotifier({
+    collect: () => { order.push('collect'); throw new Error('database is locked'); },
+    mark: () => {},
+    intervalMs: 1000,
+    onTick: () => { order.push('onTick'); resolveDone(); },
+    log: { error: () => {} },
+  });
+
+  await done;
+  notifier.stop();
+
+  assert.deepEqual(order, ['collect', 'onTick']);
 });

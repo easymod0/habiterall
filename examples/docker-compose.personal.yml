@@ -39,6 +39,15 @@ services:
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}                  # adds Yes / No / Skip buttons
       NTFY_ALLOWED_HOSTS: ${NTFY_ALLOWED_HOSTS:-}                # ntfy.sh; name your own to replace it
 
+      # Scheduled backups. Empty DIR is off. No new volume needed -- /data is
+      # already mounted below, so /data/backups lands in the same volume as
+      # the database; a separate mount is better for disaster recovery, since
+      # a volume that dies takes both with it.
+      HABITERALL_BACKUP_DIR: ${HABITERALL_BACKUP_DIR:-}          # e.g. /data/backups; empty is off
+      HABITERALL_BACKUP_SCHEDULE: ${HABITERALL_BACKUP_SCHEDULE:-}  # 03:00
+      HABITERALL_BACKUP_KEEP: ${HABITERALL_BACKUP_KEEP:-}          # 7
+      HABITERALL_BACKUP_FORMAT: ${HABITERALL_BACKUP_FORMAT:-}      # json (default), db, or both
+
       # Limits and logging. Empty means the default, so these are here to make
       # the knob reachable from .env rather than to set anything — a variable
       # this file does not name never reaches the container at all.

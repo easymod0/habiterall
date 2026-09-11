@@ -11,6 +11,7 @@ import android.widget.RemoteViews
 import androidx.core.content.ContextCompat
 import com.habiterall.app.R
 import com.habiterall.app.data.Grid
+import com.habiterall.app.data.Habit
 import com.habiterall.app.data.Outbox
 import com.habiterall.app.data.Settings
 import com.habiterall.app.data.Widgets
@@ -182,41 +183,87 @@ class HabitWidget : AppWidgetProvider() {
         /** Our own midnight, because the platform's broadcast never arrives. */
         const val ACTION_MIDNIGHT = "com.habiterall.app.WIDGET_MIDNIGHT"
 
-        /** A slip, in the same red the day grid paints one. */
-        private const val SLIP = 0xFFDC2626.toInt()
+        /**
+         * A slip, in the same red the day grid paints one.
+         *
+         * `internal`, along with [fill], [habitColor] and [describe] below:
+         * `StatsWidget`'s strip needs the identical avoided-habit inversion,
+         * and decision 7 (the brief this issue was built from) is that it is
+         * applied ONCE, by reusing this code, rather than written a second
+         * time where it could drift from this one.
+         */
+        internal const val SLIP = 0xFFDC2626.toInt()
+
+        /**
+         * The launcher's live ids, split by which of the TWO providers drew
+         * them.
+         *
+         * Both [redraw] and [armMidnight] used to ask only for
+         * [HabitWidget]'s own ids — hard-coded, from before [StatsWidget]
+         * existed — which is the "pinning the decision is not pinning the
+         * wiring" shape this package names repeatedly: a stats widget alone on
+         * the home screen was never redrawn by any of the five triggers, and
+         * `armMidnight` cancelled the ONLY alarm that would ever have fixed
+         * that, because "wanted" asked the same hard-coded question. One
+         * helper, used by both, so the two cannot drift apart on which
+         * providers count again.
+         */
+        private fun liveIds(app: Context, manager: AppWidgetManager): Pair<Set<Int>, Set<Int>> {
+            val checkmark = manager.getAppWidgetIds(ComponentName(app, HabitWidget::class.java)).toSet()
+            val stats = manager.getAppWidgetIds(ComponentName(app, StatsWidget::class.java)).toSet()
+            return checkmark to stats
+        }
 
         /**
          * Redraw every widget from the cache, and arm the next midnight.
          *
          * Only the ids the launcher still has: a record can outlive its widget
          * if the process died between the deletion and [onDeleted], and
-         * updating an id nobody holds throws.
+         * updating an id nobody holds throws. Each id is drawn with the
+         * renderer for the provider that actually holds it — crossing the two
+         * would draw a stats layout over a checkmark id or the reverse, which
+         * is the obvious failure mode of merging this loop and is exactly what
+         * a test here asserts against.
          *
          * The alarm is armed HERE rather than at each of the places that can
          * create a widget, because every one of them redraws and an alarm that
          * re-arms from the drawing cannot drift out of step with what is on the
-         * screen. With no widgets left it is given back instead of renewed.
+         * screen. With no widgets left it is given back instead of renewed —
+         * which is why `armMidnight` is called BEFORE the early return below
+         * rather than after it: with no widgets of either kind, this is the
+         * only place the alarm is given back at all.
          */
         suspend fun redraw(context: Context) {
             val app = context.applicationContext
             val manager = AppWidgetManager.getInstance(app)
-            val live = manager
-                .getAppWidgetIds(ComponentName(app, HabitWidget::class.java))
-                .toSet()
+            val (checkmarkIds, statsIds) = liveIds(app, manager)
             armMidnight(app)
-            if (live.isEmpty()) return
+            if (checkmarkIds.isEmpty() && statsIds.isEmpty()) return
 
             val settings = Settings(app)
             val questionMarks = settings.cachedQuestionMarks()
             val today = LocalDate.now().toString()
-            settings.cachedWidgets()
-                .filter { it.widgetId in live }
-                .forEach { record ->
-                    manager.updateAppWidget(
+            settings.cachedWidgets().forEach { record ->
+                when (record.widgetId) {
+                    in checkmarkIds -> manager.updateAppWidget(
                         record.widgetId,
                         render(app, record, today, questionMarks),
                     )
+                    in statsIds -> manager.updateAppWidget(
+                        record.widgetId,
+                        StatsWidget.render(
+                            app,
+                            record,
+                            today,
+                            StatsWidget.columnsFor(manager.getAppWidgetOptions(record.widgetId)),
+                        ),
+                    )
+                    // A record can outlive its widget — see the KDoc above —
+                    // and an id in neither set is exactly that case: nothing to
+                    // draw, and `onDeleted` will drop the record in its own
+                    // time.
                 }
+            }
         }
 
         /**
@@ -251,10 +298,13 @@ class HabitWidget : AppWidgetProvider() {
             val manager = app.getSystemService(Context.ALARM_SERVICE) as AlarmManager
             // Asked here rather than passed in, so that every caller — a
             // redraw, a boot, the exact-alarm permission changing — is one line
-            // and none of them has to know how to answer it.
-            val wanted = AppWidgetManager.getInstance(app)
-                .getAppWidgetIds(ComponentName(app, HabitWidget::class.java))
-                .isNotEmpty()
+            // and none of them has to know how to answer it. EITHER provider:
+            // a stats widget's strip shifts at midnight exactly as the
+            // checkmark cell does, and asking only about `HabitWidget` here —
+            // the bug this method used to have — cancelled the one alarm that
+            // would ever redraw a home screen holding only a stats widget.
+            val (checkmarkIds, statsIds) = liveIds(app, AppWidgetManager.getInstance(app))
+            val wanted = checkmarkIds.isNotEmpty() || statsIds.isNotEmpty()
             val intent = Intent(app, HabitWidget::class.java).apply {
                 action = ACTION_MIDNIGHT
                 data = android.net.Uri.parse("habiterall://widget/midnight")
@@ -333,7 +383,7 @@ class HabitWidget : AppWidgetProvider() {
                 R.id.widget_cell,
                 "setColorFilter",
                 if (record.gone) ContextCompat.getColor(context, R.color.widget_cell_empty)
-                else fill(context, record, state),
+                else fill(context, habit, record.color, state, record.value),
             )
             views.setTextColor(
                 R.id.widget_mark,
@@ -347,32 +397,79 @@ class HabitWidget : AppWidgetProvider() {
             return views
         }
 
-        private fun fill(
+        /**
+         * The fill colour for ONE day's cell.
+         *
+         * [value] is that day's own amount, never assumed to be [Widgets.Record.value]
+         * — the record is only one day, and the STATS widget calls this once
+         * per strip cell, each about a different date. Passing the record
+         * itself in here (as the checkmark widget's cell used to) would shade
+         * every numerical cell in a seven-day strip from the SAME day's
+         * number, because `record.value` cannot answer for six of the seven
+         * dates being drawn. `HabitWidget.render` passes `record.value` — its
+         * one cell is always about `record.date` — and `StatsWidget.render`
+         * passes each cell's own resolved value.
+         */
+        internal fun fill(
             context: Context,
-            record: Widgets.Record,
+            habit: Habit,
+            color: String,
             state: Grid.DayState,
+            value: Double?,
         ): Int {
-            val habit = record.habit
             val empty = ContextCompat.getColor(context, R.color.widget_cell_empty)
             return when {
-                state == Grid.DayState.DONE -> habitColor(record.color)
+                state == Grid.DayState.DONE -> habitColor(color)
                 state != Grid.DayState.NO -> empty
                 habit.isAvoided -> SLIP
                 // A measurable habit that fell short is a faint version of its
                 // own colour, because "8 of 20 pages" is not a day with nothing
                 // on it. A yes/no "no" is the empty cell, exactly as the grid
                 // leaves it.
-                habit.isNumerical && (record.value ?: 0.0) > 0.0 ->
-                    (habitColor(record.color) and 0x00FFFFFF) or 0x59000000
+                habit.isNumerical && (value ?: 0.0) > 0.0 ->
+                    (habitColor(color) and 0x00FFFFFF) or 0x59000000
                 else -> empty
             }
         }
 
         /** `#8b5cf6` as a colour int, falling back rather than throwing on junk. */
-        private fun habitColor(hex: String): Int =
+        internal fun habitColor(hex: String): Int =
             runCatching { android.graphics.Color.parseColor(hex) }.getOrElse { 0xFF3B82F6.toInt() }
 
-        private fun describe(
+        /**
+         * [fill], with one arm the STRIP alone gets to draw.
+         *
+         * `Widgets.markFor` already carries a ghost `✓` for `state ==
+         * UNKNOWN && habit.unloggedIsSuccess` — an unanswered day that this
+         * habit's rule already counts as kept, not merely unknown. The big
+         * checkmark cell says that with the glyph, but the strip HAS no
+         * glyphs (see the comment on `StatsWidget.render`), so on a strip
+         * built from plain [fill] that same day painted as `widget_cell_empty`
+         * — a full-marks week rendered as a blank one, beside a red cell for
+         * a day that really was a slip. This wrapper exists only so the big
+         * cell's rendering, and `HabitWidget`'s own tests, stay untouched:
+         * [fill] itself does not gain a case it did not have, this sits one
+         * layer above it and only `StatsWidget` calls it.
+         *
+         * The faint alpha variant a numerical partial-credit day already
+         * uses, not a new colour — a ghost-kept day and a numerical partial
+         * day now read identically on the strip, which is a small, deliberate
+         * loss next to a kept day painting as if nothing happened.
+         */
+        internal fun stripFill(
+            context: Context,
+            habit: Habit,
+            color: String,
+            state: Grid.DayState,
+            value: Double?,
+        ): Int =
+            if (state == Grid.DayState.UNKNOWN && habit.unloggedIsSuccess) {
+                (habitColor(color) and 0x00FFFFFF) or 0x59000000
+            } else {
+                fill(context, habit, color, state, value)
+            }
+
+        internal fun describe(
             context: Context,
             record: Widgets.Record,
             state: Grid.DayState,
@@ -390,6 +487,41 @@ class HabitWidget : AppWidgetProvider() {
             )
             return "${record.name}: $word"
         }
+
+        /**
+         * [describe], with one arm the STRIP alone gets to say.
+         *
+         * The same guard as [stripFill]: `state == UNKNOWN &&
+         * habit.unloggedIsSuccess` is a day this habit's rule already counts
+         * as kept, not merely unknown, and [stripFill] already paints it with
+         * the ghost-kept tint. [describe] still answers `widget_unanswered`
+         * for UNKNOWN, so a strip cell built from it painted kept and
+         * announced itself unanswered in the same breath — the screen and the
+         * screen reader disagreeing about the same day, on a surface whose
+         * own decision record says "It has to be VISIBLE, not just
+         * described." This wrapper exists for the same reason [stripFill]
+         * does: the big cell's one description, and `HabitWidget`'s own
+         * tests, stay untouched — [describe] itself does not gain a case it
+         * did not have, this sits one layer above it and only `StatsWidget`
+         * calls it.
+         *
+         * The guard leads with `!record.gone`, unlike [stripFill]'s, because
+         * [stripFill]'s caller already short-circuits `gone` before calling
+         * it while this one is called directly from `StatsWidget.render`'s
+         * per-cell loop. A gone record's description has to stay
+         * `widget_gone` — [describe] already returns that first — so the
+         * ghost-kept arm here must not shadow it.
+         */
+        internal fun describeStrip(
+            context: Context,
+            record: Widgets.Record,
+            state: Grid.DayState,
+        ): String =
+            if (!record.gone && state == Grid.DayState.UNKNOWN && record.habit.unloggedIsSuccess) {
+                "${record.name}: ${context.getString(R.string.stats_cell_kept)}"
+            } else {
+                describe(context, record, state)
+            }
 
         /**
          * What a tap opens or sends.

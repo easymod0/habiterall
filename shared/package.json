@@ -18,6 +18,7 @@
     "./discord.js": "./src/discord.js",
     "./discord-gateway.js": "./src/discord-gateway.js",
     "./notify-send.js": "./src/notify-send.js",
+    "./backup.js": "./src/backup.js",
     "./log.js": "./src/log.js",
     "./observe.js": "./src/observe.js",
     "./security.js": "./src/security.js",

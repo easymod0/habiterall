@@ -243,6 +243,15 @@ docker compose exec -T db pg_dump -U habiterall_owner habiterall \
 
 Back up the `authentik` database too, or you lose your user directory.
 
+The app can also take this dump itself, nightly, unattended — see
+[Scheduled backups](../README.md#scheduled-backups) for
+`HABITERALL_BACKUP_DIR` and its siblings. It needs the same admin credential
+this manual command uses, and the shipped compose files deliberately do not
+put it on the `app` service — you add `DATABASE_URL_ADMIN` there yourself,
+knowingly, to turn it on. Prefer this manual command instead if you would
+rather the app never hold that credential at all. Either way the same
+"restore into an empty database" instructions apply to the file it produces.
+
 ## Troubleshooting
 
 **App restarts with `OAUTH_HTTP_REQUEST_FORBIDDEN`** — `OIDC_ISSUER` is
