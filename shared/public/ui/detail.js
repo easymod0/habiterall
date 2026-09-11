@@ -1080,6 +1080,14 @@ function buildRecentDaysCard({ habit, entries, chartWidth, inRun }) {
 
 /**
  * The score card: the strength curve, with its own resolution selector.
+ *
+ * Carries one tile — the trend, in POINTS rather than the score's own
+ * `[0,1]` units (`stats.trend.change` is a score delta, and the score itself
+ * already renders as a percentage, so a change in it is naturally read in
+ * points). The sign alone carries the direction: no `tone`, in either
+ * direction, because a habit already struggling gets no `--danger` shout for
+ * a downward trend — that judgement is not made here, on purpose. Do not add
+ * one back.
  */
 function buildStrengthCard({ habit, stats, color, chartWidth }) {
   const scoreCard = card('Habit strength', null);
@@ -1089,6 +1097,36 @@ function buildStrengthCard({ habit, stats, color, chartWidth }) {
     scoreGranularity(),
     async (g) => { state.scoreGranularity = g; await open(habit.id); }
   ));
+
+  const tiles = document.createElement('div');
+  tiles.className = 'stat-row';
+
+  const tile = (value, label) => {
+    const t = document.createElement('div');
+    t.className = 'stat-tile';
+    const v = document.createElement('div');
+    v.className = 'stat-value';
+    v.textContent = value;
+    v.style.color = color;
+    const l = document.createElement('div');
+    l.className = 'stat-label';
+    l.textContent = label;
+    t.append(v, l);
+    return t;
+  };
+
+  // `trend` is always on the payload — unlike `coverageWindow`, nothing here
+  // ever asks `computeStats` to decline it — but a service-worker-cached
+  // `/stats` response from before this field existed can still reach the
+  // renderer, so the guard is the same shape as the coverage tile's.
+  const trend = stats.trend;
+  if (trend && trend.change != null) {
+    const pts = Math.round(trend.change * 100);
+    tiles.append(tile(pts > 0 ? `+${pts}` : String(pts), `Points, last ${trend.days} days`));
+  } else {
+    tiles.append(tile('—', trend ? `Needs ${trend.minWindow} days` : 'No trend yet'));
+  }
+  scoreCard.append(tiles);
 
   // The score is computed daily whatever this says — it is an EWMA, so
   // skipping days would change the value rather than the resolution. The
@@ -1631,10 +1669,40 @@ function buildAwardsCard({ stats, color }) {
   return c;
 }
 
-/** History with its granularity and percent-vs-count toggles. */
+/**
+ * History with its granularity and percent-vs-count toggles.
+ *
+ * Carries one tile — coverage over the WHOLE window, from `coverageWindow`
+ * rather than summed out of `coverage`'s monthly buckets (see the note above
+ * `coverageOver` in `stats.js` for why the two are not the same figure). The
+ * guard is on the KEY, not merely the value, because a caller that declined
+ * `coverage` gets neither field at all — the detail view never does, but the
+ * renderer must not throw for one that might (a stale offline `/stats` reply).
+ */
 function buildHistoryCard({ habit, stats, color, chartWidth }) {
   const histCard = card('History', null);
   const histHead = histCard.querySelector('.card-head');
+
+  const tiles = document.createElement('div');
+  tiles.className = 'stat-row';
+  const cw = stats.coverageWindow;
+  const covTile = document.createElement('div');
+  covTile.className = 'stat-tile';
+  const covValue = document.createElement('div');
+  covValue.className = 'stat-value';
+  covValue.style.color = color;
+  const covLabel = document.createElement('div');
+  covLabel.className = 'stat-label';
+  if (!cw || !cw.days) {
+    covValue.textContent = '—';
+    covLabel.textContent = 'No window';
+  } else {
+    covValue.textContent = `${Math.round(cw.answered / cw.days * 100)}%`;
+    covLabel.textContent = 'Days answered';
+  }
+  covTile.append(covValue, covLabel);
+  tiles.append(covTile);
+  histCard.append(tiles);
 
   const gran = segmented(
     ['day', 'week', 'month', 'quarter', 'year'],
@@ -1721,11 +1789,53 @@ function buildWeekdayMonthsCard({ habit, stats, color, chartWidth }) {
  *
  * Returns null with no frequency data at all — the guard that used to sit in
  * the `if` this card was appended inside.
+ *
+ * Carries up to three tiles — the SPREAD of the gaps between completions, not
+ * their mean, since a mean gap is `denominator / numerator` by definition and
+ * says nothing the frequency above does not (see `regularityOver` in
+ * `stats.js`). No tile row at all when `regularity.applicable` is false — the
+ * at-most/`success` shape, where every unanswered day is already a
+ * "completion" and a gap between them is not a measure of anything — because
+ * a card saying "—" three times over is worse than a card saying nothing.
  */
 function buildFrequencyCard({ habit, stats, color, chartWidth }) {
   if (!stats.frequency.length) return null;
 
   const fc = card('Times per week', null);
+
+  const reg = stats.regularity;
+  if (reg && reg.applicable) {
+    const tiles = document.createElement('div');
+    tiles.className = 'stat-row';
+
+    const tile = (value, label) => {
+      const t = document.createElement('div');
+      t.className = 'stat-tile';
+      const v = document.createElement('div');
+      v.className = 'stat-value';
+      v.textContent = value;
+      v.style.color = color;
+      const l = document.createElement('div');
+      l.className = 'stat-label';
+      l.textContent = label;
+      t.append(v, l);
+      return t;
+    };
+
+    tiles.append(tile(
+      reg.mean == null ? '—' : `${reg.mean.toFixed(1)}d`,
+      reg.mean == null ? 'No gaps yet' : 'Typical gap'
+    ));
+    tiles.append(tile(
+      reg.spread == null ? '—' : `${reg.spread.toFixed(1)}d`,
+      reg.spread == null ? 'Too few gaps' : 'Gap spread'
+    ));
+    if (reg.openGap != null) {
+      tiles.append(tile(`${reg.openGap}d`, 'Since last'));
+    }
+    fc.append(tiles);
+  }
+
   windowedChart({
     card: fc,
     key: 'frequency',
