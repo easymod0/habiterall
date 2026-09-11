@@ -281,11 +281,36 @@ class StatsWidget : AppWidgetProvider() {
 
             views.setContentDescription(
                 R.id.stats_root,
-                if (record.gone) context.getString(R.string.widget_gone, record.name)
-                // Through `strings.xml`, positionally, the way every other
-                // spoken sentence here is built — `${...}` concatenation was
-                // the one place on this screen that was not.
-                else context.getString(R.string.stats_summary, record.name, scorePercent, record.currentStreak),
+                // Same order the note line above resolves in — `gone`, then
+                // `stale`, then `figuresStale` — so the spoken sentence and
+                // the visible one cannot disagree about precedence. Before
+                // this branched, the description asked `gone` alone, so a
+                // record days old was announced, unqualified, as current: the
+                // same mistake this PR fixed one layer down for a strip cell
+                // (`describeStrip`), pointed the other way here.
+                if (record.gone) {
+                    context.getString(R.string.widget_gone, record.name)
+                } else if (stale) {
+                    context.getString(
+                        R.string.stats_summary_stale,
+                        record.name,
+                        scorePercent,
+                        record.currentStreak,
+                        record.date,
+                    )
+                } else if (record.figuresStale) {
+                    context.getString(
+                        R.string.stats_summary_figures_behind,
+                        record.name,
+                        scorePercent,
+                        record.currentStreak,
+                    )
+                } else {
+                    // Through `strings.xml`, positionally, the way every other
+                    // spoken sentence here is built — `${...}` concatenation was
+                    // the one place on this screen that was not.
+                    context.getString(R.string.stats_summary, record.name, scorePercent, record.currentStreak)
+                },
             )
             views.setOnClickPendingIntent(R.id.stats_root, clickIntent(context, record))
             return views

@@ -79,6 +79,22 @@ class StatsWidgetTest {
         Reminders.lastArmWasExact = null
     }
 
+    /**
+     * `preferencesDataStore` is a JVM-static singleton, so the widget blob one
+     * test writes is still there for the next one in the same JVM fork — the
+     * same cross-test-class leak `forgetTheLastArm` exists for above, one
+     * store over. Harmless today only because every reader here filters by
+     * an explicit widget id, but a test that asserted over `cachedWidgets()`
+     * as a whole (rather than `.first { it.widgetId == ... }`) would see
+     * another test's leftovers. `replaceWidgets(emptyList())` rather than
+     * `removeWidgets`: the latter needs the ids to remove, and this runs
+     * before every test has decided what its own ids are.
+     */
+    @Before
+    fun emptyTheWidgetStore(): Unit = runBlocking {
+        Settings(context).replaceWidgets(emptyList())
+    }
+
     private fun boolHabit() = Habit(id = 1, name = "Meditate")
 
     private fun waterHabit() =
@@ -204,6 +220,47 @@ class StatsWidgetTest {
         // The dated sentence must not appear here — the day is not stale,
         // only the figures are, and naming a date would be a false claim.
         assertFalse(note.text.toString().contains(today))
+    }
+
+    /* ---------- `stats_root`'s spoken sentence must agree with the note line ---------- */
+
+    @Test
+    fun `a stale record's spoken description names its own day`() {
+        // Same mistake as `describeStrip` (this PR fixed it one layer down,
+        // for a strip cell), pointed the other way: `stats_root`'s content
+        // description used to branch on `gone` alone, so a record three days
+        // old was announced, unqualified, as "Water: 42% score, streak 3" —
+        // the note line beside it said otherwise and the screen reader did not.
+        val rec = record(waterHabit(), date = yesterday, value = 4.0, score = 0.42, currentStreak = 3)
+        val description = inflate(StatsWidget.render(context, rec, today, 3))
+            .findViewById<View>(R.id.stats_root).contentDescription.toString()
+        assertTrue(
+            "a stale record's spoken description must name the day it is about",
+            description.contains(yesterday),
+        )
+    }
+
+    @Test
+    fun `a figures-behind record's spoken description does not claim a stale day`() {
+        // The negative half: this is what stops a "just always say stale"
+        // implementation from passing both tests. `record.date == today`
+        // here — only the score/streak are behind, not the day itself — so
+        // the description must use the figures-behind sentence, not the dated
+        // one, and must not name `record.date` at all.
+        val rec = record(
+            waterHabit(),
+            date = today,
+            value = 4.0,
+            score = 0.42,
+            currentStreak = 3,
+            figuresStale = true,
+        )
+        val description = inflate(StatsWidget.render(context, rec, today, 3))
+            .findViewById<View>(R.id.stats_root).contentDescription.toString()
+        assertFalse(
+            "a figures-behind record's spoken description must not name a date",
+            description.contains(today),
+        )
     }
 
     /* ---------- the strip fits the widget's width ---------- */
@@ -409,6 +466,37 @@ class StatsWidgetTest {
         // second, contradicting claim about the same widget.
         val empty = ContextCompat.getColor(context, R.color.widget_cell_empty)
         (0..2).forEach { assertEquals(empty, tint(view.findViewById<ImageView>(cellIds[it]))) }
+    }
+
+    /* ---------- `describeStrip`'s `!record.gone &&` clause ---------- */
+
+    @Test
+    fun `a gone record's strip cell announces itself gone, even on a kept-unlogged habit`() {
+        // A removed habit whose rule counts an unanswered day as kept: with no
+        // `!record.gone &&` guard, `describeStrip`'s ghost-kept arm would fire
+        // on the UNKNOWN state below and announce "kept, nothing logged" over
+        // a habit that has left the account — the strip's own tint already
+        // blanks a gone record (the test above), so its description must not
+        // contradict that by claiming a kept day underneath.
+        val rec = record(
+            boolHabit(),
+            date = yesterday,
+            value = null,
+            gone = true,
+            unloggedIsSuccess = true,
+        )
+        val view = inflate(StatsWidget.render(context, rec, today, columns = 3))
+        val kept = context.getString(R.string.stats_cell_kept)
+        val goneSentence = context.getString(R.string.widget_gone, rec.name)
+        val description = view.findViewById<ImageView>(cellIds[0]).contentDescription.toString()
+        assertTrue(
+            "a gone record's strip cell must announce itself gone",
+            description.contains(goneSentence),
+        )
+        assertFalse(
+            "a gone record's strip cell must not announce kept, whatever the habit's own rule reads unlogged days as",
+            description.contains(kept),
+        )
     }
 
     /* ---------- FIX 4: gone hides the figures, not only the strip ---------- */
@@ -662,6 +750,46 @@ class StatsWidgetTest {
             assertTrue(
                 "a record that was already stale must stay stale — a refusal never re-fetched anything",
                 afterStale.figuresStale,
+            )
+        }
+
+    /**
+     * The screen a user actually gets on the shade / number-pad / widget-tap
+     * paths, driven through the real sequence rather than a hand-placed
+     * `figuresStale`: `noteAnswer` runs first on every one of them (see
+     * `ActionReceiver`, `CountEntryActivity`, `HabitWidget.tap`), so by the
+     * time a refusal can even happen the flag is already `true`. The test
+     * above pins the transform in isolation; this one is what proves the
+     * refusal is a no-op on that path rather than the thing that produces the
+     * note line — the false claim a prior version of this decision made.
+     */
+    @Test
+    fun `an answer that is then refused still shows figures-behind, because the answer set the flag first`(): Unit =
+        runBlocking {
+            val habit = boolHabit()
+            val settings = Settings(context)
+            val widgetId = 63
+            settings.putWidgets(listOf(record(habit, widgetId = widgetId, date = today, figuresStale = false)))
+
+            WidgetSync.noteAnswer(context, habit.id, today, Sentinels.YES, skip = false)
+            val afterAnswer = settings.cachedWidgets().first { it.widgetId == widgetId }
+            assertTrue("an answer with no fetch behind it must set figuresStale", afterAnswer.figuresStale)
+
+            WidgetSync.noteRefused(context, habit.id, today)
+            val afterRefusal = settings.cachedWidgets().first { it.widgetId == widgetId }
+            assertNull("a refusal returns the day to unanswered", afterRefusal.value)
+            assertTrue(
+                "the flag the preceding answer set must survive the refusal untouched",
+                afterRefusal.figuresStale,
+            )
+
+            val note = inflate(StatsWidget.render(context, afterRefusal, today, 3))
+                .findViewById<TextView>(R.id.stats_note)
+            assertEquals(View.VISIBLE, note.visibility)
+            assertEquals(
+                "the note line persists across the refusal unchanged, reading figures-behind",
+                context.getString(R.string.stats_figures_behind),
+                note.text.toString(),
             )
         }
 

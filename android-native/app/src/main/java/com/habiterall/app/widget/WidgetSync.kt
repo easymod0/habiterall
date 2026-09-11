@@ -125,24 +125,31 @@ object WidgetSync {
                 Settings(app).updateWidgets { records ->
                     records.map {
                         if (it.habitId == habitId && it.date == date) {
-                            // NOT `figuresStale = true`, on purpose — the one
-                            // exception among the answer-shaped paths.
-                            // `Widgets.answered` sets it because an answer
-                            // was recorded that the score/streak have not
-                            // caught up with; a refusal is the opposite, a
-                            // write the server dropped for good, so it never
-                            // changed the server's figures at all — the last
-                            // fetch's numbers are still exactly as current
-                            // (or stale) as they were the instant before.
-                            // Setting the flag here would put
-                            // `stats_figures_behind` ("Score updates on next
-                            // sync") on screen at the moment a write was
-                            // PERMANENTLY dropped, which reads as "queued,
-                            // will land" — the opposite of what happened.
-                            // Left untouched rather than cleared: if an
-                            // earlier `answered` already set it, the figures
-                            // genuinely have not been re-fetched since, and
-                            // the line is still true.
+                            // NOT `figuresStale = true`, on purpose — but not
+                            // because setting it would put the note line on
+                            // screen: on every path that can reach a refusal
+                            // (the shade's buttons, the number pad, a widget's
+                            // own tap), the `noteAnswer`/`Widgets.answered`
+                            // that preceded the write already set the flag,
+                            // so `stats_figures_behind` is already showing
+                            // before this ever runs, and leaving it alone
+                            // changes nothing there. The one path this
+                            // decision is not a no-op for is `MainActivity`'s
+                            // list-screen tap, which enqueues without calling
+                            // `noteAnswer` at all.
+                            //
+                            // A refusal never reached the server, so it moved
+                            // none of the server's figures — it is neither
+                            // evidence they are behind nor evidence they are
+                            // current. A boolean cannot distinguish "the
+                            // answer THIS refusal just rolled back" from "an
+                            // earlier answer that landed and has not been
+                            // re-fetched since", so the flag is left exactly
+                            // as found rather than set or cleared —
+                            // over-reporting staleness is the fail-safe
+                            // direction, and clearing it here could erase a
+                            // genuine staleness this refusal knows nothing
+                            // about.
                             it.copy(value = null, skip = false)
                         } else {
                             it

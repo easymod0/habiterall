@@ -426,11 +426,32 @@ class WidgetTest {
     @Test
     fun `a junk score or currentStreak token does not drop the record`() {
         val good = Widgets.encode(record(boolHabit(), unloggedIsSuccess = true))
-        val junked = good.split('|').toMutableList().also { it[14] = "abc" }.joinToString("|")
+        // All three of the stats fields — index 14 (score), 15
+        // (currentStreak) and 16 (history) — not index 14 alone: a junked 14
+        // with 15 and 16 left at their real, well-formed values proved
+        // nothing about either of the other two, and `currentStreak =
+        // f.getOrNull(15)!!.toInt()` (dropping the fallback and throwing
+        // instead) survived every other test in this file.
+        val junked = good.split('|').toMutableList()
+            .also {
+                it[14] = "abc"
+                it[15] = "abc"
+                it[16] = "abc"
+            }
+            .joinToString("|")
         val back = Widgets.decode(junked)
         assertNotNull("a junk token must not drop the whole record", back)
+        // Each field falls back to its own documented default rather than
+        // throwing or propagating the junk.
         assertEquals(0.0, back!!.score, 0.0)
-        // Everything else, before and after the junk field, is intact.
+        assertEquals(0, back.currentStreak)
+        // `history` has no numeric fallback of its own — it is read raw
+        // (`f.getOrNull(16) ?: ""`) — so its "falls back" is downstream, in
+        // `decodeHistory` tolerating a token with no `:` in it: the record
+        // decodes, and the junk string yields no strip entries rather than a
+        // crash.
+        assertTrue(Widgets.decodeHistory(back.history).isEmpty())
+        // Everything else, before and after the junk fields, is intact.
         assertEquals(7, back.widgetId)
         assertTrue(back.unloggedIsSuccess)
     }

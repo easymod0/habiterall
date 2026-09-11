@@ -76,6 +76,21 @@
          gone one). %1$s the habit's name, %2$d the score as a whole percent
          (already clamped to 0..100), %3$d the current streak. -->
     <string name="stats_summary">%1$s: %2$d%% score, streak %3$d</string>
+    <!-- Spoken for `stats_root` in place of `stats_summary` when
+         `record.date != today` — the same mistake `stats_stale`/`stats_note`
+         were added to fix, one layer up: a record days old was announced,
+         unqualified, as current, because the content description branched on
+         `gone` alone. %1$s the habit's name, %2$d the score, %3$d the current
+         streak, %4$s the day the figures are as of (`record.date`), the same
+         day `stats_stale`'s visible note line names. Positional args, never
+         string concatenation — `stats_summary`'s own comment says why. -->
+    <string name="stats_summary_stale">%1$s: %2$d%% score, streak %3$d, as of %4$s</string>
+    <!-- Spoken for `stats_root` in place of `stats_summary` when the record's
+         day IS today but `figuresStale` is set — the same "updates on next
+         sync" sense `stats_figures_behind`'s visible note line uses, said
+         instead of naming a date nothing is wrong with. %1$s the habit's
+         name, %2$d the score, %3$d the current streak. -->
+    <string name="stats_summary_figures_behind">%1$s: %2$d%% score, streak %3$d, score updates on next sync</string>
     <!-- One strip cell, `state == UNKNOWN && habit.unloggedIsSuccess` — the
          day the strip paints with the ghost-kept fill (`HabitWidget.stripFill`)
          because this habit's rule already counts an unanswered day as kept.

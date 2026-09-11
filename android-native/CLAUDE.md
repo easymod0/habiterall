@@ -423,10 +423,18 @@ leaves `date` unchanged (an older-day answer) still sets it — cleared in
 `Widgets.refreshed` (a successful fetch is exactly what makes the figures
 current again), and shown as its own sentence (`stats_figures_behind`) rather
 than the dated one — naming a date would be a false claim when the day itself
-is not stale, only the score and streak are. `WidgetSync.noteRefused` is the
-one exception: a refusal never reached the server, so the last fetch's
-figures are unaffected by it, and setting the flag there would read as
-"queued, will land" on a write that was dropped for good.
+is not stale, only the score and streak are. `WidgetSync.noteRefused` leaves
+the flag untouched rather than setting or clearing it, but not because
+setting it would put the note line on screen: on every path that can produce
+a refusal (the shade, the number pad, a widget's own tap), the `answered`
+that preceded the write already set the flag, so the note line is already
+showing before the refusal ever runs, and leaving it alone changes nothing
+there. The decision only matters on the one path that enqueues without
+calling `noteAnswer` — the list screen's own tap (`MainActivity`). A refusal
+never reached the server, so it is neither evidence the figures are stale nor
+evidence they are current, and a boolean cannot hold "this refusal's own
+answer" apart from "an earlier one still unfetched" — so it is left exactly
+as found, and over-reporting staleness is the fail-safe direction.
 
 **`redraw` and `armMidnight` used to be hard-coded to `HabitWidget` alone, and
 the worse of the two failure modes was not "never redrawn."** Both asked

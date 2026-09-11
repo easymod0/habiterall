@@ -589,16 +589,25 @@ WAS just recorded with no fetch behind it, and the note line went on reading
 the field's one reader — actually needs to know: `figuresStale` means an
 ANSWER has been recorded with no fetch behind it, set on BOTH of `answered`'s
 branches, including the early return. A refusal (`WidgetSync.noteRefused`) is
-the one answer-shaped path that does NOT set it, and on purpose: a refused
-write never reached the server, so it never moved the server's figures at
-all — the last fetch's numbers are exactly as current, or stale, as they were
-the instant before. Setting the flag there would put `stats_figures_behind`
-("Score updates on next sync") on screen at the exact moment a write was
-PERMANENTLY dropped, which reads as "queued, will land" — the opposite of
-what happened. The lesson this restates: a field is defined by what its one
-reader asks of it, not by whichever mechanism happens to make it true
-elsewhere — "the strip moved" and "an answer was recorded with nothing behind
-it" agree everywhere except the one branch that mattered.
+the one answer-shaped path that does NOT set it — but a later review of the
+call graph found the justification for that as first written was false.
+Every path that can produce a refusal — the shade's buttons, the number pad,
+a widget's own tap — reaches `noteRefused` only after `WidgetSync.noteAnswer`
+(or `Widgets.answered` directly) has already run and already set the flag, so
+`stats_figures_behind` is already on screen before the refusal is even known
+about; leaving the flag untouched changes nothing there. The one path this
+decision is not a no-op for is `MainActivity`'s own list-screen tap, which
+enqueues the write without ever calling `noteAnswer`. The choice is still
+right, for a narrower reason: a refusal never reached the server, so it is
+neither evidence the figures are behind nor evidence they are current, and a
+boolean cannot distinguish "the answer THIS refusal just rolled back" from
+"an earlier answer that landed and has not been re-fetched since" — so the
+flag is left exactly as found rather than set or cleared, and over-reporting
+staleness is the fail-safe direction. The lesson this restates: a field is
+defined by what its one reader asks of it, not by whichever mechanism happens
+to make it true elsewhere — "the strip moved" and "an answer was recorded
+with nothing behind it" agree everywhere except the one branch that
+mattered.
 
 **The ghost-kept fill, and why it lives beside `fill` rather than inside
 it.** `Widgets.markFor` already has an arm for `state == UNKNOWN &&
