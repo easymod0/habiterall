@@ -76,6 +76,15 @@
          gone one). %1$s the habit's name, %2$d the score as a whole percent
          (already clamped to 0..100), %3$d the current streak. -->
     <string name="stats_summary">%1$s: %2$d%% score, streak %3$d</string>
+    <!-- One strip cell, `state == UNKNOWN && habit.unloggedIsSuccess` — the
+         day the strip paints with the ghost-kept fill (`HabitWidget.stripFill`)
+         because this habit's rule already counts an unanswered day as kept.
+         `HabitWidget.describe` still answers `widget_unanswered` for UNKNOWN
+         and is left alone (its own glyph/description disagreement on the big
+         cell is pre-existing and not this PR's to change); this string is
+         `StatsWidget.render`'s own per-cell case, so the same day does not
+         paint kept and announce itself unanswered. -->
+    <string name="stats_cell_kept">kept, nothing logged</string>
 
     <string name="count_hint">Amount</string>
     <string name="save">Save</string>

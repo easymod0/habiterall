@@ -561,23 +561,44 @@ and twelve green tests said nothing about the one path none of them reached.
 **`Record.figuresStale`, and why `record.date` alone could not answer
 "are the figures current".** `record.date` names the day the entry is about;
 `score` and `currentStreak` are the account's figures as of the last
-`/api/overview` fetch, and nothing kept those two in step. Two paths move
-`record.date` with no network at all — `Widgets.answered` (a notification
-button, its number pad, or the checkmark widget's own tap) and
-`WidgetSync.noteRefused` — and both left the figures exactly where the last
-fetch had put them. Named case: a morning sync returns `score = 0.30,
-currentStreak = 0` because yesterday was missed; at 09:00 the user presses
-Yes in the notification shade, which moves `record.date` to today with no
-fetch. `StatsWidget.render`'s old condition, `record.date != today`, then read
-false — "current" — while the strip's newest cell had just changed colour
-beside a note line asserting nothing was wrong, for up to six hours until the
-next heartbeat. The fix is a field, not a smarter read of the one that
-existed: `figuresStale` is set at both local-mutation sites and cleared only
-in `Widgets.refreshed`, the one place the figures are actually taken from a
-fetch. The note line's condition became `record.gone || record.date != today
-|| record.figuresStale`, and the `figuresStale`-only case gets its own
-sentence (`stats_figures_behind`) rather than the dated one, because naming a
-date would be a false claim when the day itself is not the stale part.
+`/api/overview` fetch, and nothing kept those two in step. Named case: a
+morning sync returns `score = 0.30, currentStreak = 0` because yesterday was
+missed; at 09:00 the user presses Yes in the notification shade, which moves
+`record.date` to today with no fetch. `StatsWidget.render`'s old condition,
+`record.date != today`, then read false — "current" — while the strip's
+newest cell had just changed colour beside a note line asserting nothing was
+wrong, for up to six hours until the next heartbeat. The fix is a field, not a
+smarter read of the one that existed: the note line's condition became
+`record.gone || record.date != today || record.figuresStale`, and the
+`figuresStale`-only case gets its own sentence (`stats_figures_behind`) rather
+than the dated one, because naming a date would be a false claim when the day
+itself is not the stale part.
+
+The field's DEFINITION took a second round to land on. The first cut set it
+"wherever the strip moves without a fetch" — `Widgets.answered`'s ordinary
+branch and `WidgetSync.noteRefused` both move `record.date`, so both set it —
+and cleared it only in `Widgets.refreshed`. That definition was satisfied BY
+CONSTRUCTION on `answered`'s early-return branch, the one that hands the
+record back with `date`/`value` unchanged because the incoming answer named a
+day OLDER than `record.date` already held: nothing there moves, so "wherever
+the strip moves" was vacuously true and the flag stayed whatever it already
+was — which is exactly wrong for a notification still in the shade about
+yesterday, answered after this morning's sync had cleared the flag: an answer
+WAS just recorded with no fetch behind it, and the note line went on reading
+"current" regardless. The rule that now holds is what `StatsWidget.render` —
+the field's one reader — actually needs to know: `figuresStale` means an
+ANSWER has been recorded with no fetch behind it, set on BOTH of `answered`'s
+branches, including the early return. A refusal (`WidgetSync.noteRefused`) is
+the one answer-shaped path that does NOT set it, and on purpose: a refused
+write never reached the server, so it never moved the server's figures at
+all — the last fetch's numbers are exactly as current, or stale, as they were
+the instant before. Setting the flag there would put `stats_figures_behind`
+("Score updates on next sync") on screen at the exact moment a write was
+PERMANENTLY dropped, which reads as "queued, will land" — the opposite of
+what happened. The lesson this restates: a field is defined by what its one
+reader asks of it, not by whichever mechanism happens to make it true
+elsewhere — "the strip moved" and "an answer was recorded with nothing behind
+it" agree everywhere except the one branch that mattered.
 
 **The ghost-kept fill, and why it lives beside `fill` rather than inside
 it.** `Widgets.markFor` already has an arm for `state == UNKNOWN &&
@@ -602,6 +623,17 @@ rather than a new arm inside it, specifically so the big cell's rendering and
 ghost-kept day and a numerical partial day now read identically on the strip,
 which is accepted as a smaller, deliberate loss next to a kept day painting as
 if nothing happened.
+
+The tint was the whole of the first fix, and for a round it was also the whole
+of the bug: `StatsWidget.render` built each cell's content description from
+`HabitWidget.describe`, which still answers `widget_unanswered` for
+`UNKNOWN` regardless of `unloggedIsSuccess` — so the ghost-kept cell painted
+kept and announced itself unanswered, the screen and the screen reader
+disagreeing about the same day. `HabitWidget.describeStrip` is the same shape
+of fix as `stripFill` above and lives beside `describe` for the identical
+reason: the big cell's one description stays right as it is (a `✓` right next
+to the word), so `describe` gains no new arm, and only `StatsWidget` calls the
+wrapper.
 
 **`gone` hides the figures as well as the strip, for the same reason the
 strip blanks itself.** The first cut of the stats widget blanked every strip

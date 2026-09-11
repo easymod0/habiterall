@@ -197,10 +197,12 @@ class StatsWidget : AppWidgetProvider() {
             // there to say either. `record.date != today` is not the whole of
             // "are the figures current" — it names the day the ENTRY is
             // about, not when `score`/`currentStreak` were last fetched, and
-            // a local answer or refusal can move the strip with no network at
-            // all (`Widgets.answered`, `WidgetSync.noteRefused`). Without
+            // a local answer can move the strip with no network at all
+            // (`Widgets.answered`, both of its branches). `WidgetSync.noteRefused`
+            // does NOT set this flag — a refusal never reached the server, so
+            // the last fetch's figures are unaffected by it. Without
             // `figuresStale` the note line went on asserting "these figures
-            // are current" for up to six hours after exactly that happened,
+            // are current" for up to six hours after a local answer, and
             // contradicting the strip cell sitting beside it.
             val stale = record.date != today
             views.setViewVisibility(
@@ -260,15 +262,20 @@ class StatsWidget : AppWidgetProvider() {
                     HabitWidget.stripFill(context, habit, record.color, state, value)
                 }
                 views.setInt(cellId, "setColorFilter", tint)
-                // `HabitWidget.describe` says WHAT a day was and stays right
-                // for the checkmark widget's one cell; a strip of up to seven
-                // needs to say WHICH day too, or a screen reader swiping
-                // across it hears the same sentence seven times with nothing
-                // to tell the days apart. `describe` itself is left alone —
-                // the date is prepended here, at the strip's own call site.
+                // `HabitWidget.describeStrip`, not `describe` directly: a
+                // strip cell paints the ghost-kept tint (`stripFill`, above)
+                // for `state == UNKNOWN && habit.unloggedIsSuccess`, and
+                // `describe` still answers `widget_unanswered` for UNKNOWN —
+                // see the KDoc on `describeStrip` for why that arm lives
+                // beside `describe` rather than inside it. It also says WHAT
+                // a day was and stays right for the checkmark widget's one
+                // cell; a strip of up to seven needs to say WHICH day too, or
+                // a screen reader swiping across it hears the same sentence
+                // seven times with nothing to tell the days apart — the date
+                // is prepended here, at the strip's own call site.
                 views.setContentDescription(
                     cellId,
-                    "$date: ${HabitWidget.describe(context, record, state)}",
+                    "$date: ${HabitWidget.describeStrip(context, record, state)}",
                 )
             }
 

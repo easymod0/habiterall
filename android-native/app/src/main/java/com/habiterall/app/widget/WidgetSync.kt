@@ -125,10 +125,25 @@ object WidgetSync {
                 Settings(app).updateWidgets { records ->
                     records.map {
                         if (it.habitId == habitId && it.date == date) {
-                            // The strip moved back to unanswered with no
-                            // fetch behind it, exactly the same reason
-                            // `Widgets.answered` sets this flag.
-                            it.copy(value = null, skip = false, figuresStale = true)
+                            // NOT `figuresStale = true`, on purpose — the one
+                            // exception among the answer-shaped paths.
+                            // `Widgets.answered` sets it because an answer
+                            // was recorded that the score/streak have not
+                            // caught up with; a refusal is the opposite, a
+                            // write the server dropped for good, so it never
+                            // changed the server's figures at all — the last
+                            // fetch's numbers are still exactly as current
+                            // (or stale) as they were the instant before.
+                            // Setting the flag here would put
+                            // `stats_figures_behind` ("Score updates on next
+                            // sync") on screen at the moment a write was
+                            // PERMANENTLY dropped, which reads as "queued,
+                            // will land" — the opposite of what happened.
+                            // Left untouched rather than cleared: if an
+                            // earlier `answered` already set it, the figures
+                            // genuinely have not been re-fetched since, and
+                            // the line is still true.
+                            it.copy(value = null, skip = false)
                         } else {
                             it
                         }

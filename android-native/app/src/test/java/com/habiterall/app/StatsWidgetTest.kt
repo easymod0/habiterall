@@ -315,6 +315,51 @@ class StatsWidgetTest {
         }
     }
 
+    /* ---------- part (a): the ghost-kept cell's TINT and DESCRIPTION must agree ---------- */
+
+    @Test
+    fun `a ghost-kept cell's content description says kept, not unanswered`() {
+        // Same shape as the ghost-tint test above: no `history` at all, so
+        // every day before `record.date` resolves UNKNOWN, and on this habit
+        // that is a KEPT day. `HabitWidget.describe` alone would still answer
+        // `widget_unanswered` for UNKNOWN — the screen and the screen reader
+        // disagreeing about the same cell — which is finding (a) in this
+        // issue's brief.
+        val habit = avoidedHabit()
+        val rec = record(habit, date = today, value = 0.0, unloggedIsSuccess = true)
+        val view = inflate(StatsWidget.render(context, rec, today, columns = 7))
+        val kept = context.getString(R.string.stats_cell_kept)
+        val unanswered = context.getString(R.string.widget_unanswered)
+        // Index 5, not 0: with `columns = 7` and `record.date == today`,
+        // index 6 is today itself (resolved through `stateOn`, not history),
+        // and index 5 is yesterday — the last cell that is guaranteed UNKNOWN
+        // through the (empty) `history` map, so its own day can be named.
+        val description = view.findViewById<ImageView>(cellIds[5]).contentDescription.toString()
+        assertTrue("a ghost-kept cell must announce itself kept", description.contains(kept))
+        assertFalse(
+            "a ghost-kept cell must not also announce itself unanswered",
+            description.contains(unanswered),
+        )
+        // The date prefix `StatsWidget.render` prepends is still there.
+        assertTrue("the description still names its own day", description.contains(yesterday))
+    }
+
+    @Test
+    fun `without unlogged-is-success the same cell announces unanswered, not kept`() {
+        // The negative half: this is what stops a `describeStrip` that
+        // ignores its own guard and always says "kept" from passing. Same
+        // habit, same day, minus the flag.
+        val habit = avoidedHabit()
+        val rec = record(habit, date = today, value = 0.0, unloggedIsSuccess = false)
+        val view = inflate(StatsWidget.render(context, rec, today, columns = 7))
+        val kept = context.getString(R.string.stats_cell_kept)
+        val unanswered = context.getString(R.string.widget_unanswered)
+        val description = view.findViewById<ImageView>(cellIds[5]).contentDescription.toString()
+        assertTrue("an ordinary unanswered cell must announce unanswered", description.contains(unanswered))
+        assertFalse("an ordinary unanswered cell must not announce kept", description.contains(kept))
+        assertTrue("the description still names its own day", description.contains(yesterday))
+    }
+
     /* ---------- distinct tap intents, the alarms' own bug class ---------- */
 
     @Test
@@ -579,6 +624,46 @@ class StatsWidgetTest {
             server.shutdown()
         }
     }
+
+    /* ---------- WidgetSync.noteRefused: an answer-shaped path that is NOT the same as `answered` ---------- */
+
+    @Test
+    fun `noteRefused returns the day to unanswered and leaves figuresStale exactly as it found it`(): Unit =
+        runBlocking {
+            // Over the real store, not a pure function: this is the wiring
+            // assertion, the same shape `refreshFromServer asks the server
+            // for a full week` above uses. Both directions are required — the
+            // `false` case alone passes against code that clears the flag on
+            // a refusal (the pre-fix behaviour this issue reverses), and the
+            // `true` case alone passes against code that sets it (what
+            // `Widgets.answered` does, which a refusal must not repeat: the
+            // write never reached the server, so the last fetch's figures are
+            // unaffected by it).
+            val habit = boolHabit()
+            val settings = Settings(context)
+
+            val current = record(habit, widgetId = 61, value = Sentinels.YES, figuresStale = false)
+            settings.putWidgets(listOf(current))
+            WidgetSync.noteRefused(context, habit.id, today)
+            val afterCurrent = settings.cachedWidgets().first { it.widgetId == 61 }
+            assertNull("a refused write returns the day to unanswered", afterCurrent.value)
+            assertFalse("a refused write must not record a skip either", afterCurrent.skip)
+            assertFalse(
+                "a record that was current must not become stale from a refusal alone",
+                afterCurrent.figuresStale,
+            )
+
+            val stale = record(habit, widgetId = 62, value = Sentinels.YES, figuresStale = true)
+            settings.putWidgets(listOf(stale))
+            WidgetSync.noteRefused(context, habit.id, today)
+            val afterStale = settings.cachedWidgets().first { it.widgetId == 62 }
+            assertNull(afterStale.value)
+            assertFalse(afterStale.skip)
+            assertTrue(
+                "a record that was already stale must stay stale — a refusal never re-fetched anything",
+                afterStale.figuresStale,
+            )
+        }
 
     /* ---------- FIX 5: the resize path — the one thing only this provider hears ---------- */
 

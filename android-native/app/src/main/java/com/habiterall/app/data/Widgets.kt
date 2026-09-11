@@ -96,20 +96,40 @@ object Widgets {
          */
         val history: String = "",
         /**
-         * Whether [score]/[currentStreak] are known to be behind the strip.
+         * Whether [score]/[currentStreak] are known to be behind an ANSWER
+         * this phone has recorded — not whether the strip itself has moved.
          *
          * [date] names the day the ENTRY is about; it does not say when the
-         * figures were last fetched, and two paths move the day with no
-         * network at all — [answered] and `WidgetSync.noteRefused`. Left
-         * unanswered, a local tap or refusal moved the strip forward while
-         * the score and streak stayed exactly what the last `/overview` fetch
-         * said, and `record.date == today` then read as "everything here is
-         * current" when only the strip was. Set wherever the strip moves
-         * without a fetch, cleared in [refreshed] — a successful fetch is
-         * exactly what makes the figures current again — and defaults to
-         * `false` so a record written before this field existed draws as
-         * current until it is told otherwise, same fail-safe direction as
-         * [unloggedIsSuccess].
+         * figures were last fetched, and [answered] can record an answer with
+         * no network at all — a notification's buttons, its number pad, or
+         * the checkmark widget's own tap. Left unset, a local answer left the
+         * score and streak exactly what the last `/overview` fetch said, and
+         * `record.date == today` then read as "everything here is current"
+         * when only the strip was. Set wherever an ANSWER IS RECORDED without
+         * a fetch — both of [answered]'s branches, including the one that
+         * hands the record back with `date`/`value` unchanged because the
+         * answer named an older day than the record already held: something
+         * was still recorded there (a notification still in the shade,
+         * answered after a sync), so the figures are exactly as behind as
+         * they were the instant before. The definition used to be "wherever
+         * the strip moves", which the early-return branch satisfied by
+         * construction — nothing moved — while leaving exactly the case
+         * above presenting stale figures as current; the field is defined by
+         * what its one reader (`StatsWidget.render`) asks of it, not by the
+         * mechanism that happens to make it true elsewhere. Cleared in
+         * [refreshed] — a successful fetch is exactly what makes the figures
+         * current again. `WidgetSync.noteRefused` is the one exception: a
+         * refusal never reached the server, so the last fetch's figures are
+         * unaffected by it, and it leaves this flag exactly as it found it.
+         *
+         * Defaults to `false`, same fail-safe direction as
+         * [unloggedIsSuccess] — but not because a record from before this
+         * field existed cannot hold a local answer the figures have not
+         * caught up with; it can, from a tap on the previous build waiting on
+         * its first fetch under this one. `false` is still the right
+         * default: `true` would put a spurious note on every widget on every
+         * upgrading phone, and the window `false` leaves open is one
+         * pre-upgrade local answer, closing at the very next fetch.
          */
         val figuresStale: Boolean = false,
     ) {
@@ -339,12 +359,19 @@ object Widgets {
      *
      * `record.date` is the one exception to reading [decodeHistory]: it
      * resolves from `record.value`/`record.skip` instead, because that pair is
-     * what `WidgetSync.noteAnswer` and the checkmark widget's own tap keep
-     * current — an answer given elsewhere on the phone has to show here
-     * immediately, or two widgets for the same habit on one home screen would
-     * disagree about the same day. [stateOn] already draws exactly that
-     * distinction (unknown unless the date matches `record.date`), so it is
-     * reused rather than a fifth opinion about what a stored day means.
+     * what `WidgetSync.noteAnswer` keeps current — the notification's buttons
+     * and its number pad map over every record for the habit, so an answer
+     * given there has to show on every one of its widgets immediately, or two
+     * widgets for the same habit on one home screen would disagree about the
+     * same day. A widget's own tap does NOT reach that far: `HabitWidget.tap`
+     * writes back only its own record (`putWidgets(listOf(...))`, and
+     * `Settings.putWidgets` upserts keyed by `widgetId`), so a second widget
+     * for the same habit is untouched by it and the two stay disagreeing
+     * until the next fetch — the carve-out below is still worth having for
+     * the case it actually closes, `noteAnswer`'s. [stateOn] already draws
+     * exactly that distinction (unknown unless the date matches
+     * `record.date`), so it is reused rather than a fifth opinion about what
+     * a stored day means.
      *
      * A date with no answer — including every date AFTER `record.date` on a
      * stale record, [today] itself among them — is UNKNOWN, never NO.
@@ -450,11 +477,23 @@ object Widgets {
      * widget has already moved on to.
      */
     fun answered(record: Record, date: String, value: Double?, skip: Boolean) =
-        if (date < record.date) record else
-        // The strip has moved; the score and streak have not — nothing here
-        // re-fetched `/overview`, so `figuresStale` records that the two
-        // have parted ways until the next one does.
-        record.copy(date = date, value = value, skip = skip, figuresStale = true)
+        if (date < record.date) {
+            // `date`/`value` stay put — an older answer must not rewind the
+            // record — but an ANSWER was still just recorded with no fetch
+            // behind it: a notification still in the shade about yesterday,
+            // pressed after this morning's sync. `figuresStale` is defined by
+            // that, not by whether the strip moved, so it is set here too.
+            // Handing back `record` unchanged used to leave the flag exactly
+            // as it was before this answer — `false`, if the morning's fetch
+            // had cleared it — presenting the 08:00 score and streak as
+            // current while this write sits in the outbox.
+            record.copy(figuresStale = true)
+        } else {
+            // The strip has moved too; the score and streak have not —
+            // nothing here re-fetched `/overview`, so `figuresStale` records
+            // that the two have parted ways until the next one does.
+            record.copy(date = date, value = value, skip = skip, figuresStale = true)
+        }
 
     /**
      * `widgetId|habitId|name|type|target|targetType|showAs|color|unit|date|value|skip`.
@@ -554,11 +593,15 @@ object Widgets {
             score = f.getOrNull(14)?.toDoubleOrNull() ?: 0.0,
             currentStreak = f.getOrNull(15)?.toIntOrNull() ?: 0,
             history = f.getOrNull(16) ?: "",
-            // Field 17. Absent means "not known to be behind" — the
-            // fail-safe direction, same reasoning as `unloggedIsSuccess`
-            // above: a record from before this field existed has no local
-            // answer this build cannot account for, so there is nothing to
-            // warn about yet.
+            // Field 17. Absent defaults to `false` — not because a record
+            // from before this field existed cannot hold a local answer the
+            // figures have not caught up with (it can: a tap on the previous
+            // build, still waiting on its first fetch under this one), but
+            // because `true` instead would put a spurious note on every
+            // widget on every upgrading phone. The window `false` leaves
+            // open is one pre-upgrade local answer, closing at the very next
+            // fetch — same fail-safe direction as `unloggedIsSuccess` above,
+            // for a real and bounded cost rather than none.
             figuresStale = f.getOrNull(17) == "1",
         )
     }

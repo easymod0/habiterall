@@ -411,18 +411,22 @@ version of THAT put the explanation in `setContentDescription` alone ("It has
 to be VISIBLE, not just described"), so a stats widget repeating that mistake
 would have been the identical bug on a second surface. But `record.date` names
 the day the ENTRY is about, not when `score`/`currentStreak` were last
-fetched, and two paths move the day with no network at all —
-`Widgets.answered` (a notification button, its number pad, or the checkmark
-widget's own tap) and `WidgetSync.noteRefused`. A morning sync leaves the
-figures at yesterday's answer; a 9am tap in the shade moves the strip to
-today with no fetch behind it, and `record.date == today` then read as
-"everything here is current" for up to six hours, contradicting the strip
-cell sitting right beside it. `Record.figuresStale` is the second flag this
-needed: set wherever the strip moves without a fetch, cleared in
+fetched, and `Widgets.answered` can record an answer with no network at all — a
+notification button, its number pad, or the checkmark widget's own tap. A
+morning sync leaves the figures at yesterday's answer; a 9am tap in the shade
+moves the strip to today with no fetch behind it, and `record.date == today`
+then read as "everything here is current" for up to six hours, contradicting
+the strip cell sitting right beside it. `Record.figuresStale` is the second
+flag this needed: set on BOTH of `answered`'s branches — an answer has been
+recorded with no fetch behind it, not "the strip moved", so the branch that
+leaves `date` unchanged (an older-day answer) still sets it — cleared in
 `Widgets.refreshed` (a successful fetch is exactly what makes the figures
 current again), and shown as its own sentence (`stats_figures_behind`) rather
 than the dated one — naming a date would be a false claim when the day itself
-is not stale, only the score and streak are.
+is not stale, only the score and streak are. `WidgetSync.noteRefused` is the
+one exception: a refusal never reached the server, so the last fetch's
+figures are unaffected by it, and setting the flag there would read as
+"queued, will land" on a write that was dropped for good.
 
 **`redraw` and `armMidnight` used to be hard-coded to `HabitWidget` alone, and
 the worse of the two failure modes was not "never redrawn."** Both asked

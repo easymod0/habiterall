@@ -489,6 +489,41 @@ class HabitWidget : AppWidgetProvider() {
         }
 
         /**
+         * [describe], with one arm the STRIP alone gets to say.
+         *
+         * The same guard as [stripFill]: `state == UNKNOWN &&
+         * habit.unloggedIsSuccess` is a day this habit's rule already counts
+         * as kept, not merely unknown, and [stripFill] already paints it with
+         * the ghost-kept tint. [describe] still answers `widget_unanswered`
+         * for UNKNOWN, so a strip cell built from it painted kept and
+         * announced itself unanswered in the same breath — the screen and the
+         * screen reader disagreeing about the same day, on a surface whose
+         * own decision record says "It has to be VISIBLE, not just
+         * described." This wrapper exists for the same reason [stripFill]
+         * does: the big cell's one description, and `HabitWidget`'s own
+         * tests, stay untouched — [describe] itself does not gain a case it
+         * did not have, this sits one layer above it and only `StatsWidget`
+         * calls it.
+         *
+         * The guard leads with `!record.gone`, unlike [stripFill]'s, because
+         * [stripFill]'s caller already short-circuits `gone` before calling
+         * it while this one is called directly from `StatsWidget.render`'s
+         * per-cell loop. A gone record's description has to stay
+         * `widget_gone` — [describe] already returns that first — so the
+         * ghost-kept arm here must not shadow it.
+         */
+        internal fun describeStrip(
+            context: Context,
+            record: Widgets.Record,
+            state: Grid.DayState,
+        ): String =
+            if (!record.gone && state == Grid.DayState.UNKNOWN && record.habit.unloggedIsSuccess) {
+                "${record.name}: ${context.getString(R.string.stats_cell_kept)}"
+            } else {
+                describe(context, record, state)
+            }
+
+        /**
          * What a tap opens or sends.
          *
          * A measurable habit gets the number pad the notification already uses,

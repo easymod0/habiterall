@@ -540,6 +540,26 @@ class WidgetTest {
         assertFalse("a successful fetch must clear the stale flag", fetched.figuresStale)
     }
 
+    @Test
+    fun `an answer about an older day sets figuresStale without rewinding the record`() {
+        // A notification about yesterday, still in the shade, pressed after
+        // this morning's sync: the day named is older than `record.date`, so
+        // `date`/`value`/`skip` must stay exactly what they were — the record
+        // must not rewind to a day that is over — but an ANSWER was still
+        // just recorded with no fetch behind it, so `figuresStale` must be
+        // set here too, same as the same-day/later-day branch above.
+        val onToday = record(boolHabit(), value = Sentinels.YES).copy(figuresStale = false)
+        val answered = Widgets.answered(onToday, yesterday, Sentinels.UNSET, skip = true)
+
+        assertEquals("an older answer must not rewind the date", today, answered.date)
+        assertEquals("an older answer must not rewind the value", Sentinels.YES, answered.value)
+        assertFalse("an older answer must not rewind skip either", answered.skip)
+        assertTrue(
+            "an answer about an older day still recorded something with no fetch behind it",
+            answered.figuresStale,
+        )
+    }
+
     /* ---------- what the cell says ---------- */
 
     @Test
