@@ -425,7 +425,35 @@ the one place a tap is the whole point of the grid.
 **The value and the skip still come from the HOST, and only the note from the
 reply.** They are the optimistic model — a queued tap has already moved them
 and the server has not heard — so reading them off the fetch would open the
-dialog on a day the grid behind it is painting differently.
+dialog on a day the grid behind it is painting differently. Read AFTER the
+await, beside the habit and for the same reason: a `load()` landing during the
+fetch would otherwise seed the editor with a value the grid has stopped drawing.
+
+**And `saveDay` must tell the host on the SUCCESS path, not only the queued
+one — announcing is not enough for a view that answers by RECOMPUTING.**
+`emit('change')` means "the visible view's data moved", and the two views
+answer it differently on purpose: the detail page refetches, the dashboard
+repaints from `state`. That split is sound because every write the LIST makes
+for itself moves `state` optimistically before the request goes out. The day
+editor is the one writer that did not — so with the editor opening over the
+list, an ordinary ONLINE save landed on the server and `paint()` faithfully
+redrew the pre-edit day: the square stayed empty, no tick and no note dot, with
+the dialog closed and nothing said, until a `load()` a dashboard left open
+never gets. It could not happen while that host NAVIGATED, because the page it
+landed on is the one that refetches — so this is a cost the in-place open
+brings with it, not a pre-existing hole. The fix is the `edit` + `repaint` pair
+the queued branch already does, and it is free for the detail view, whose
+refetch lands on an optimistic edit that agrees with it.
+
+**Pinning that needs a day the save can CHANGE, and the first version of the
+check did not have one.** It asserted the tick and the dot on the day the
+fixture had already given a value and a note, so both were true BEFORE the save
+and the check compared the cell to a state it was already in — green against
+the unrepainted build, measured. That is the root `CLAUDE.md`'s
+fixture-equals-itself trap landing inside the very check written to catch a
+repaint bug, and it is why `gridcheck.mjs` DELETES a day in its seed (the
+fixtures lay down 60 days of entries, so "a day nobody wrote to" is not one
+that exists by default) and asserts the blank start before pressing anything.
 
 **"Recent days" is the one card you ACT on, and it is first for that reason.**
 It is the dashboard's tappable day strip for one habit — `ui/day-strip.js`,

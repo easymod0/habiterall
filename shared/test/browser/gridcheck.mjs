@@ -682,7 +682,7 @@ try{
     const h = habits.find(x => !x.archived);
     const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
       return d.toISOString().slice(0, 10); };
-    const noted = iso(1), plain = iso(2);
+    const noted = iso(1), plain = iso(2), blank = iso(3);
     const noteText = 'grid probe note, kept honest';
     await fetch('/api/habits/' + h.id + '/entries/' + noted, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -690,7 +690,12 @@ try{
     await fetch('/api/habits/' + h.id + '/entries/' + plain, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ value: 2 }) });
-    return { id: h.id, noted, plain, noteText };
+    // DELETED, not merely left alone: the fixtures seed 60 days of entries, so
+    // "a day nobody has written to" is not a day that exists by default here.
+    // This one has to have no row and no note for the save-repaint check below
+    // to be able to observe a CHANGE rather than a state the cell was already in.
+    await fetch('/api/habits/' + h.id + '/entries/' + blank, { method: 'DELETE' });
+    return { id: h.id, noted, plain, blank, noteText };
   })()`);
   ck('a habit exists to seed the notes probe onto', !!notesSeed?.id, JSON.stringify(notesSeed));
 
@@ -880,11 +885,57 @@ try{
        JSON.stringify(afterEditor));
     ck('...seeded with the real note, which is the whole point of the setting',
        afterEditor.notes === notesSeed.noteText, JSON.stringify(afterEditor));
+    await ev(`document.getElementById('day-cancel').click()`);
+    await sleep(200);
 
-    // ...and a save from there states the note, so it round-trips through the
-    // surface that could not write one before. A CHANGED note, not the same
-    // one: a save that wrote nothing at all would compare equal to itself.
-    const newNote = notesSeed.noteText + ' — edited from the dashboard';
+    /*
+     * ...and a save from there writes the note AND MOVES THE GRID, which is the
+     * half a stored-value check cannot see and the half a user is looking at.
+     *
+     * `saveDay` announces with `emit('change')`, and the dashboard answers that
+     * by REPAINTING FROM `state` rather than refetching — right for every write
+     * the list makes for itself, since those move `state` optimistically before
+     * the request goes out, and wrong for the day editor, which did not. An
+     * ordinary ONLINE save therefore landed on the server and left the square
+     * exactly as it was: no tick, no note dot, dialog closed, nothing said,
+     * until a `load()` a dashboard left open never gets.
+     *
+     * **This is asserted on a day with NO ROW AND NO NOTE, and the first
+     * version of this check was not.** It reused `notesSeed.noted`, which the
+     * seed had already given a value and a note — so `text === '✓'` and
+     * `dot === true` were true BEFORE the save and the check compared the cell
+     * to a state it was already in. It passed against the unrepainted build,
+     * measured, which is the fixture-equals-itself trap from the root
+     * CLAUDE.md landing in the very check written to catch a repaint bug. The
+     * `blank` date is deleted in the seed above precisely so this can observe a
+     * CHANGE.
+     *
+     * Both marks are read, because the value and the note travel through
+     * different fields of the host's model and a version that moved one and not
+     * the other is exactly what `listHost.edit`'s note arm was added for.
+     */
+    const blankSel = `[data-focus-key="check:${notesSeed.id}:${notesSeed.blank}"]`;
+    const cellState = (date) => ev(`(() => {
+      const box = document.querySelector('${boxSel('DATE')}'.replace('DATE', ${JSON.stringify(date)}));
+      return box ? { text: box.textContent, dot: box.classList.contains('has-note') } : null;
+    })()`);
+    const beforeSave = await cellState(notesSeed.blank);
+    ck('the day about to be edited starts with no tick and no dot — or the '
+       + 'check below compares the cell to a state it was already in',
+       beforeSave?.text === '' && beforeSave?.dot === false, JSON.stringify(beforeSave));
+
+    at = await centreOf(blankSel);
+    ck('the blank cell is on screen', !!at, JSON.stringify(at));
+    await leftClick(at.x, at.y);
+    await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
+      { what: 'the day editor to open on the blank day' });
+    const blankEditor = await editorState();
+    ck('a day with no note opens with an EMPTY box that is still shown — the '
+       + 'box is hidden only when the note could not be found out',
+       blankEditor.notes === '' && blankEditor.notesHidden === false,
+       JSON.stringify(blankEditor));
+
+    const newNote = 'written from the dashboard, on a day that had nothing';
     await ev(`(() => {
       const box = document.getElementById('day-notes');
       box.value = ${JSON.stringify(newNote)};
@@ -894,9 +945,16 @@ try{
     await waitUntil(ev, `document.getElementById('day-dialog')?.open !== true`,
       { what: 'the day editor to close after saving' });
     await sleep(500);
-    const saved = await storedValue(notesSeed.noted);
-    ck('a save from the dashboard editor writes the note',
-       saved?.notes === newNote, JSON.stringify(saved));
+    const saved = await storedValue(notesSeed.blank);
+    ck('a save from the dashboard editor writes the value and the note',
+       saved?.value === 2 && saved?.notes === newNote, JSON.stringify(saved));
+
+    const cellAfterSave = await cellState(notesSeed.blank);
+    ck('...and the grid cell it was opened from shows the save WITHOUT waiting '
+       + 'for a reload',
+       cellAfterSave?.text === '✓', JSON.stringify(cellAfterSave));
+    ck('...and grows the note dot, from the same optimistic edit',
+       cellAfterSave?.dot === true, JSON.stringify(cellAfterSave));
 
     ck('the setting is put back', await setTap('cycle') === 'cycle');
   }

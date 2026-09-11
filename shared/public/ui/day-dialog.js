@@ -293,6 +293,29 @@ async function saveDay(body) {
   }
 
   dialog.close();
+  // The host hears about the write on THIS path too, and not only on the queued
+  // one — which is not symmetry for its own sake.
+  //
+  // `emit('change')` means "the visible view's data moved", and the two views
+  // answer it differently on purpose (`ui/store.js`): the detail page REFETCHES,
+  // because nothing it shows can be recomputed locally, while the dashboard
+  // REPAINTS FROM `state` — every write that list makes for itself has already
+  // moved `state` optimistically before the request went out. The day editor is
+  // the one writer that had not, so opening it over the LIST (`editDayOverList`,
+  // ui/dashboard.js) made `paint()` faithfully redraw the pre-edit day: measured,
+  // an ordinary ONLINE save landed on the server and left the square empty — no
+  // tick, no note dot — with the dialog closed and nothing said, until the next
+  // `load()`, which a dashboard left open never gets.
+  //
+  // It could not happen while that host navigated to the habit's own page
+  // instead, because the page it landed on is the one that refetches. Announcing
+  // is therefore not enough for a view that answers by recomputing, and this is
+  // the same `edit` + `repaint` pair the queued branch above already does, for
+  // the same reason it does it. Free for the detail view, whose refetch lands on
+  // an optimistic edit that agrees with it; the dashboard paints twice, exactly
+  // as an ordinary check-off already does.
+  dayHost?.edit(habitId, date, asEdit(body), noteText ?? undefined);
+  dayHost?.repaint();
   emit('change');
 }
 

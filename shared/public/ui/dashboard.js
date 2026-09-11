@@ -242,9 +242,7 @@ const listHost = {
  * reachable and where the tap is the whole point of the grid.
  */
 async function editDayOverList(id, date) {
-  const habit = listHost.habit(id);
-  if (!habit) return;
-  const { value, isSkip } = listHost.read(id, date);
+  if (!listHost.habit(id)) return;
 
   let note = null;
   try {
@@ -263,8 +261,18 @@ async function editDayOverList(id, date) {
   // a `'reload'` (a reconnect flush, a save elsewhere) can replace every habit
   // in `state.habits` while it is in flight. Opening a modal over a view the
   // user has since navigated away from is the one thing this cannot do.
-  if (!dashboardShowing() || !listHost.habit(id)) return;
-  openDayDialog(listHost.habit(id), date, value, isSkip, note, listHost);
+  const habit = listHost.habit(id);
+  if (!dashboardShowing() || !habit) return;
+  // The day is read AFTER the await, beside the habit and for the same reason.
+  // Read before it, the dialog opens on whatever the list held when the press
+  // happened, so a `load()` landing during the fetch — a reconnect flush, a tap
+  // synced from another device — seeds the editor with a value the grid behind
+  // it has already stopped drawing. Still the HOST and never the reply: the
+  // host is the optimistic model, which a queued tap has moved and the server
+  // has not heard about, and only the NOTE is something this list has no copy
+  // of at all.
+  const { value, isSkip } = listHost.read(id, date);
+  openDayDialog(habit, date, value, isSkip, note, listHost);
 }
 
 /**

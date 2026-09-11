@@ -2047,3 +2047,56 @@ not to have been made must leave no mark behind, and a stale dot is a mark.
 | `editDayOverList`'s fetch stubbed to `[]` | gridcheck: both note seeds come back empty — the #224 landmine, caught |
 | `noteKnown` forced true | daydialog: the box is shown for an unknown note and the write states it |
 | `noteText`'s `= ''` default deleted | daydialog: an absent argument stops meaning "no note" |
+
+### Review round 1: announcing is not enough for a view that recomputes
+
+The in-place open above shipped with a defect the whole suite was green over,
+and it is worth recording because the reasoning that produced it is easy to
+repeat: `saveDay` already ended in `emit('change')`, which is how every other
+dialog in this app tells the world it wrote something, so nothing looked
+missing.
+
+`emit('change')` means *the visible view's data moved*, and the two views answer
+it differently on purpose (`ui/store.js`): the detail page REFETCHES, because
+nothing it shows can be recomputed locally, and the dashboard REPAINTS FROM
+`state`. That asymmetry is sound while every write the list makes for itself has
+already moved `state` optimistically before the request went out — which is true
+of `writeDay` and of `saveCount`, and was not true of the day editor.
+
+So with `editDayOverList` opening that editor over the list, an ordinary ONLINE
+save wrote to the server and `paint()` faithfully redrew the pre-edit day.
+Measured on the branch as first pushed, pressing **✓ Done** and typing a note:
+
+```
+before tap          : {"text":"","bg":"var(--grid-empty)","dot":false}
+after ONLINE save   : {"text":"","bg":"var(--grid-empty)","dot":false}
+stored              : {"value":2,"notes":"a note from the list"}
+after a further 1.5s: {"text":"","bg":"var(--grid-empty)","dot":false}
+```
+
+No tick, no dot, dialog closed, no toast — and it stays that way until the next
+`load()`, which a dashboard left open never gets. Reachable under the DEFAULT
+`dayTap: 'cycle'` through #297's right-click affordance, so it was never gated
+behind the new setting. It could not happen while the host navigated instead:
+the page that open landed on is the one that refetches. The fix is the
+`edit` + `repaint` pair the queued branch has always done, on the success path
+too, which costs the detail view nothing.
+
+**The check written to prove the feature could not see it, and then the check
+written to catch THAT could not either.** The first read the stored row back
+from the API — true on the broken build, since the write does land — which is
+"pinning the DECISION is not pinning the WIRING" in the one place it most
+mattered. The second read the grid, and asserted the tick and the dot on
+`notesSeed.noted`, the day the seed had already given a value and a note: both
+were true before the save, so the check compared the cell to a state it was
+already in and passed against the unrepainted build. Verified by mutation, not
+by reading — the first mutation run came back `ALL GRID CHECKS PASSED` and that
+is what exposed it.
+
+The fixtures lay down 60 days of entries, so a day with no row is not something
+this suite gets by picking an untouched date; `gridcheck.mjs` DELETES one in its
+seed and asserts the cell is blank and dotless before pressing anything. Both
+marks are read afterwards, because the value and the note travel through
+different fields of the host's model: mutating `noteText ?? undefined` to a bare
+`undefined` leaves the tick and drops the dot, and only the second assertion
+catches it.
