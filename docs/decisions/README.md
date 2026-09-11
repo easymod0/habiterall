@@ -17,8 +17,10 @@ are already answered here, usually because they were the first thing tried.
 | `awards.md` | the whole awards card, and what was refused from it |
 | `dashboard-and-detail.md` | the `/overview` window, grid columns, `detailCards` |
 | `settings-and-mirrors.md` | client mirrors, `notMirrored`, the theme record |
+| `translations.md` | #144, open: the runtime-catalogue shape, why the server's own prose is the hard part, and the key-plus-data-vs-server-localises decision still to make |
 | `routing.md` | fragment routing, the deep-link flash, the WebView back stack |
 | `android.md` | notifications, snooze, the home-screen widget |
+| `android-stats-screen.md` | #171: why stats stays in the warm `WebScreen` rather than a native Compose screen, the `Api.stats` prerequisite #145 turned out not to share, and the bounded-summary middle ground |
 | `notifications-web.md` | the `web` channel, the nudge, the settings dialog |
 | `discord.md` | bot mode, the gateway, interaction handling |
 | `timezones.md` | `resolveTimeZone` vs `callerDay`, the device clock header |
@@ -33,6 +35,7 @@ are already answered here, usually because they were the first thing tried.
 | `site.md` | habiterall.ca: why the wiki is generated from the README, the link check, the changelog source |
 | `categories.md` | one category per habit, `ON DELETE SET NULL`, uncategorised as a state, the case-fold divergence |
 | `caching.md` | the `/overview` memo and every bound in it, the shared eviction policy, the pool timeouts, `users.data_version` and the pool cliff, and the `Vary` that cost the offline dashboard |
+| `materialized-figures.md` | #196: the materialised `habit_summary` table proposed and closed unbuilt once #184's two-column probe closed the gap, the three hard cases any such cache has to answer, and what was explicitly refused alongside it (SQL stats, bitmap storage, `worker_threads`) |
 | `phantom-dates.md` | #270: why a date that is not a real day cannot anchor a window, the six sites it was closed at, why `2026-02-30` moving too is correct rather than collateral, and why Site F has a behavioural test only in personal |
 | `runtime.md` | #199: why the backend is Node, the four-language measurement and the caveat that undoes it, the three-consumer cost of a rewrite, and what would change the answer |
 | `must-stay-fixed.md` | #112 §3: the eleven premises that may never become settings, and what promotes a tunable into one |
@@ -51,12 +54,19 @@ had grown to a third of the root file's testing section with nowhere here to go.
 `site.md` came with `site/` itself. `ntfy-answers.md`, `categories.md`,
 `caching.md` and `phantom-dates.md` each came with their change.
 
-The last four came from a third place: **open issues**. #203 found eight issues
+The last seven came from a third place: **open issues**. #203 found eight issues
 that were decision documents wearing an issue's clothes, and the cost of leaving
 them there is not tidiness — an issue is read as a thing somebody intends to
 build, so #112's list of things that must *never* be built sat under the
-`enhancement` label. Those four moved; the issues stay as their actionable slice,
-and #203 tracks the remaining four.
+`enhancement` label. `runtime.md`, `must-stay-fixed.md`, `icons.md` and
+`sharing-and-rls.md` moved first, from #199 (closed by it), #112 §3, #66 and
+#77; `android-stats-screen.md`, `materialized-figures.md` and `translations.md`
+followed, from #171, #196 and #144. The eighth, #65, needed no new record: its
+own decision — one category per habit, in a table of its own — had already been
+moved into `categories.md` across its own implementation history, in more
+detail than the issue itself carries. The issues stay as their actionable slice;
+#203 is not closed by this move alone; see its own thread for the prose each
+one still needs trimmed to.
 
 ## Adding to this
 
