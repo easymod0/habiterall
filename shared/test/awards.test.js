@@ -638,21 +638,26 @@ test('both editions hand the gate its inputs, or it silently does nothing', () =
     const calls = awardCallsIn(src);
 
     // EVERY call site, not the first one. Checking only the first let a second,
-    // ungated `computeAwards(...)` ship in the same file — and a route added
-    // later is exactly how that would happen.
-    assert.equal(calls.length, 1,
-      `${edition} has ${calls.length} computeAwards call sites, expected 1: `
-      + calls.join(' | '));
+    // ungated `computeAwards(...)` ship in the same file. `GET /awards` (#140)
+    // is exactly the "route added later" the old comment here predicted, and
+    // this count is what keeps a THIRD one a reviewed act rather than a silent
+    // one: an empty offender list below would mean nothing if this count could
+    // drift upward unnoticed first.
+    assert.equal(calls.length, 2,
+      `${edition} has ${calls.length} computeAwards call sites, expected 2 `
+      + `(/habits/:id/stats and /awards): ${calls.join(' | ')}`);
 
-    const args = calls[0].split(',').map((s) => s.trim());
-    assert.equal(args.length, 5,
-      `${edition} calls computeAwards with ${args.length} arguments: ${calls[0]}`);
-    assert.equal(args[2], 'habit', `${edition} passes ${args[2]} as the habit`);
-    assert.equal(args[3], 'unlogged', `${edition} passes ${args[3]} as the setting`);
-    // The fifth is the same trap one argument further along: `skipDays` is
-    // optional, so dropping it turns the rest award off for every account in
-    // that edition and nothing anywhere else changes.
-    assert.equal(args[4], 'skipDays', `${edition} passes ${args[4]} as skipDays`);
+    for (const call of calls) {
+      const args = call.split(',').map((s) => s.trim());
+      assert.equal(args.length, 5,
+        `${edition} calls computeAwards with ${args.length} arguments: ${call}`);
+      assert.equal(args[2], 'habit', `${edition} passes ${args[2]} as the habit`);
+      assert.equal(args[3], 'unlogged', `${edition} passes ${args[3]} as the setting`);
+      // The fifth is the same trap one argument further along: `skipDays` is
+      // optional, so dropping it turns the rest award off for every account in
+      // that edition and nothing anywhere else changes.
+      assert.equal(args[4], 'skipDays', `${edition} passes ${args[4]} as skipDays`);
+    }
 
     // And it must be the SAME value computeStats was given, or the gate and the
     // arithmetic answer different questions about one habit.
@@ -676,22 +681,25 @@ test('both editions hand the gate its inputs, or it silently does nothing', () =
     assert.match(stripComments(src), /skipDays\s*[:=][^;\n]*(storedSkipDays|skip_days)/,
       `${edition} does not derive skipDays from the account's setting`);
 
-    // `/overview` no longer calls `computeStats` at all: it reads two numbers
-    // per habit and calls `summaryStats` for them instead, so the only
-    // `computeStats` call site left is `/stats`'s whole reading. Pinned by
-    // COUNT as well as by content: a third route added later that paid for
-    // `computeStats` and threw most of it away would otherwise slip in
+    // `/overview` never calls `computeStats` at all: it reads two numbers per
+    // habit and calls `summaryStats` for them instead. `/habits/:id/stats` is
+    // one call site and `GET /awards` (#140) is the second — the account-level
+    // route walks every habit but still asks `computeStats` for each one, so it
+    // shares this call site's shape rather than adding a third one that pays
+    // for the pass and throws most of it away. Pinned by COUNT as well as by
+    // content: a FOURTH route added later doing that would otherwise slip in
     // silently, once per habit.
     const statsCalls = callsIn(src, 'computeStats');
-    assert.equal(statsCalls.length, 1,
-      `${edition} has ${statsCalls.length} computeStats call sites, expected 1 `
-      + `(/stats only): ${statsCalls.join(' | ')}`);
-    // ...and it must be the one feeding awards — the call with `granularity`,
-    // which `summaryStats` does not take — or the detail view lost a field
-    // nothing replaced.
-    assert.ok(/granularity/.test(statsCalls[0]),
-      `${edition}'s only computeStats call site is missing granularity, so it `
-      + `is not the /stats call: ${statsCalls[0]}`);
+    assert.equal(statsCalls.length, 2,
+      `${edition} has ${statsCalls.length} computeStats call sites, expected 2 `
+      + `(/stats and /awards): ${statsCalls.join(' | ')}`);
+    // ...and each must carry `granularity`, which `summaryStats` does not take
+    // — a call site missing it is not one of these two routes' own reading.
+    for (const call of statsCalls) {
+      assert.ok(/granularity/.test(call),
+        `${edition} has a computeStats call site missing granularity, so it `
+        + `is not /stats's or /awards's own call: ${call}`);
+    }
 
     // `/overview`'s replacement, pinned the same way: exactly one call site,
     // so a second one added later pays for the two passes twice per habit

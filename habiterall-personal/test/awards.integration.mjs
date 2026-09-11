@@ -138,6 +138,79 @@ ck('  while still carrying the three summary figures it is for',
   row.score === 0.443734 && row.currentStreak === 12 && row.bestStreak === 12,
   `${row.score} / ${row.currentStreak} / ${row.bestStreak}`);
 
+/* ---------- 3. GET /awards agrees with /habits/:id/stats (#140) ---------- */
+
+console.log('\n--- the account-level route agrees with the per-habit one ---');
+
+// skipDays back on for this fixture — a skip inside the run below is what
+// makes M2 (dropping `skipDays` from the `/awards` `computeAwards` call)
+// visible in the deepEqual: with the setting off there is no rest award on
+// either side to diverge over.
+await put('/settings', { skipDays: true });
+
+// 100 days, one of them a deliberate skip that BRIDGES rather than breaks the
+// run (skips are transparent to `computeStreaks`): long enough to reach the
+// top streak rung (`SURVIVAL_THRESHOLDS`' last entry, 100), to fully contain
+// at least one calendar month with an answer on every day (`coverage`), and
+// to earn a `rest` award once `skipDays` is on — three award FAMILIES, so the
+// fixture is nowhere near the trap the brief calls out, a fixture that earns
+// exactly one cheap award and so cannot see a narrowed window (M1) or a
+// dropped setting (M2) changing anything. 100 days is also enough that
+// computing `/awards` over a narrowed window (M1) diverges from the
+// full-history answer: capped to the trailing 31 days the best streak drops
+// from 100 to 31, which crosses the 60-day rung boundary.
+const marathon = await post('/habits', { name: 'Marathon', type: 'boolean' });
+for (let i = 99; i >= 0; i--) {
+  await put(`/habits/${marathon.id}/entries/${daysAgo(i)}`,
+    i === 10 ? { value: 0, status: 'skip' } : { value: 2 });
+}
+
+// A second habit, archived, so the archived-habit assertion below is not
+// vacuous — `/categories/stats` includes archived habits and this route must
+// too (M3).
+const retired = await post('/habits', { name: 'Retired', type: 'boolean' });
+await put(`/habits/${retired.id}/entries/${daysAgo(0)}`, { value: 2 });
+await put(`/habits/${retired.id}`, { name: 'Retired', type: 'boolean', archived: true });
+
+const fromAwardsRoute = (await get('/awards')).habits
+  .find((h) => h.id === marathon.id).awards;
+const fromStatsRoute = (await get(`/habits/${marathon.id}/stats`)).awards;
+
+// The comparison below is worthless unless the fixture actually earned
+// something: `deepEqual([], [])` passes against a route returning nothing at
+// all, or against `computeAwards` never being called.
+ck('the fixture earned at least one award',
+  fromAwardsRoute.length > 0, JSON.stringify(fromAwardsRoute));
+ck('  from at least two different families',
+  new Set(fromAwardsRoute.map((a) => a.family)).size >= 2,
+  JSON.stringify(fromAwardsRoute.map((a) => a.family)));
+ck('/awards and /habits/:id/stats report the identical award array',
+  JSON.stringify(fromAwardsRoute) === JSON.stringify(fromStatsRoute),
+  `awards=${JSON.stringify(fromAwardsRoute)} stats=${JSON.stringify(fromStatsRoute)}`);
+
+const awardsPayload = await get('/awards');
+ck('every habit in the account is listed, archived included',
+  new Set(awardsPayload.habits.map((h) => h.id)).size ===
+    new Set([habit.id, marathon.id, retired.id]).size &&
+    [habit.id, marathon.id, retired.id].every(
+      (id) => awardsPayload.habits.some((h) => h.id === id)),
+  JSON.stringify(awardsPayload.habits.map((h) => h.id)));
+ck('the archived habit specifically is present',
+  awardsPayload.habits.some((h) => h.id === retired.id),
+  JSON.stringify(awardsPayload.habits.map((h) => h.id)));
+ck('account is present and is an array (reserved for #63)',
+  Array.isArray(awardsPayload.account) && awardsPayload.account.length === 0,
+  JSON.stringify(awardsPayload.account));
+
+// No range parameter has any influence: the route takes none, and a caller
+// that sends one anyway (an old bookmark, a copy-pasted URL) must be ignored
+// rather than answered differently or refused.
+const withParams = await get(
+  `/awards?start=${daysAgo(10)}&end=${daysAgo(1)}&granularity=month`);
+ck('?start, ?end and ?granularity change nothing',
+  JSON.stringify(withParams) === JSON.stringify(awardsPayload),
+  `plain=${JSON.stringify(awardsPayload)} withParams=${JSON.stringify(withParams)}`);
+
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }
 try { rmSync(workdir, { recursive: true, force: true }); } catch { /* best effort */ }

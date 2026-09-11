@@ -2740,6 +2740,79 @@ ck('  while still carrying the summary figures it is for',
   coverageRow.score === 0.381137 && coverageRow.currentStreak === RECENT_DAYS,
   `${coverageRow.score} / ${coverageRow.currentStreak}`);
 
+/* ---------- GET /awards agrees with /habits/:id/stats (#140) ---------- */
+
+console.log('\n--- GET /awards ---');
+
+const getAwards = () => fetch(`${overviewBase}/api/awards`).then((r) => r.json());
+
+// 100 straight completed days: long enough to reach the top streak rung
+// (`SURVIVAL_THRESHOLDS`'s last entry, 100) and to fully contain at least one
+// calendar month with an answer on every day (`coverage`), so the fixture
+// earns at least two award FAMILIES — a fixture earning exactly one cheap
+// award cannot see a narrowed window changing anything (M1). Written directly
+// through `withUser` rather than 100 individual `PUT`s, the way `RECENT_DAYS`
+// above is.
+const marathon = await postHabit({ name: 'Marathon', type: 'boolean' });
+await withUser(alice, async (db) => {
+  for (let i = 0; i < 100; i++) {
+    await db.query(
+      `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
+       VALUES ($1,$2,$3,2,'','')
+       ON CONFLICT (habit_id, date) DO UPDATE SET value = excluded.value`,
+      [marathon.id, alice, isoDaysAgo(i)]
+    );
+  }
+});
+
+// A second habit, archived, so the archived-habit assertion below is not
+// vacuous — `/categories/stats` includes archived habits and this route must
+// too (M3).
+const retired = await postHabit({ name: 'Retired', type: 'boolean' });
+await withUser(alice, (db) => db.query(
+  `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
+   VALUES ($1,$2,$3,2,'','')`,
+  [retired.id, alice, isoDaysAgo(0)]
+));
+await putHabit(retired.id, { name: 'Retired', type: 'boolean', archived: true });
+
+const awardsPayload = await getAwards();
+const fromAwardsRoute = awardsPayload.habits.find((h) => h.id === marathon.id).awards;
+const fromStatsRoute = (await fetch(`${overviewBase}/api/habits/${marathon.id}/stats`)
+  .then((r) => r.json())).awards;
+
+// Worthless unless the fixture earned something: `deepEqual([], [])` passes
+// against a route returning nothing at all, or against `computeAwards` never
+// being called.
+ck('the fixture earned at least one award',
+  fromAwardsRoute.length > 0, JSON.stringify(fromAwardsRoute));
+ck('  from at least two different families',
+  new Set(fromAwardsRoute.map((a) => a.family)).size >= 2,
+  JSON.stringify(fromAwardsRoute.map((a) => a.family)));
+ck('/awards and /habits/:id/stats report the identical award array',
+  JSON.stringify(fromAwardsRoute) === JSON.stringify(fromStatsRoute),
+  `awards=${JSON.stringify(fromAwardsRoute)} stats=${JSON.stringify(fromStatsRoute)}`);
+
+ck('every habit in the account is listed, archived included',
+  [habitId, marathon.id, retired.id].every(
+    (id) => awardsPayload.habits.some((h) => h.id === id)),
+  JSON.stringify(awardsPayload.habits.map((h) => h.id)));
+ck('the archived habit specifically is present',
+  awardsPayload.habits.some((h) => h.id === retired.id),
+  JSON.stringify(awardsPayload.habits.map((h) => h.id)));
+ck('account is present and is an array (reserved for #63)',
+  Array.isArray(awardsPayload.account) && awardsPayload.account.length === 0,
+  JSON.stringify(awardsPayload.account));
+
+// No range parameter has any influence: the route takes none, and a caller
+// sending one anyway (an old bookmark, a copy-pasted URL) must be ignored
+// rather than answered differently or refused.
+const withParams = await fetch(`${overviewBase}/api/awards?start=${isoDaysAgo(10)}`
+  + `&end=${isoDaysAgo(1)}&granularity=month`).then((r) => r.json());
+ck('?start, ?end and ?granularity change nothing',
+  JSON.stringify(withParams) === JSON.stringify(awardsPayload),
+  `plain=${JSON.stringify(awardsPayload)} withParams=${JSON.stringify(withParams)}`);
+
 /* ---------- unlogged_is_success ---------- */
 
 console.log('\n--- unlogged_is_success ---');
@@ -3142,6 +3215,10 @@ for (const id of [
   // moment the notes checks were moved off the shared habit.
   noNotesHabit.id,
   notesHabit.id,
+  // #140's `GET /awards` fixture: `marathon` alone carries 100 entries, so
+  // leaving it out failed this same check by exactly that margin.
+  marathon.id,
+  retired.id,
 ]) {
   await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
 }
