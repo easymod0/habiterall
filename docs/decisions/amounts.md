@@ -376,9 +376,35 @@ be built: `android-native/README.md` already names the trap ("a real
 there is no timeout and no failure — the test simply never returns"), and a
 version of the test reproduced exactly that, running for roughly a minute
 before the test JVM died of an `OutOfMemoryError` rather than failing an
-assertion. `CountDialog`'s production wiring onto `parseAmount`/`amountComplaint`
-is done regardless; its wiring test is the one piece of this issue left
-unverified by an automated suite, reported rather than papered over with a
-source guard.
+assertion. It was then tried a second time under the other rule flavour
+(`createAndroidComposeRule<ComponentActivity>()`) and bounded with a JUnit
+`@Test(timeout = 60_000)`, on the theory that the README's claim was about
+`createComposeRule` specifically; it hung there too, to an external kill at 900
+seconds, without writing a result file at all — so the JUnit bound never got to
+fire either. Two flavours, one of them bounded: the wall is a property of the
+dialog and not of how the first attempt was written.
+
+What guards that call site instead is `CountDialogWiringGuard`, a source-text
+guard, which is the same settlement `MainActivityWiringTest` records for
+`HabitListScreen` and is what the root CLAUDE.md prescribes when the
+behavioural test cannot exist — kept for what it DOES catch (a call site that
+reads no shared rule at all) with behavioural tests beside it for the other
+two. Two things make it worth having rather than decorative. It is found BY
+NAME, so renaming, moving or re-privatising `CountDialog` fails the guard
+naming the declaration it could not find — which is the half that proves it
+sees the site it claims, the thing #184's guard did not. And it prints its own
+DENOMINATOR: the fourteen `ui/` files it scanned, with `Amount.kt` named as the
+one deliberate exclusion, because an empty offender list means nothing until
+you know what was looked at. It skips comment-ONLY lines and nothing more —
+`s.toDoubleOrNull() // honest` is still an offender — a clause that exists
+because a KDoc sentence explaining what the guard protects against failed the
+guard itself.
+
+So the honest statement of what is unverified is narrower than "this call site
+is untested": what no automated suite in this repo can currently see is
+`CountDialog` RENDERED — that its Save button enables on `8,5` and not on
+`10.000`, and that `onConfirm` receives 8.5. That its source reads the one
+reader, and that nothing else under `ui/` reads an amount any other way, are
+both pinned.
 
 
