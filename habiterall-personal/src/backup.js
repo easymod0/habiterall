@@ -59,6 +59,25 @@ const DEFAULT_FORMAT = 'json';
  * expression (`env.HABITERALL_BACKUP_DIR`, not a destructure or a computed
  * key) so `shared/test/compose.test.js`'s graph walker can see it.
  *
+ * UNLIKE cloud's `backupConfig` (issue #75 second fix round), this function
+ * still logs `backup.schedule_invalid` / `backup.keep_invalid` /
+ * `backup.format_invalid` itself, as a side effect of being called — cloud's
+ * was split into a pure classifier plus a separate `reportBackupConfig`
+ * precisely because `GET /backup/status` calls it on every request, and any
+ * ONE of N untrusted tenants opening the dialog could drive a warn line into
+ * the operator's log at the read limiter's rate. That argument does not
+ * transfer here: this edition has ONE account, and that account is the
+ * operator, so a warn line it causes by mis-setting its own environment is
+ * the operator reading about the operator's own typo. Do not "fix" this back
+ * into cloud's shape without knowing which argument applied to which
+ * edition. The one case that sharpens the asymmetry rather than closing it:
+ * under `HABITERALL_AUTH=off` this route has nothing in front of it at all,
+ * so a typo'd variable then lets anything reachable on the LAN — not just the
+ * operator — drive warn lines into the log at the read limiter's rate, the
+ * exact shape the split above exists to prevent in cloud. Still judged
+ * acceptable here (see `habiterall-personal/CLAUDE.md`), but on purpose and
+ * not by oversight.
+ *
  * @param {Record<string, string|undefined>} env
  * @returns {{dir: string, schedule: string, scheduleMinutes: number,
  *   keep: number, enabled: boolean, format: 'json'|'db'|'both',

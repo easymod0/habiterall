@@ -62,6 +62,68 @@ const KILL_GRACE_MS = 5_000;
 const STDERR_CAP_BYTES = 8 * 1024;
 
 /**
+ * The exact shape of THIS module's own per-run temporary file — never a bare
+ * `*.tmp`. Anchored the same way `BACKUP_SQL_FILE_RE` is, and for the same
+ * reason: `reclaimStaleTmp` below must delete only a leftover it could itself
+ * have written, never a foreign `.tmp`, another writer's still-in-progress
+ * file, or a stray `.json.tmp`/`.db.tmp` that belongs to a personal instance
+ * sharing this directory.
+ */
+const OWN_TMP_RE =
+  /^habiterall-backup-\d{4}-\d{2}-\d{2}\.sql\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/;
+
+/**
+ * Reclaim this module's OWN stale temporaries at the start of a run (FIX 1,
+ * issue #75 second fix round).
+ *
+ * FIX 4 of the first fix round gave every run's `.tmp` a random per-run UUID
+ * suffix so two writers could never interleave into one file — correct, but
+ * it removed the one thing that used to reclaim a partial and put nothing
+ * back: a UUID-named leftover is un-namable by any LATER run, so it is
+ * structurally invisible to `prunableBackups` (anchored, deliberately) and to
+ * `todaysFileExists` forever. A crash or an OOM-kill mid-dump therefore left
+ * a dump-sized file that `HABITERALL_BACKUP_KEEP` — the operator's only bound
+ * on this volume — could never see or count against. Loud eventually
+ * (ENOSPC), but only after the disk is already full.
+ *
+ * Safe ONLY because of the age gate: `BACKUP_TIMEOUT_MS + KILL_GRACE_MS` is
+ * this module's own upper bound on how long a live run can hold ITS `.tmp`
+ * open (see `runBackup`'s FIX 5 below, which now enforces that bound on the
+ * whole run and not merely the child), so by construction nothing younger
+ * than that can belong to a run still in progress — an older one can only be
+ * a crashed run's leftover, and reclaiming it can never race a live writer.
+ *
+ * Best effort, deliberately: a failure here must never fail the run, so this
+ * never throws — it is called from inside `runBackup`'s own outer `try`, but
+ * would still be safe called from anywhere given that guarantee.
+ *
+ * @param {string} dir
+ */
+function reclaimStaleTmp(dir) {
+  const cutoff = Date.now() - (BACKUP_TIMEOUT_MS + KILL_GRACE_MS);
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  const reclaimed = [];
+  for (const name of names) {
+    if (!OWN_TMP_RE.test(name)) continue;
+    try {
+      if (statSync(join(dir, name)).mtimeMs >= cutoff) continue;
+      unlinkSync(join(dir, name));
+      reclaimed.push(name);
+    } catch {
+      // Best effort — gone already, or another process is faster.
+    }
+  }
+  if (reclaimed.length) {
+    log.info('backup.reclaimed_stale_tmp', { count: reclaimed.length, files: reclaimed.join(', ') });
+  }
+}
+
+/**
  * Read the operator's five variables. Every read is a LITERAL member
  * expression (`env.HABITERALL_BACKUP_DIR`, not a destructure or a computed
  * key) so `shared/test/compose.test.js`'s graph walker can see it. Never
@@ -225,8 +287,13 @@ function todaysFileExists(dir, date) {
  *
  * @param {{dir: string, keep: number, adminUrl: string, pgDump: string}} cfg
  *   from `backupConfig`
- * @param {{instant?: Date|number}} [deps] `instant` defaults to now; a test
- *   drives this directly with a chosen one.
+ * @param {{instant?: Date|number, createWriteStream?: typeof createWriteStream,
+ *   timeoutMs?: number, killGraceMs?: number}} [deps] `instant` defaults to
+ *   now; a test drives this directly with a chosen one. The other three exist
+ *   ONLY for a test to prove FIX 5 (issue #75 second fix round) — a
+ *   never-settling destination, and the two hours real production waits
+ *   before noticing — and are never set outside one; production always gets
+ *   the real `createWriteStream` and the real `BACKUP_TIMEOUT_MS`/`KILL_GRACE_MS`.
  */
 export async function runBackup(cfg, deps = {}) {
   const { instant = new Date() } = deps;
@@ -252,24 +319,32 @@ export async function runBackup(cfg, deps = {}) {
   try {
     mkdirSync(cfg.dir, { recursive: true });
 
+    // FIX 1 (issue #75 second fix round): reclaim a CRASHED run's own stale
+    // `.tmp` before this run picks its own — see `reclaimStaleTmp`'s own
+    // comment for why the age gate is what makes this safe. This runs at the
+    // very start, ahead of even this run's own `name`/`tmpPath`, so it never
+    // touches anything this run is about to write.
+    reclaimStaleTmp(cfg.dir);
+
     const name = backupFileName(date, 'sql');
     const finalPath = join(cfg.dir, name);
-    // A random, per-RUN suffix (FIX 4, issue #75 fix round) — never
+    // A random, per-RUN suffix (FIX 4, issue #75 first fix round) — never
     // `process.pid`, because in a container the node process is usually pid
     // 1, so two replicas sharing this volume would pick the SAME name and
     // this would do nothing. Before this, two replicas both saw
     // `todaysFileExists` false, both opened the identical `${finalPath}.tmp`
     // with O_TRUNC, interleaved two dumps' bytes into it, and both renamed —
     // a corrupt file logged as `backup.ok` on both sides. With a unique
-    // suffix per run, two writers can never share one temporary file, so the
-    // blanket "unlink a stale .tmp first" this module used to do is GONE:
-    // with unique names nothing this run wrote can already exist, and
-    // unlinking blindly would delete another writer's still-in-progress
-    // file — the very corruption this fix removes. What each failure path
-    // below still does is unlink its OWN tmp file. The suffix sits between
-    // the `.sql` extension and the final `.tmp`, so it can never match
+    // suffix per run, two writers can never share one temporary file, so
+    // nothing here EVER unlinks a `.tmp` on the mere strength of "a run is
+    // starting" the way personal's `db` write does: what each failure path
+    // below still does is unlink its OWN tmp file, and what `reclaimStaleTmp`
+    // does above is bounded to a leftover old enough that no LIVE run can own
+    // it (never merely "a `.tmp` that exists"). The suffix sits between the
+    // `.sql` extension and the final `.tmp`, so it can never match
     // `BACKUP_SQL_FILE_RE` (anchored `\.sql$`) and retention can never see it
-    // as a kind this module manages.
+    // as a kind this module manages — reclaiming it is this module's job
+    // alone, which is exactly what `reclaimStaleTmp` is for.
     const tmpPath = `${finalPath}.${randomUUID()}.tmp`;
 
     let conn;
@@ -299,29 +374,55 @@ export async function runBackup(cfg, deps = {}) {
       if (stderrTail.length < STDERR_CAP_BYTES) stderrTail += chunk.toString('utf8');
     });
 
-    // Mode 0o600 (FIX 5, issue #75 fix round): this file holds every
+    // FIX 6 (issue #75 second fix round): DEFENCE, not a repair — no NAMED
+    // input has been found that produces an 'error' on either of these two
+    // streams. But with no listener at all, one on either is an UNCAUGHT
+    // exception on a LATER tick — outside both this function's own outer
+    // `try` and the call site's `.catch()` — which is the exact crash the
+    // first fix round's FIX 1 closed, arriving by a different route. Record
+    // and let the normal failure path below run; there is nothing more to do
+    // with either.
+    let stdoutErr = null;
+    child.stdout.on('error', (err) => { stdoutErr = err; });
+    let stderrErr = null;
+    child.stderr.on('error', (err) => { stderrErr = err; });
+
+    // Mode 0o600 (FIX 5, issue #75 first fix round): this file holds every
     // tenant's rows plus every stored ntfy token and Discord webhook, and
     // `createWriteStream`'s default (0666, so typically 0644 under an
     // ordinary umask) would leave it group/world-readable; `renameSync`
     // preserves whatever mode the file was created with.
-    const tmpStream = createWriteStream(tmpPath, { mode: 0o600 });
+    //
+    // `deps.createWriteStream` exists ONLY so a test can inject a
+    // destination that never emits 'close'/'finish'/'error' at all — proving
+    // that the second fix round's FIX 5 below bounds the whole RUN, not
+    // merely the child. Production never sets it, so the ordinary path is
+    // exactly `createWriteStream` as imported.
+    const tmpStream = (deps.createWriteStream ?? createWriteStream)(tmpPath, { mode: 0o600 });
     let streamErr = null;
     /** @type {Promise<void>} */
     const streamFinished = new Promise((resolve) => {
-      tmpStream.on('finish', () => resolve());
+      // FIX 7 (issue #75 second fix round): 'finish' fires once the data is
+      // FLUSHED but before the descriptor is CLOSED, so a failure AT close
+      // (deferred allocation, on a network filesystem) used to arrive AFTER
+      // this promise had already resolved — the run logged `backup.ok` for a
+      // file whose close had in fact failed. 'close' is the descriptor
+      // actually being gone, so the decision below is made after that,
+      // keeping the existing 'error' handling exactly as it was.
+      tmpStream.on('close', () => resolve());
       tmpStream.on('error', (err) => {
         streamErr = err;
-        // FIX 2 (issue #75 fix round): without this, `pipe` stops reading on
-        // a write error but nothing tells `pg_dump` to stop producing — the
-        // OS pipe fills at 64 KiB, the child blocks on its own `write()`,
-        // and `BACKUP_TIMEOUT_MS` (two hours) becomes the ONLY thing that
-        // ever notices. For those two hours `pg_dump` holds its REPEATABLE
-        // READ snapshot open, pinning the xmin horizon so vacuum cannot
-        // reclaim, while `inFlight` blocks every later attempt. Destroying
-        // `stdout` unblocks the child's write immediately by closing the
-        // read end of the pipe (its next write fails with EPIPE); the
-        // `SIGKILL` is belt and braces in case something else still holds it
-        // open.
+        // FIX 2 (issue #75 first fix round): without this, `pipe` stops
+        // reading on a write error but nothing tells `pg_dump` to stop
+        // producing — the OS pipe fills at 64 KiB, the child blocks on its
+        // own `write()`, and `BACKUP_TIMEOUT_MS` (two hours) becomes the
+        // ONLY thing that ever notices. For those two hours `pg_dump` holds
+        // its REPEATABLE READ snapshot open, pinning the xmin horizon so
+        // vacuum cannot reclaim, while `inFlight` blocks every later
+        // attempt. Destroying `stdout` unblocks the child's write
+        // immediately by closing the read end of the pipe (its next write
+        // fails with EPIPE); the `SIGKILL` is belt and braces in case
+        // something else still holds it open.
         child.stdout.destroy();
         child.kill('SIGKILL');
         resolve();
@@ -341,34 +442,68 @@ export async function runBackup(cfg, deps = {}) {
     // A hung child must not leave `inFlight` set forever — see the
     // constant's own comment above. `timedOut` is what tells the timeout
     // kill apart from an operator's own SIGTERM in the log below (FIX 5,
-    // issue #75 fix round) — the one failure whose remedy differs (a bigger
-    // `BACKUP_TIMEOUT_MS`, or a faster dump) from every other signal.
+    // issue #75 first fix round) — the one failure whose remedy differs (a
+    // bigger `BACKUP_TIMEOUT_MS`, or a faster dump) from every other signal.
+    //
+    // `timeoutMs`/`killGraceMs` default to the module constants; `deps` may
+    // shrink them, and ONLY a test does — this is what lets the SECOND fix
+    // round's FIX 5 below be proved in seconds rather than in
+    // `BACKUP_TIMEOUT_MS`'s real two hours.
+    const timeoutMs = deps.timeoutMs ?? BACKUP_TIMEOUT_MS;
+    const killGraceMs = deps.killGraceMs ?? KILL_GRACE_MS;
     let timedOut = false;
     let killGrace = null;
+    let resolveGaveUp;
+    /** @type {Promise<void>} */
+    const timeoutGaveUp = new Promise((resolve) => { resolveGaveUp = resolve; });
     const timeout = setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
-      killGrace = setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_MS);
-    }, BACKUP_TIMEOUT_MS);
+      killGrace = setTimeout(() => child.kill('SIGKILL'), killGraceMs);
+      // FIX 5 (issue #75 second fix round): bound the RUN, not just the
+      // child. The kill above only ever reaches the CHILD — the join below
+      // is `Promise.all([childClosed, streamFinished])`, and a destination
+      // whose `write()` neither returns nor errors (a hard-mounted NFS/CIFS
+      // backup volume whose server has disappeared mid-dump, a realistic
+      // setup for backups specifically) leaves `streamFinished` unsettled
+      // even once the child is gone — `inFlight` set forever and NOTHING
+      // logged, which is exactly the silent self-disablement this timeout
+      // exists to prevent, arriving through the other half of the join
+      // instead of the child. Give the kill above one grace period to land,
+      // then stop waiting on the join regardless of whether it ever settles.
+      setTimeout(resolveGaveUp, killGraceMs);
+    }, timeoutMs);
 
-    // BOTH, not either. Renaming on the child's exit alone is a
-    // truncated-file race: the child can close its stdout and exit before
-    // the write stream has finished flushing everything it already
-    // received.
-    await Promise.all([childClosed, streamFinished]);
+    // BOTH, not either, in the ordinary case — renaming on the child's exit
+    // alone is a truncated-file race, since the child can close its stdout
+    // and exit before the write stream has finished flushing everything it
+    // already received. But bounded (FIX 5, second fix round): once the
+    // timeout above has fired and given its own kill a grace period to land,
+    // `gaveUp` wins the race even if the join has still not settled.
+    let gaveUp = false;
+    await Promise.race([
+      Promise.all([childClosed, streamFinished]),
+      timeoutGaveUp.then(() => { gaveUp = true; }),
+    ]);
     clearTimeout(timeout);
     if (killGrace) clearTimeout(killGrace);
 
-    const failed = Boolean(childErr) || Boolean(streamErr) || exitCode !== 0 || Boolean(exitSignal);
+    // A LATE settlement of either half of the join, after `gaveUp`, resolves
+    // a promise nothing here awaits any further — harmless by construction:
+    // nothing below this point can run twice, and no rename can ever happen
+    // on the `gaveUp` path, because it returns from inside `failed` below.
+    const failed = gaveUp || Boolean(childErr) || Boolean(streamErr) || Boolean(stdoutErr)
+      || Boolean(stderrErr) || exitCode !== 0 || Boolean(exitSignal);
     if (failed) {
       // The partial bytes must not survive (premise 5: a killed dump left
       // 9,435 bytes of truncated SQL on disk, looking like a backup).
+      const cause = childErr ?? streamErr ?? stdoutErr ?? stderrErr;
       try { unlinkSync(tmpPath); } catch { /* best effort */ }
       log.error('backup.failed', {
         date, exit_code: exitCode, signal: exitSignal ?? undefined,
         ...(timedOut ? { timed_out: true } : {}),
         stderr: stderrTail.trim(),
-      }, ...(childErr ?? streamErr ? [childErr ?? streamErr] : []));
+      }, ...(cause ? [cause] : []));
       return;
     }
 

@@ -1081,19 +1081,34 @@ HABITERALL_BACKUP_KEEP=7
 # `pg_dump` from outside the app on your own schedule (see SETUP.md for the
 # manual command), or create a dedicated least-privilege dump role instead of
 # handing over the owner credential. This exact grant list was MEASURED, not
-# merely suggested: a NOSUPERUSER role with BYPASSRLS, USAGE on the schema,
-# and SELECT on every table AND every sequence dumps successfully — exit 0,
-# the canary row present, and byte-identical to the superuser dump (32,083
-# bytes, both). The SEQUENCES grant is the part that is easy to miss: without
+# merely suggested — twice, independently: a NOSUPERUSER role with BYPASSRLS,
+# USAGE on the schema, and SELECT on every table and every sequence dumps
+# successfully — exit 0, the canary row present — and its output is IDENTICAL
+# to the superuser's own dump of the same database apart from pg_dump 17's
+# per-run random `\restrict`/`\unrestrict` token, which differs between ANY
+# two dumps by the same role. (No byte count is cited here on purpose: the
+# absolute size depends on what your database holds, and two dumps by the
+# same superuser are themselves never byte-identical under pg_dump 17 for the
+# same reason.) The SEQUENCES grant is the part that is easy to miss: without
 # it `pg_dump` fails with `permission denied for sequence categories_id_seq`.
 #
 #   CREATE ROLE habiterall_dump WITH LOGIN PASSWORD '...' NOSUPERUSER BYPASSRLS;
 #   GRANT USAGE ON SCHEMA public TO habiterall_dump;
 #   GRANT SELECT ON ALL TABLES IN SCHEMA public TO habiterall_dump;
 #   GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO habiterall_dump;
-#   -- and after any migration that adds a table or sequence:
-#   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO habiterall_dump;
-#   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON SEQUENCES TO habiterall_dump;
+#
+# `ALTER DEFAULT PRIVILEGES` only covers objects created AFTER it runs, and
+# only those created by the role that ran it — so "run it once after this
+# migration" grants nothing on the new table and the next night's dump fails.
+# After any migration that adds a table or sequence, RE-RUN the two GRANTs
+# above (they are idempotent). If you use `ALTER DEFAULT PRIVILEGES` at all,
+# run it as the SAME role your migrations run as, so future objects that
+# role creates carry the grant automatically:
+#
+#   ALTER DEFAULT PRIVILEGES FOR ROLE habiterall_owner IN SCHEMA public
+#     GRANT SELECT ON TABLES TO habiterall_dump;
+#   ALTER DEFAULT PRIVILEGES FOR ROLE habiterall_owner IN SCHEMA public
+#     GRANT SELECT ON SEQUENCES TO habiterall_dump;
 #
 # Point DATABASE_URL_ADMIN at this role instead of the owner and the app never
 # holds a credential that can write anything.
@@ -1919,9 +1934,12 @@ the app on your own schedule instead (see `habiterall-cloud/SETUP.md`), or
 grant a dedicated least-privilege dump role in place of the owner credential —
 a **measured, verified** combination, not merely suggested: `NOSUPERUSER`,
 `BYPASSRLS`, `USAGE` on the schema, and `SELECT` on every table and every
-sequence dumps successfully and byte-identically to the superuser dump; the
-exact `GRANT` statements are in `examples/cloud.env.example`. `pg_dump` also
-has to be **at least the server's own major version**, or it refuses to run —
+sequence dumps successfully — exit 0, expected rows present — and its output
+is identical to the superuser's own dump apart from pg_dump 17's per-run
+random `\restrict`/`\unrestrict` token, which differs between any two dumps
+regardless of role; the exact `GRANT` statements are in
+`examples/cloud.env.example`. `pg_dump` also has to be **at least the
+server's own major version**, or it refuses to run —
 the image ships one matched to the Postgres major in these compose files, so
 bumping the server's major means bumping the image's client too. There is no
 per-account restore, no point-in-time recovery and no replica here; see #240.

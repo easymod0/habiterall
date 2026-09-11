@@ -742,6 +742,18 @@ over the directory, and cannot coordinate a second process by construction.
 Exactly ONE replica may own a backup directory; `examples/cloud.env.example`
 and the README say so in the operator-facing words.
 
+**A crashed run's own `.tmp` is reclaimed at the START of the next run, and
+only because of an age gate.** The per-run UUID suffix above stopped a `.tmp`
+from being overwritten by a second writer, but it also made a crashed run's
+leftover un-namable by anything ever again — invisible to `prunableBackups`
+(anchored, deliberately) and to `todaysFileExists`, so `HABITERALL_BACKUP_KEEP`
+stopped bounding it and a dump-sized file per crash sat on the volume forever.
+`reclaimStaleTmp` deletes one only once it is older than
+`BACKUP_TIMEOUT_MS + KILL_GRACE_MS` — this module's own upper bound on how
+long a LIVE run can hold its `.tmp` open — so by construction nothing that old
+can belong to a run still in progress, and reclaiming it can never race a live
+writer the way a blanket "delete any `.tmp`" would.
+
 **A fix round following review of 13aa15d changed two things worth reading
 before touching this file again, because neither is visible from the diff
 alone:**

@@ -48,6 +48,17 @@
  *      actually carried a password, and never overwrites an inherited one
  *      with an empty string.
  *
+ * And, from the SECOND fix round following review of 2ab867e:
+ *
+ *  16. a stale `.tmp` left by a crashed run is reclaimed at the start of the
+ *      NEXT run, but only once it is old enough that no live run could still
+ *      own it — a fresh, matching `.tmp` and an old, non-matching one both
+ *      survive;
+ *  17. the timeout bounds the whole RUN, not merely the child: a destination
+ *      whose write() neither returns nor errors still settles the run and
+ *      logs `timed_out: true`, through the same injectable seams `runBackup`
+ *      now takes for exactly this.
+ *
  * `pg_dump` opens its own connection outside the pool, so nothing here goes
  * through `withUser`/`withoutUser`: an admin `pg.Client` is used directly for
  * fixtures and for reading the dump back, exactly as the module under test
@@ -70,7 +81,7 @@
 
 import {
   mkdtempSync, rmSync, mkdirSync, readdirSync, readFileSync, writeFileSync,
-  statSync, existsSync, chmodSync,
+  statSync, existsSync, chmodSync, utimesSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -78,6 +89,8 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
+import { Writable } from 'node:stream';
 import assert from 'node:assert/strict';
 import pg from 'pg';
 import express from 'express';
@@ -852,6 +865,103 @@ exit 1
   const out15b = readFileSync(join(dir15b, files15b[0]), 'utf8');
   ck('case15b (FIX 5): an inherited PGPASSWORD is NOT overwritten with an empty string for a passwordless URL',
     out15b.includes('PGPASSWORD_SET=inherited-from-parent-env'), out15b);
+
+  /* ---------- case 16 (FIX 1, second fix round): a crashed run's own stale .tmp is reclaimed, age-gated ---------- */
+
+  console.log('--- case 16 (FIX 1, second fix round): a stale .tmp is reclaimed only once it is old enough ---');
+  const dir16 = join(workdir, 'case16');
+  mkdirSync(dir16, { recursive: true });
+
+  // This module's own shape, for a date that has nothing to do with today —
+  // the reclaim keys on AGE, never on date, and this proves it: a name dated
+  // 2030-01-01 is reclaimed exactly as one dated today would be.
+  const staleDate16 = '2030-01-01';
+  const staleName16 = `${backupFileName(staleDate16, 'sql')}.${randomUUID()}.tmp`;
+  writeFileSync(join(dir16, staleName16), 'a truncated dump from a run that never finished');
+  const oldTime16 = new Date(Date.now() - 24 * 60 * 60 * 1000);   // a day old — well past any real run's own bound
+  utimesSync(join(dir16, staleName16), oldTime16, oldTime16);
+
+  // Same shape, but FRESH — as if a second run were genuinely still in
+  // progress right now. Must survive: age is the only thing that tells the
+  // two apart.
+  const freshName16 = `${backupFileName(staleDate16, 'sql')}.${randomUUID()}.tmp`;
+  writeFileSync(join(dir16, freshName16), 'a run that is still in progress right now');
+
+  // OLD but NOT this module's shape — proves the match is by PATTERN, not
+  // merely by age, so an unrelated old .tmp (a personal instance's, or
+  // anything else) is never a candidate.
+  const foreignName16 = 'not-a-habiterall-backup-shape.tmp';
+  writeFileSync(join(dir16, foreignName16), 'unrelated file, must never be touched');
+  utimesSync(join(dir16, foreignName16), oldTime16, oldTime16);
+
+  const cfg16 = backupConfig({
+    ...baseEnv, HABITERALL_BACKUP_DIR: dir16,
+    HABITERALL_BACKUP_SCHEDULE: '00:00', HABITERALL_BACKUP_KEEP: '7',
+  });
+  const { lines: lines16 } = await captureLogs(() =>
+    runBackup(cfg16, { instant: new Date(2031, 2, 1, 3, 0) }));
+
+  const files16 = new Set(readdirSync(dir16));
+  ck('case16: the stale, matching .tmp is reclaimed', !files16.has(staleName16), JSON.stringify([...files16]));
+  ck('case16: the fresh, matching .tmp survives — too young to be a crash',
+    files16.has(freshName16), JSON.stringify([...files16]));
+  ck('case16: the old, non-matching .tmp survives — not this module\'s shape',
+    files16.has(foreignName16), JSON.stringify([...files16]));
+  ck('case16: this run\'s own dump still landed normally',
+    [...files16].some((f) => f.endsWith('.sql')), JSON.stringify([...files16]));
+  ck('case16: the reclaim was logged, naming the one file',
+    lines16.some((l) => l.includes('"msg":"backup.reclaimed_stale_tmp"') && l.includes('"count":1')
+      && l.includes(staleName16)),
+    lines16.join('').slice(0, 800));
+
+  /* ---------- case 17 (FIX 5, second fix round): the timeout bounds the whole RUN, not merely the child ---------- */
+
+  console.log('--- case 17 (FIX 5, second fix round): a destination whose write() neither returns nor errors still settles the run ---');
+  const dir17 = join(workdir, 'case17');
+  const cfg17 = backupConfig({
+    ...baseEnv, HABITERALL_BACKUP_DIR: dir17,
+    HABITERALL_BACKUP_SCHEDULE: '00:00', HABITERALL_BACKUP_KEEP: '7',
+  });
+
+  // The write that neither returns nor errors: `_write`'s callback is never
+  // invoked, so this stream can never reach 'finish', and therefore never
+  // 'close' either — exactly the destination a hard-mounted, gone-away
+  // network volume looks like from here.
+  class NeverSettlingWritable extends Writable {
+    _write(_chunk, _enc, _cb) { /* deliberately never calls back */ }
+  }
+  const stubCreateWriteStream17 = (_path, opts) => new NeverSettlingWritable(opts);
+
+  let unhandled17 = null;
+  const onUnhandled17 = (err) => { unhandled17 = err; };
+  process.on('unhandledRejection', onUnhandled17);
+  const startedAt17 = Date.now();
+  const { lines: lines17 } = await captureLogs(() => runBackup(cfg17, {
+    instant: new Date(2031, 2, 5, 3, 0),
+    createWriteStream: stubCreateWriteStream17,
+    // Short, injected bounds — see `runBackup`'s own JSDoc: this is the ONLY
+    // place either is ever set to anything but the real two-hour/five-second
+    // constants. Without FIX 5 this run would simply never settle at all
+    // (the join has nothing else to wait on), so there is no risk of this
+    // assertion passing for the wrong reason — an UNFIXED version hangs
+    // rather than failing fast, which the mutation record below says plainly.
+    timeoutMs: 200,
+    killGraceMs: 50,
+  }));
+  const elapsed17 = Date.now() - startedAt17;
+  process.off('unhandledRejection', onUnhandled17);
+
+  ck('case17: the run settles quickly, bounded by the injected timeout+grace rather than hanging forever',
+    elapsed17 < 5000, `elapsed=${elapsed17}ms`);
+  ck('case17: no unhandled rejection either', unhandled17 === null,
+    unhandled17 ? String(unhandled17.stack ?? unhandled17) : '');
+  ck('case17: an error was logged carrying timed_out: true',
+    lines17.some((l) => l.includes('"msg":"backup.failed"') && l.includes('"timed_out":true')),
+    lines17.join('').slice(0, 800));
+  const files17 = existsSync(dir17) ? readdirSync(dir17) : [];
+  ck('case17: no .sql file was written on the timed-out path', !files17.some((f) => f.endsWith('.sql')),
+    JSON.stringify(files17));
+  ck('case17: no .tmp survives either', !files17.some((f) => f.endsWith('.tmp')), JSON.stringify(files17));
 
   console.log(`\n${fails ? `${fails} check(s) failed` : 'all checks passed'}`);
 } finally {
