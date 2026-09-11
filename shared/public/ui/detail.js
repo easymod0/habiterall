@@ -333,6 +333,32 @@ let stripRuns = new Set();
 let calRedraw = null;
 
 /**
+ * The notes card's own `draw`, so a repaint can rebuild its rows from the
+ * same live `openNotesByDate` a tap or an offline day-editor save has just
+ * moved (#297, review round).
+ *
+ * Online this needed nothing: `saveDay` ends in `emit('change')`, which
+ * refetches and calls `render()` wholesale. Offline `api()` enqueues and
+ * throws, so that refetch never runs, and `buildNotesCard` had built its rows
+ * once, from the map as it stood at render time — a cleared note left a ghost
+ * row with the old text while the dot and the strip mark had both already
+ * gone, and a first note on a previously-noteless day lit both marks with no
+ * row to show for it. The same shape `calRedraw` exists for, one card later.
+ *
+ * **What this cannot cover, on purpose: a habit's FIRST offline note gets no
+ * card at all until the next full `render()`.** `buildNotesCard` returns
+ * `null` for a habit with no notes, so there is no card in the page for this
+ * to redraw — inserting one is `render()`'s job (it owns card order from the
+ * stored `detailCards` list), not a repaint's. That habit's dot and strip mark
+ * still light immediately; only the card lags.
+ *
+ * Null while the card was never built (no notes at render time) or the
+ * account has it hidden, exactly as `calRedraw`.
+ * @type {(() => void) | null}
+ */
+let notesRedraw = null;
+
+/**
  * This page, as `ui/day-strip.js` reads and writes it.
  *
  * The encoding is `/habits/:id/entries`', which is NOT the dashboard's: a skip
@@ -458,6 +484,9 @@ const detailHost = {
     // Cheap enough for a tap for the reason paging is: nothing in the window
     // needs a request.
     calRedraw?.();
+    // The notes card's own `draw` — see the declaration above for why it
+    // exists and what it deliberately cannot cover.
+    notesRedraw?.();
   },
 
   refresh: () => refresh(openHabit?.id),
@@ -779,11 +808,12 @@ function render(stats, entries) {
   const focused = focusKeyOf(document.activeElement);
   host.replaceChildren();
   // Nothing from the previous render survives it, and a stale node here would
-  // have `repaintCells` walking an orphan — or, for `calRedraw`, appending a
-  // fresh grid to a card the rebuild has already detached.
+  // have `repaintCells` walking an orphan — or, for `calRedraw`/`notesRedraw`,
+  // appending into a card the rebuild has already detached.
   stripRoot = null;
   stripRuns = new Set();
   calRedraw = null;
+  notesRedraw = null;
 
   const entriesByDate = Object.fromEntries(entries.map((e) => [e.date, e.value]));
   // Computed unconditionally, same as `entriesByDate` above, rather than only
@@ -1730,46 +1760,87 @@ function buildFrequencyCard({ habit, stats, color, chartWidth }) {
  * construction rather than by a shortcut — and it calls `detailHost.editDay`,
  * which this page can answer truthfully because it holds the whole unwindowed
  * history, note text included.
+ *
+ * **The rows are rebuilt by a local `draw()`, assigned to `notesRedraw` (#297,
+ * review round), for the same reason `buildCalendarCard`'s own `draw` exists:**
+ * `notesByDate` is a live map an offline day-editor save mutates in place, and
+ * without a redraw hook the rows painted here are frozen at build time — a
+ * cleared note left a ghost row after the dot and the strip mark had both
+ * gone, and a first note on a previously-noteless day lit both marks with no
+ * row for it. `draw()` re-reads `notesByDate` — the same object, mutated by
+ * `detailHost.edit`, never reassigned within one render's lifetime — rather
+ * than a count captured when the card was built, so the "N earlier notes"
+ * line cannot go on stating a number an offline edit has since moved.
+ *
+ * When the map has gone empty, `draw()` hides the card instead of leaving an
+ * empty list, honouring the same "a card with nothing in it is hidden"
+ * promise every other card here keeps — see `notesRedraw`'s own declaration
+ * for the one case this cannot cover at all: a habit's FIRST offline note,
+ * which gets no card until the next full `render()`, because inserting one is
+ * `render()`'s job and not a repaint's.
  */
 function buildNotesCard({ habit, notesByDate }) {
-  const dates = Object.keys(notesByDate).sort().reverse();
-  if (!dates.length) return null;
+  if (!Object.keys(notesByDate).length) return null;
 
   const c = card('Notes', null);
-
-  const shown = dates.slice(0, NOTES_LIMIT);
   const list = document.createElement('div');
   list.className = 'notes-list';
-
-  for (const date of shown) {
-    const d = fromISOLocal(date);
-    const row = document.createElement('button');
-    row.type = 'button';
-    row.className = 'note-row';
-    row.addEventListener('click', () => detailHost.editDay(habit.id, date));
-
-    const when = document.createElement('div');
-    when.className = 'note-date';
-    when.textContent = formatDateShort(d);
-    when.title = formatDateLong(d);
-
-    const text = document.createElement('div');
-    text.className = 'note-text';
-    // A note is user content: `textContent` only, never `innerHTML`.
-    text.textContent = notesByDate[date];
-
-    row.append(when, text);
-    list.append(row);
-  }
   c.append(list);
 
-  const hidden = dates.length - shown.length;
-  if (hidden > 0) {
-    const more = document.createElement('p');
-    more.className = 'hint';
-    more.textContent = `${hidden} earlier note${hidden === 1 ? '' : 's'} not shown.`;
-    c.append(more);
-  }
+  const draw = () => {
+    const dates = Object.keys(notesByDate).sort().reverse();
+
+    // The map went empty since the last draw — an offline clear of this
+    // habit's only remaining note. Nothing to show and no way to insert a
+    // fresh card in its place, so the existing one is hidden rather than left
+    // showing an empty list.
+    if (!dates.length) {
+      c.hidden = true;
+      return;
+    }
+    c.hidden = false;
+
+    list.replaceChildren();
+    const shown = dates.slice(0, NOTES_LIMIT);
+    for (const date of shown) {
+      const d = fromISOLocal(date);
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'note-row';
+      row.addEventListener('click', () => detailHost.editDay(habit.id, date));
+
+      const when = document.createElement('div');
+      when.className = 'note-date';
+      when.textContent = formatDateShort(d);
+      when.title = formatDateLong(d);
+
+      const text = document.createElement('div');
+      text.className = 'note-text';
+      // A note is user content: `textContent` only, never `innerHTML`.
+      text.textContent = notesByDate[date];
+
+      row.append(when, text);
+      list.append(row);
+    }
+
+    // Removed and rebuilt rather than left to grow stale beside a rows list
+    // that just moved — the count itself is exactly the thing an offline edit
+    // can change.
+    c.querySelector('.hint')?.remove();
+    const hiddenCount = dates.length - shown.length;
+    if (hiddenCount > 0) {
+      const more = document.createElement('p');
+      more.className = 'hint';
+      more.textContent =
+        `${hiddenCount} earlier note${hiddenCount === 1 ? '' : 's'} not shown.`;
+      c.append(more);
+    }
+  };
+
+  draw();
+  // Where `detailHost.repaint` finds this card's own redraw — assigned on
+  // every render, nulled by `render()` before the rebuild, same as `calRedraw`.
+  notesRedraw = draw;
 
   return c;
 }

@@ -709,6 +709,27 @@ try{
     ck('a day with an entry and no note does not',
        await hasNoteMark(notesSeed.plain) === false);
 
+    // The CLASS alone is not the mark — `.check-box.has-note::after` is what
+    // actually draws it, and a check reading only `classList` stays green with
+    // that whole rule deleted from the stylesheet (review round). Read what is
+    // RENDERED, on the pseudo-element itself: `content` must not be `'none'`
+    // (no box generated at all) and the box drawn must have real width.
+    const notePseudo = (date) => ev(`(() => {
+      const el = document.querySelector('${boxSel(date)}');
+      if (!el) return null;
+      const cs = getComputedStyle(el, '::after');
+      return { content: cs.content, width: parseFloat(cs.width) };
+    })()`);
+    const notedPseudo = await notePseudo(notesSeed.noted);
+    ck("the note-bearing day's dot is actually DRAWN, not merely classed",
+       !!notedPseudo && notedPseudo.content !== 'none' && notedPseudo.width > 0,
+       JSON.stringify(notedPseudo));
+    const plainPseudo = await notePseudo(notesSeed.plain);
+    // The negative half, and the one that stops a rule drawing a dot on EVERY
+    // cell from passing the check above too.
+    ck('...and the note-free day draws no pseudo-element at all',
+       !!plainPseudo && plainPseudo.content === 'none', JSON.stringify(plainPseudo));
+
     const cellCentre = (date) => ev(`(() => {
       const el = document.querySelector('[data-focus-key="check:${notesSeed.id}:${date}"]');
       if (!el) return null;

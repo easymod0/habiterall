@@ -647,6 +647,132 @@ try {
      day3Flushed !== null && day3Flushed.value === 2,
      `${JSON.stringify(day3Flushed)}${drainedDay3}`);
 
+  /* ---------- offline, the notes card redraws with the tap (#297, review round) ---------- */
+
+  console.log('--- offline, the notes card follows the note ---');
+  // A dedicated probe with TWO notes already stored, so the card exists before
+  // this block goes offline and stays up throughout — clearing one of the two
+  // must not be confused with the card never having been built at all. Dates
+  // ten-plus days back, untouched by any tap elsewhere in this file.
+  const notesRedrawProbe = await ev(`(async () => {
+    const h = await (await fetch('/api/habits', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Strip notes redraw probe', type: 'boolean',
+        color: '#0ea5e9' }),
+    })).json();
+    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
+      return d.toISOString().slice(0, 10); };
+    const kept = iso(10), toClear = iso(11), toAdd = iso(12);
+    // YES is 2, and a boolean habit accepts ONLY 0, 2 or 3 (parseEntry) -- a
+    // 1 here is a 400 and no row at all, which is a seed that fails in
+    // silence and takes every assertion below with it. Hence the ok array: a
+    // fixture this block's whole claim rests on has to say that it landed.
+    // (No backticks in here: this whole source is a template literal.)
+    const put = (date, body) => fetch('/api/habits/' + h.id + '/entries/' + date, {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body) }).then(r => r.ok);
+    const ok = [
+      await put(kept, { value: 2, notes: 'kept note' }),
+      await put(toClear, { value: 2, notes: 'note to clear' }),
+      await put(toAdd, { value: 2 }),
+    ];
+    return { id: h.id, kept, toClear, toAdd, seeded: ok.every(Boolean) };
+  })()`);
+  ck('the notes-redraw probe habit was created', !!notesRedrawProbe?.id,
+     JSON.stringify(notesRedrawProbe));
+  ck('...and all three of its seed rows actually landed',
+     notesRedrawProbe?.seeded === true, JSON.stringify(notesRedrawProbe));
+
+  if (notesRedrawProbe?.id) {
+    await openHabit(notesRedrawProbe.id);
+
+    const noteRowTexts = () => ev(`[...document.querySelectorAll(
+      '#view-detail .notes-list .note-text')].map(e => e.textContent)`);
+    const hasNoteMark = (date) => ev(
+      `document.querySelector('${cellSel(date)} .check-box')`
+      + `?.classList.contains('has-note') ?? null`);
+
+    const beforeRows = await noteRowTexts();
+    ck('the card starts with both notes, so it exists throughout this block',
+       beforeRows.includes('kept note') && beforeRows.includes('note to clear'),
+       JSON.stringify(beforeRows));
+
+    await send('Network.enable', {}, sessionId);
+    await send('Network.emulateNetworkConditions',
+      { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 }, sessionId);
+
+    /* ---------- clearing a note offline drops its row from the card ---------- */
+
+    // Opened through the card's own row — a real click, since each row is a
+    // `<button>` calling `detailHost.editDay` directly (#297), not a shortcut.
+    await ev(`[...document.querySelectorAll('#view-detail .notes-list .note-row')]
+      .find(r => r.querySelector('.note-text')?.textContent === 'note to clear')?.click()`);
+    await sleep(600);
+    const clearOpened = await ev(`document.getElementById('day-dialog').open`);
+    ck('the day editor opens on the note to clear', clearOpened === true);
+    await ev(`document.getElementById('day-notes').value = ''`);
+    // Re-answers the day's own state (this habit is boolean, so "Done" is what
+    // is already stored) — the same PUT a plain tap would make, with the note
+    // now stated as cleared rather than left alone.
+    await ev(`document.querySelector('#day-boolean .day-choice[data-action="done"]').click()`);
+    await sleep(700);
+
+    const afterClear = {
+      rows: await noteRowTexts(),
+      dot: await hasNoteMark(notesRedrawProbe.toClear),
+      outbox: await queued(),
+    };
+    ck('the cleared note was queued rather than sent', afterClear.outbox >= 1,
+       JSON.stringify(afterClear));
+    ck('...and its row is gone from the notes card in the SAME repaint that '
+       + "drops its dot from the strip — not left showing the old text",
+       !afterClear.rows.includes('note to clear') && afterClear.dot === false,
+       JSON.stringify(afterClear));
+    ck('...while the OTHER note stays, which is the proof the card was '
+       + 'REDRAWN rather than emptied outright',
+       afterClear.rows.includes('kept note'), JSON.stringify(afterClear));
+
+    /* ---------- adding a note offline, to a day that had none, draws a row ---------- */
+
+    const addCentre = await ev(`(() => {
+      const el = document.querySelector('${cellSel(notesRedrawProbe.toAdd)}');
+      if (!el) return null;
+      const b = el.getBoundingClientRect();
+      return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+    })()`);
+    ck('the day with no note is on screen to be right-clicked', !!addCentre,
+       JSON.stringify(addCentre));
+    if (addCentre) {
+      // A REAL right-click over CDP, not a scripted `dispatchEvent` — see the
+      // note beside the later `rightClick` helper for why a synthetic one
+      // proves nothing about the gesture this handler exists for.
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed',
+        x: addCentre.x, y: addCentre.y, button: 'right', clickCount: 1 }, sessionId);
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased',
+        x: addCentre.x, y: addCentre.y, button: 'right', clickCount: 1 }, sessionId);
+      await sleep(600);
+      const addOpened = await ev(`document.getElementById('day-dialog').open`);
+      ck('a contextmenu on the noteless day opens the day editor', addOpened === true);
+      await ev(`document.getElementById('day-notes').value = 'a fresh offline note'`);
+      await ev(`document.querySelector('#day-boolean .day-choice[data-action="done"]').click()`);
+      await sleep(700);
+
+      const afterAdd = {
+        rows: await noteRowTexts(),
+        dot: await hasNoteMark(notesRedrawProbe.toAdd),
+        outbox: await queued(),
+      };
+      ck('the added note was queued rather than sent', afterAdd.outbox >= 1,
+         JSON.stringify(afterAdd));
+      ck('...and a row for it appears in the notes card, in the same repaint '
+         + 'that lights its dot',
+         afterAdd.rows.includes('a fresh offline note') && afterAdd.dot === true,
+         JSON.stringify(afterAdd));
+    }
+
+    await reconnectAndDrain();
+  }
+
   /* ---------- paging, and forgetting where it was ---------- */
 
   console.log('--- paging ---');
@@ -1092,6 +1218,27 @@ try {
     ck('a day with an entry and no note does not',
        await cellHasNote(notesProbe.plain) === false);
 
+    // The class alone is not the mark — `.check-box.has-note::after` draws it,
+    // and a check reading only `classList` stays green with that whole rule
+    // deleted (review round). Read the pseudo-element itself: `content` must
+    // not be `'none'` and the drawn box must have real width.
+    const notePseudo = (date) => ev(`(() => {
+      const el = document.querySelector(
+        '#view-detail .day-strip .check[data-date="${date}"] .check-box');
+      if (!el) return null;
+      const cs = getComputedStyle(el, '::after');
+      return { content: cs.content, width: parseFloat(cs.width) };
+    })()`);
+    const notedPseudo = await notePseudo(notesProbe.noted);
+    ck("the note-bearing day's dot is actually DRAWN, not merely classed",
+       !!notedPseudo && notedPseudo.content !== 'none' && notedPseudo.width > 0,
+       JSON.stringify(notedPseudo));
+    const plainPseudo = await notePseudo(notesProbe.plain);
+    // The negative half — what stops a rule drawing a dot on every cell from
+    // passing the check above too.
+    ck('...and the note-free day draws no pseudo-element at all',
+       !!plainPseudo && plainPseudo.content === 'none', JSON.stringify(plainPseudo));
+
     /* ---------- the secondary affordance: contextmenu opens the editor, seeded truthfully ---------- */
 
     const cellCentre = (date) => ev(`(() => {
@@ -1117,7 +1264,28 @@ try {
     ck('the note-bearing cell is on screen to be right-clicked', !!notedCentre,
        JSON.stringify(notedCentre));
     if (notedCentre) {
+      // `e.preventDefault()` in the handler suppresses the browser's native
+      // context menu, and a suppressed menu leaves no DOM signal of its own —
+      // there is nothing to query afterwards that says "the native menu did
+      // not open". A bubble-phase listener on `document`, installed BEFORE the
+      // press, stands in for it: the button's own `contextmenu` handler runs
+      // at the TARGET phase and calls `preventDefault()` there, so by the time
+      // this listener sees the event in bubble phase, `e.defaultPrevented`
+      // already reflects that call — `true` on a correct build, `false`
+      // without it (measured by the lead removing the call; not a data
+      // defect, but an unpinned claim of the same shape as #297's other one).
+      await ev(`(() => {
+        window.__ctxDefaultPrevented = null;
+        document.addEventListener('contextmenu', (e) => {
+          window.__ctxDefaultPrevented = e.defaultPrevented;
+        }, false);
+        return true;
+      })()`);
       await rightClick(notedCentre.x, notedCentre.y);
+      const ctxPrevented = await ev(`window.__ctxDefaultPrevented`);
+      ck("the contextmenu's native menu was suppressed — the bubble-phase "
+         + 'listener saw e.defaultPrevented === true',
+         ctxPrevented === true, JSON.stringify(ctxPrevented));
       await sleep(600);
       const opened = await ev(`({
         open: document.getElementById('day-dialog').open,

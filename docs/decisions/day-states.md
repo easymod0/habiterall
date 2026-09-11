@@ -909,3 +909,18 @@ where refusing outright is the larger harm. `shared/test/validate.test.js`
 pins the boundary at the literal 500/501, not at `LIMITS.notes`, and the two
 editions' round-trip suites still assert the import clamp truncates to exactly
 that length — nothing about the clamp itself moved.
+
+That framing is true and incomplete, because a note over 500 characters can
+reach storage by a route the "person typing right now" framing does not cover:
+personal had no import clamp at all for part of its history (the importer's
+own comment beside `LIMITS.notes` says so), so an existing personal instance
+can hold a row imported before this shipped whose note is longer than the
+editor has ever let anyone type. Opening that day and pressing Save now answers
+400 — refusing the day's VALUE change along with the note, not only the note —
+where the same press used to succeed by silently truncating the tail nobody
+asked to lose. The person did nothing wrong; they opened an old day and saved
+it. This is still the right trade: the refusal is over the same box the note
+came from, so it is a rule the person can act on (trim it and save), where the
+alternative is going on quietly destroying the tail of a long-imported note
+every time an unrelated field on that day is saved — which is the harm this
+whole change exists to stop, merely arriving at a different note's expense.

@@ -725,22 +725,45 @@ try {
         '[data-focus-key="check:${notesGeomSeed.id}:${notesGeomSeed.plain}"]');
       const rect = (el) => { const b = el.getBoundingClientRect();
         return { w: Math.round(b.width), h: Math.round(b.height) }; };
+      const pseudo = (el) => { const box = el?.querySelector('.check-box');
+        if (!box) return null;
+        const cs = getComputedStyle(box, '::after');
+        return { content: cs.content, width: parseFloat(cs.width) }; };
       return {
         notedHasMark: !!noted?.querySelector('.check-box')?.classList.contains('has-note'),
         plainHasMark: !!plain?.querySelector('.check-box')?.classList.contains('has-note'),
         notedCell: noted ? rect(noted) : null,
         plainCell: plain ? rect(plain) : null,
+        notedPseudo: pseudo(noted),
+        plainPseudo: pseudo(plain),
       };
     })()`);
     ck('at 360px, the note-bearing cell carries the mark',
       cellGeom.notedHasMark === true, JSON.stringify(cellGeom));
     ck('...and the note-free cell does not',
       cellGeom.plainHasMark === false, JSON.stringify(cellGeom));
-    // The geometry claim: a note-bearing `.check` is the SAME size as an
-    // ordinary one at this width. The dot is positioned absolutely inside
-    // `.check-box`, which must add no box size of its own — style.css's own
-    // comment on `.check-box.has-note::after` says so, and this is what
-    // actually checks it rather than trusting the comment.
+    // The rendered read, beside the class read above — a class the stylesheet
+    // no longer draws anything for still toggles, so this is what pins the DOT
+    // actually existing at all (review round). `content` must not be `'none'`
+    // and the drawn box must have real width; the note-free cell must draw no
+    // pseudo-element.
+    ck("at 360px, the note-bearing cell's dot is actually DRAWN, not merely "
+      + 'classed',
+      !!cellGeom.notedPseudo && cellGeom.notedPseudo.content !== 'none'
+        && cellGeom.notedPseudo.width > 0,
+      JSON.stringify(cellGeom));
+    ck('...and the note-free cell draws no pseudo-element at all',
+      !!cellGeom.plainPseudo && cellGeom.plainPseudo.content === 'none',
+      JSON.stringify(cellGeom));
+    // The geometry claim, and it is a NARROWER one than it looks: a
+    // note-bearing `.check` is the SAME size as an ordinary one at this width.
+    // This checks the GEOMETRY, not the dot — with `.check-box.has-note::after`
+    // deleted outright both cells are equally dotless and equally sized, and
+    // this assertion passes against that build too. It still bites a dot that
+    // grows the box (the dot is positioned absolutely inside `.check-box`,
+    // which must add no box size of its own), which is a real and different
+    // regression from "no dot is drawn at all" — the rendered read just above
+    // is what pins the dot existing in the first place.
     ck('...and the note dot changes no cell geometry at this width',
       !!cellGeom.notedCell && !!cellGeom.plainCell
         && cellGeom.notedCell.w === cellGeom.plainCell.w

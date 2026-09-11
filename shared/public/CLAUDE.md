@@ -444,12 +444,36 @@ through `cappedColumns`, NOT `gridColumns` — that function's 7/10/14 ladder
 exists to protect the dashboard's habit-name column, which this card does not
 have.
 
-**Offline, the strip and the calendar card agree about a day (#230).** They draw
-one pair of maps — three, with the notes — and a tap moves them before it
-writes, so `detailHost.repaint` redraws the calendar beside the cells rather
-than waiting on the refetch `writeDay` ends in, which offline never runs. All
-of them are nulled by `render()` before a rebuild, or a tap redraws a card that
-has been detached.
+**Offline, the strip, the calendar card and the notes card agree about a day
+(#230, extended by #297).** They draw one pair of maps — three, with the notes
+— and a tap moves them before it writes, so `detailHost.repaint` redraws the
+calendar beside the cells rather than waiting on the refetch `writeDay` ends
+in, which offline never runs. All of them are nulled by `render()` before a
+rebuild, or a tap redraws a card that has been detached.
+
+**The notes card is the third redraw, and it was missed on the first pass of
+#297 — both reviewers found it independently, which is worth knowing because
+the reasoning that omitted it is easy to repeat.** The card is drawn from
+`notesByDate`, the very live map this section argues for passing to the
+calendar, and it was built once by `render()` and never rebuilt — so offline a
+cleared note left a GHOST ROW with the old text after the dot and the strip
+mark had both already gone, and a first note on a previously-noteless day lit
+both marks with no row to show for it. `notesRedraw` is its `calRedraw`, with
+the same lifecycle. Note this is squarely INSIDE the redraw rule and not an
+instance of the accepted staleness two paragraphs down: that paragraph excuses
+figures the SERVER computed, which nothing local could move, and a note is
+local data the edit itself moved.
+
+**One case a repaint deliberately cannot cover: a habit's FIRST note written
+offline gets no card at all until the next full render.** `buildNotesCard`
+returns `null` for a habit with no notes, so there is no card in the page to
+redraw, and inserting one is `render()`'s job — it owns card ORDER, from the
+stored `detailCards` list, which a repaint has no business deciding. That
+habit's dot and strip mark still light immediately; only the card lags. The
+mirror case IS covered, because there the card exists: clearing a habit's last
+remaining note offline hides the card rather than leaving an empty list, which
+is the same "a card with nothing in it is hidden" promise the settings help
+text makes.
 
 **A QUEUED write from the day editor closes the dialog and repaints too.**
 `saveDay` (`ui/day-dialog.js`) awaits `api()` and offline `api()` stages the
