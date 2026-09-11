@@ -1403,6 +1403,12 @@ function buildResilienceCard({ stats, color, chartWidth }) {
     r.worstLapse ? `${r.worstLapse}d` : '—',
     'Longest lapse'
   ));
+  // No closed lapse means no average to report — a different claim from an
+  // average of zero, so it renders as a dash rather than "0.0d".
+  tiles.append(tile(
+    r.recovery.averageLength == null ? '—' : `${r.recovery.averageLength.toFixed(1)}d`,
+    'Average lapse'
+  ));
   if (r.recovery.openRun > 0) {
     tiles.append(tile(`${r.recovery.openRun}d`, 'Currently missed',
       'var(--danger, #ef4444)'));

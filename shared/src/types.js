@@ -288,6 +288,8 @@
  * @property {number} openRun          length of an ongoing lapse, else 0
  * @property {number} longest          longest CLOSED lapse, 0 when there is none
  * @property {string|null} lastEnd     last day of the most recent closed lapse
+ * @property {number|null} averageLength  mean length of the CLOSED lapses,
+ *                                        unrounded; null when there are none
  */
 
 /**
