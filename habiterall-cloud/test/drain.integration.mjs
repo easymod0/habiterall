@@ -249,6 +249,16 @@ try {
     await admin.connect();
     state = await boot(issuer);
 
+    // The tick, the gateway and the scheduled dump moved to
+    // `notifier-entry.js` (#194) — this booted web server should say nothing
+    // about reminders at all, neither that it started one nor that it is off.
+    // `test/notifier-entry.test.js` guards the SOURCE (no `startNotifier`
+    // binding); this is the behavioural half over the real spawned process,
+    // which would still catch one reintroduced under a renamed import.
+    check('1. the booted web server logs no notify.starting or notify.disabled line',
+      !state.logs.includes('"notify.starting"') && !state.logs.includes('"notify.disabled"'),
+      JSON.stringify(state.logs.slice(-300)));
+
     // Warm the socket, so what follows travels on a POOLED connection as a
     // reverse proxy's would. An unwarmed connection is not the case under test.
     const s = openSocket();

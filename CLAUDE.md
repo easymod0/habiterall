@@ -358,6 +358,7 @@ Several layers, and they catch different things:
 | Cloud API | `npm run test:cloud` | Postgres |
 | The probe reaches no session store | `npm run test:healthz -w habiterall-cloud` | Postgres |
 | Cloud SIGTERM drains, and the pool closes | `npm run test:drain -w habiterall-cloud` | Postgres |
+| The notifier entry point (#194): boots, ticks, serves nothing, drains | `npm run test:notifierentry -w habiterall-cloud` | nothing |
 | Which claim names the account | `npm run test:claims -w habiterall-cloud` | Postgres |
 | Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |
 | The scheduled dump, and what it prunes | `npm run test:backup -w habiterall-cloud` | Postgres |

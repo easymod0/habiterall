@@ -714,6 +714,16 @@ export function start(env = process.env, deps = {}) {
     appUrl: config.appUrl,
     botToken: config.botToken,
     deliveryConcurrency: DELIVERY_CONCURRENCY,
+    // This edition's tick runs in a process with NO server (#194):
+    // `notifier-entry.js` and nothing else calls this function. So the tick's
+    // own timer has to be what holds that process open — unset, it is unref'd,
+    // and a notifier with no Discord bot token (a webhook or ntfy deployment)
+    // exits 0 after its first tick with nothing in the log saying so. See
+    // `startNotifier` in `@habiterall/shared/notify-send.js` for the
+    // measurement. Personal's `start()` deliberately does NOT pass this: there
+    // the tick shares a process with `app.listen`, and a ref'd timer would
+    // keep a drained server alive past its own exit.
+    keepAlive: true,
     // Travels the same route `botToken` and `appUrl` already do: no reaching
     // into `process.env` from inside `shared/src` for it.
     signAnswer,

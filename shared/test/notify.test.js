@@ -2438,6 +2438,70 @@ test('a tick with one ntfy account behaves exactly as before — the gate is a n
   }
 });
 
+/* ---------- whether the tick may hold its process open ---------- */
+
+/**
+ * Start a notifier in a CHILD process and answer whether that child is still
+ * alive a moment later.
+ *
+ * A child, because the property under test is "did the event loop stay open",
+ * and there is nothing in the returned `{stop}` that says so — `unref` is not
+ * observable from inside the process that is being kept alive, and the test
+ * runner's own handles would keep this one up whatever the answer. So the
+ * question is put to a process that has nothing else in it.
+ *
+ * @param {boolean|undefined} keepAlive @returns {Promise<{alive: boolean, code: number|null}>}
+ */
+async function notifierChildSurvives(keepAlive) {
+  const { spawn } = await import('node:child_process');
+  const src = new URL('../src/notify-send.js', import.meta.url).href;
+  // A ten-second interval, so a child that is still up at the check cannot be
+  // up because it happened to be mid-tick: the first tick is synchronous at
+  // construction and the second is far beyond the window below.
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    const { startNotifier } = await import(${JSON.stringify(src)});
+    startNotifier({
+      collect: () => [], mark: () => {}, intervalMs: 10000,
+      log: { debug() {}, info() {}, warn() {}, error() {} },
+      ${keepAlive === undefined ? '' : `keepAlive: ${keepAlive},`}
+    });
+  `], { stdio: 'ignore' });
+
+  /** @type {number|null} */
+  let code = null;
+  child.on('exit', (c) => { code = c; });
+  try {
+    await new Promise((r) => setTimeout(r, 500));
+    return { alive: code === null, code };
+  } finally {
+    child.kill('SIGKILL');
+  }
+}
+
+test('the tick does not hold a process open by default', async () => {
+  // The default is right for the caller that also serves requests: there the
+  // HTTP server holds the loop open, and a ref'd tick would keep a drained
+  // server alive past its own exit. Asserted so that turning the default round
+  // cannot pass.
+  const { alive, code } = await notifierChildSurvives(undefined);
+  assert.equal(alive, false,
+    'a notifier with no keepAlive kept its process open — the default must be unref');
+  assert.equal(code, 0, 'the child exited, but not cleanly');
+});
+
+test('keepAlive holds the process open, which is the only thing that does in a process with no server', async () => {
+  // `habiterall-cloud/src/notifier-entry.js` has no `app.listen` and, on a
+  // deployment with no Discord bot token, no socket either — a webhook, an
+  // ntfy topic and a nightly pg_dump open nothing that outlives a tick. So
+  // this timer is the whole of what keeps that container running, and without
+  // it the process ran ONE tick and exited 0, fifteen seconds before its
+  // second was due, with `restart: on-failure` correctly declining to restart
+  // an exit 0.
+  const { alive } = await notifierChildSurvives(true);
+  assert.equal(alive, true,
+    'keepAlive did not keep the process open — the notifier container would go quiet after one tick');
+});
+
 /* ---------- startNotifier's one generic hook, for a periodic job that isn't
    reminders ---------- */
 

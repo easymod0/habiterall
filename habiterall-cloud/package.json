@@ -17,6 +17,7 @@
     "test:api": "node test/api.integration.mjs",
     "test:healthz": "node test/healthz.integration.mjs",
     "test:drain": "node test/drain.integration.mjs",
+    "test:notifierentry": "node test/notifier-entry.integration.mjs",
     "test:claims": "node test/login-claims.integration.mjs",
     "test:notify": "node test/notify.integration.mjs",
     "test:ntfyanswer": "node test/ntfy-answer.integration.mjs",
