@@ -682,7 +682,7 @@ try{
     const h = habits.find(x => !x.archived);
     const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
       return d.toISOString().slice(0, 10); };
-    const noted = iso(1), plain = iso(2);
+    const noted = iso(1), plain = iso(2), blank = iso(3);
     const noteText = 'grid probe note, kept honest';
     await fetch('/api/habits/' + h.id + '/entries/' + noted, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -690,7 +690,12 @@ try{
     await fetch('/api/habits/' + h.id + '/entries/' + plain, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ value: 2 }) });
-    return { id: h.id, noted, plain, noteText };
+    // DELETED, not merely left alone: the fixtures seed 60 days of entries, so
+    // "a day nobody has written to" is not a day that exists by default here.
+    // This one has to have no row and no note for the save-repaint check below
+    // to be able to observe a CHANGE rather than a state the cell was already in.
+    await fetch('/api/habits/' + h.id + '/entries/' + blank, { method: 'DELETE' });
+    return { id: h.id, noted, plain, blank, noteText };
   })()`);
   ck('a habit exists to seed the notes probe onto', !!notesSeed?.id, JSON.stringify(notesSeed));
 
@@ -757,36 +762,201 @@ try{
     ck('the note-bearing cell is on screen to be right-clicked', !!notedCentre,
        JSON.stringify(notedCentre));
 
+    const leftClick = async (x, y) => {
+      await send('Input.dispatchMouseEvent',
+        { type: 'mouseMoved', x, y, button: 'none' }, sessionId);
+      await send('Input.dispatchMouseEvent',
+        { type: 'mousePressed', x, y, button: 'left', clickCount: 1 }, sessionId);
+      await send('Input.dispatchMouseEvent',
+        { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 }, sessionId);
+    };
+    const editorState = () => ev(`({
+      open: document.getElementById('day-dialog')?.open === true,
+      hash: location.hash,
+      listShowing: !document.getElementById('view-list').hidden,
+      detailShowing: !document.getElementById('view-detail').hidden,
+      notes: document.getElementById('day-notes').value,
+      notesHidden: document.getElementById('day-notes-wrap').hidden === true,
+    })`);
+
     if (notedCentre) {
       await rightClick(notedCentre.x, notedCentre.y);
-      // The secondary affordance ROUTES THROUGH the habit's own page (#224):
-      // this list holds only which dates hold a note, never the TEXT, so
-      // opening the editor in place here would seed an empty box over a day
-      // that has a real note — and `saveDay` always STATES the note on save,
-      // which would destroy it silently on the very next Save. So the proof
-      // is the whole trip, not just "a dialog opened somewhere".
+      /*
+       * The secondary affordance opens the editor IN PLACE, over the list.
+       *
+       * It used to navigate to the habit's own page (#297) for one reason
+       * only: this list holds which dates hold a note and never the TEXT, so
+       * a dialog opened here would have seeded an empty box over a day that
+       * has a real note — and `saveDay` STATES the note on every save, which
+       * destroys it on the next Save (#224). The trip was the workaround, not
+       * the feature. `editDayOverList` (`ui/dashboard.js`) fetches that
+       * habit's entries for the text instead, which is strictly less work
+       * than the navigation it replaces — that fetched the same request AND
+       * `/habits/:id/stats`, then rebuilt a page of SVG.
+       *
+       * So what is asserted is the whole of it: the dialog is open, the LIST
+       * is still what is showing, the URL has not moved — and the box holds
+       * the real note. That last one is the #224 proof and is the check that
+       * fails if the fetch is ever dropped for a cheaper guess.
+       */
       await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
-        { what: "the day editor to open on the habit's own page" });
+        { what: 'the day editor to open over the list' });
       await sleep(300);
-      const landed = await ev(`({
-        hash: location.hash,
-        listShowing: !document.getElementById('view-list').hidden,
-        detailShowing: !document.getElementById('view-detail').hidden,
-        notes: document.getElementById('day-notes').value,
-      })`);
-      ck("the secondary affordance lands on the habit's own detail view, "
-         + 'with the day editor open',
-         landed.hash === `#/habit/${notesSeed.id}` && landed.detailShowing === true
-           && landed.listShowing === false,
+      const landed = await editorState();
+      ck('the secondary affordance opens the day editor over the LIST, without '
+         + 'navigating anywhere',
+         landed.listShowing === true && landed.detailShowing === false
+           && landed.hash !== `#/habit/${notesSeed.id}`,
          JSON.stringify(landed));
-      // The anti-#224 proof: an EMPTY box here is the bug this whole design
-      // is shaped to avoid, since the dashboard's own host never held the
-      // note's text to seed the dialog with in the first place.
       ck('...and #day-notes holds the REAL note, not an empty box',
          landed.notes === notesSeed.noteText, JSON.stringify(landed));
+      ck('...and the note box is SHOWN, so the note is editable rather than '
+         + 'merely preserved',
+         landed.notesHidden === false, JSON.stringify(landed));
       await ev(`document.getElementById('day-cancel').click()`);
       await sleep(300);
     }
+
+    /* ---------- `dayTap`: what a PLAIN tap does ---------- */
+    console.log('\n--- dayTap ---');
+    /*
+     * The default is `'cycle'`, and the negative half is asserted FIRST and
+     * against the same cell the positive half uses. Without it, "the editor
+     * opened" says nothing — a build that opened the editor on every tap
+     * whatever the setting said would pass the positive check alone, and that
+     * build is exactly the one that takes one-tap answering away from every
+     * account that never touched this setting.
+     */
+    const setTap = async (value) => {
+      await ev(`(async () => {
+        const settings = await import('/shared/ui/settings.js');
+        await settings.save('dayTap', ${JSON.stringify(value)});
+      })()`);
+      // Read back from the SERVER, not from the cache the line above just
+      // wrote: `SETTING_VALUES` is what actually decides, and a key it refuses
+      // leaves the local cache asserting a value no tap will ever see.
+      return ev(`(async () => (await (await fetch('/api/settings',
+        { credentials: 'same-origin' })).json()).dayTap)()`);
+    };
+
+    const cycleCell = notesSeed.plain;
+    const cycleSel = `[data-focus-key="check:${notesSeed.id}:${cycleCell}"]`;
+    const centreOf = (sel) => ev(`(() => {
+      const el = document.querySelector(${JSON.stringify(sel)});
+      if (!el) return null;
+      el.scrollIntoView({ block: 'center' });
+      const b = el.getBoundingClientRect();
+      return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+    })()`);
+    const storedValue = (date) => ev(`(async () => {
+      const rows = await (await fetch('/api/habits/${notesSeed.id}/entries',
+        { credentials: 'same-origin' })).json();
+      const row = rows.find(r => r.date === ${JSON.stringify(date)});
+      return row ? { value: row.value, status: row.status, notes: row.notes } : null;
+    })()`);
+
+    ck('the setting stores as `cycle`', await setTap('cycle') === 'cycle');
+    const before = await storedValue(cycleCell);
+    let at = await centreOf(cycleSel);
+    ck('the cycle cell is on screen', !!at, JSON.stringify(at));
+    await leftClick(at.x, at.y);
+    await sleep(700);
+    const afterCycle = await editorState();
+    ck('under `cycle`, a plain tap opens NO dialog', afterCycle.open === false,
+       JSON.stringify(afterCycle));
+    const cycled = await storedValue(cycleCell);
+    ck('...and it recorded the next state of the cycle instead',
+       JSON.stringify(cycled) !== JSON.stringify(before),
+       `${JSON.stringify(before)} -> ${JSON.stringify(cycled)}`);
+
+    ck('the setting stores as `editor`', await setTap('editor') === 'editor');
+    // A settings change reaches the grid through `settings.get` at TAP time,
+    // not through a rebuild — so no reload is needed here, and needing one
+    // would itself be the defect (the cells are already built).
+    const notedSel = `[data-focus-key="check:${notesSeed.id}:${notesSeed.noted}"]`;
+    at = await centreOf(notedSel);
+    ck('the noted cell is on screen for the editor tap', !!at, JSON.stringify(at));
+    await leftClick(at.x, at.y);
+    await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
+      { what: 'the day editor to open from a plain tap under `dayTap: editor`' });
+    const afterEditor = await editorState();
+    ck('under `editor`, a plain tap opens the day editor over the list',
+       afterEditor.open === true && afterEditor.listShowing === true,
+       JSON.stringify(afterEditor));
+    ck('...seeded with the real note, which is the whole point of the setting',
+       afterEditor.notes === notesSeed.noteText, JSON.stringify(afterEditor));
+    await ev(`document.getElementById('day-cancel').click()`);
+    await sleep(200);
+
+    /*
+     * ...and a save from there writes the note AND MOVES THE GRID, which is the
+     * half a stored-value check cannot see and the half a user is looking at.
+     *
+     * `saveDay` announces with `emit('change')`, and the dashboard answers that
+     * by REPAINTING FROM `state` rather than refetching — right for every write
+     * the list makes for itself, since those move `state` optimistically before
+     * the request goes out, and wrong for the day editor, which did not. An
+     * ordinary ONLINE save therefore landed on the server and left the square
+     * exactly as it was: no tick, no note dot, dialog closed, nothing said,
+     * until a `load()` a dashboard left open never gets.
+     *
+     * **This is asserted on a day with NO ROW AND NO NOTE, and the first
+     * version of this check was not.** It reused `notesSeed.noted`, which the
+     * seed had already given a value and a note — so `text === '✓'` and
+     * `dot === true` were true BEFORE the save and the check compared the cell
+     * to a state it was already in. It passed against the unrepainted build,
+     * measured, which is the fixture-equals-itself trap from the root
+     * CLAUDE.md landing in the very check written to catch a repaint bug. The
+     * `blank` date is deleted in the seed above precisely so this can observe a
+     * CHANGE.
+     *
+     * Both marks are read, because the value and the note travel through
+     * different fields of the host's model and a version that moved one and not
+     * the other is exactly what `listHost.edit`'s note arm was added for.
+     */
+    const blankSel = `[data-focus-key="check:${notesSeed.id}:${notesSeed.blank}"]`;
+    const cellState = (date) => ev(`(() => {
+      const box = document.querySelector('${boxSel('DATE')}'.replace('DATE', ${JSON.stringify(date)}));
+      return box ? { text: box.textContent, dot: box.classList.contains('has-note') } : null;
+    })()`);
+    const beforeSave = await cellState(notesSeed.blank);
+    ck('the day about to be edited starts with no tick and no dot — or the '
+       + 'check below compares the cell to a state it was already in',
+       beforeSave?.text === '' && beforeSave?.dot === false, JSON.stringify(beforeSave));
+
+    at = await centreOf(blankSel);
+    ck('the blank cell is on screen', !!at, JSON.stringify(at));
+    await leftClick(at.x, at.y);
+    await waitUntil(ev, `document.getElementById('day-dialog')?.open === true`,
+      { what: 'the day editor to open on the blank day' });
+    const blankEditor = await editorState();
+    ck('a day with no note opens with an EMPTY box that is still shown — the '
+       + 'box is hidden only when the note could not be found out',
+       blankEditor.notes === '' && blankEditor.notesHidden === false,
+       JSON.stringify(blankEditor));
+
+    const newNote = 'written from the dashboard, on a day that had nothing';
+    await ev(`(() => {
+      const box = document.getElementById('day-notes');
+      box.value = ${JSON.stringify(newNote)};
+      [...document.querySelectorAll('#day-boolean .day-choice')]
+        .find(b => b.dataset.action === 'done').click();
+    })()`);
+    await waitUntil(ev, `document.getElementById('day-dialog')?.open !== true`,
+      { what: 'the day editor to close after saving' });
+    await sleep(500);
+    const saved = await storedValue(notesSeed.blank);
+    ck('a save from the dashboard editor writes the value and the note',
+       saved?.value === 2 && saved?.notes === newNote, JSON.stringify(saved));
+
+    const cellAfterSave = await cellState(notesSeed.blank);
+    ck('...and the grid cell it was opened from shows the save WITHOUT waiting '
+       + 'for a reload',
+       cellAfterSave?.text === '✓', JSON.stringify(cellAfterSave));
+    ck('...and grows the note dot, from the same optimistic edit',
+       cellAfterSave?.dot === true, JSON.stringify(cellAfterSave));
+
+    ck('the setting is put back', await setTap('cycle') === 'cycle');
   }
 
   console.log(fails===0?'\nALL GRID CHECKS PASSED':`\n${fails} FAILED`);

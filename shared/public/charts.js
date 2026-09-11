@@ -744,6 +744,39 @@ function attachCellPopover(svg) {
 
   const cellFrom = (e) => e.target?.closest?.('.cal-cell') ?? null;
 
+  /**
+   * Is this cell, with its marks, already at the end of the grid?
+   *
+   * `raise` is idempotent only if it can SEE that it has already run, and the
+   * obvious test — `parent.lastElementChild === cell` — cannot, because
+   * `raise` deliberately leaves the marks AFTER the cell. So for any day
+   * carrying one, the cell was never last, the early return never fired, and
+   * every single event re-appended the whole group.
+   *
+   * That was not merely wasted work: a re-append blurs the cell, `raise`
+   * restores the focus it took, and the restore fires `focusin`, which raises
+   * again — unbounded. Measured against the unfixed code with a real CDP mouse
+   * press on a noted day: 2,066 `focusin`s and 66 `pointerover`s for ONE
+   * press, and NO `click` at all, because the mousedown target was being
+   * detached and reattached under the pointer for the whole gesture. The day
+   * editor could not be opened from any day carrying a note (#297's dot) or,
+   * with `questionMarks` on, from any unanswered day — the same defect, which
+   * the note dot is simply the first mark to make reachable by default.
+   *
+   * The end state `raise` builds is exactly "the cell, then its marks, then
+   * nothing", so that is what this walks — never a count or a `lastElementChild`
+   * test, either of which is satisfiable by an arrangement `raise` would not
+   * have produced.
+   */
+  const alreadyRaised = (parent, cell, marks) => {
+    let node = cell.nextElementSibling;
+    for (const mark of marks) {
+      if (node !== mark) return false;
+      node = node.nextElementSibling;
+    }
+    return node == null;
+  };
+
   /*
    * SVG has no z-index: elements paint in document order, so a cell that
    * grows is clipped by every square drawn after it. Moving the hovered cell
@@ -759,7 +792,7 @@ function attachCellPopover(svg) {
     const date = cell.getAttribute('data-date');
     const marks = parent?.querySelectorAll?.(
       `[data-mark-for="${date}"], [data-note-for="${date}"]`) ?? [];
-    if (!parent || (parent.lastElementChild === cell && marks.length === 0)) return;
+    if (!parent || alreadyRaised(parent, cell, marks)) return;
 
     // Re-appending a focused element blurs it, which silently broke arrow-key
     // navigation: the handler reads document.activeElement, and after the

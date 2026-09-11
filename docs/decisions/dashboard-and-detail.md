@@ -1923,3 +1923,180 @@ registry row (`DETAIL_CARDS`, `SETTINGS.detailCards`, `CARDS` in
 `ui/detail.js`) sits immediately after `calendar` — order is load-bearing
 there, because `parseCardList` keeps a new-shape stored list close to verbatim
 and a default written in another order is normalised away on its first write.
+
+## Issue #333's two follow-ups: a marked cell that could not be clicked, and the plain tap becoming a choice
+
+Both came out of one report — a note-bearing calendar day "appears to no longer
+be clickable" — and only the first of them is what was reported.
+
+### `raise` could not tell that it had already run
+
+`attachCellPopover`'s `raise` (`shared/public/charts.js`) moves a hovered cell
+to the end of its parent, because SVG has no `z-index` and a cell scaled 1.45x
+is otherwise clipped by every square drawn after it. Since #297 it moves the
+cell's MARKS after it too — the `?` glyph and the note dot — for a reason that
+predates the note: raising the cell alone buries the very thing the hovered day
+is being asked about under an opaque square.
+
+Its early return was `parent.lastElementChild === cell && marks.length === 0`,
+and that is unsatisfiable for any cell carrying a mark, because `raise` itself
+put the mark last. So every `pointerover` and every `focusin` re-appended the
+group. That is not merely wasted work: `parent.append(cell)` blurs a focused
+cell, `raise` restores the focus it took, and the restore fires `focusin`,
+which re-enters `raise`. Measured with a real CDP mouse press on a noted day,
+against the unfixed tree:
+
+| | plain day | noted day |
+|---|---|---|
+| `pointerover` | 2 | 66 |
+| `focusin` | 1 | 2,066 |
+| `click` | 1 | **0** |
+
+No `click` is dispatched because the mousedown target is being detached and
+reattached under the pointer for the entire gesture. The day editor could not
+be opened from any day carrying a note — and, with `questionMarks` on, from any
+unanswered day, which is the same defect and older than #297 by the whole life
+of that setting. The note dot is simply the first mark reachable with no
+setting turned on.
+
+`alreadyRaised` walks the end state `raise` builds — the cell, then exactly its
+marks, then nothing. Deliberately not a count (`marks.length` says nothing about
+where they are) and deliberately not `lastElementChild` (satisfiable by an
+arrangement `raise` would never have produced).
+
+**What the existing suite could not see.** `calcheck.mjs`'s note-mark block
+asserted the dot was drawn, that `data-note-marks` counted it, that the legend
+explained it and that the label carried the fact and not the text — four checks,
+all green, about a cell nobody could open. That is the root `CLAUDE.md`'s
+"pinning the DECISION is not pinning the WIRING" arriving one more time. The
+regression check presses the cell for real over CDP, because the loop is driven
+by `pointerover` and `focusin` and a scripted `.click()` dispatches neither; and
+it presses an unmarked day beside it, because without that control a press that
+opened nothing for any other reason would read as this bug.
+
+### `dayTap`, and why the dashboard stopped navigating
+
+The second half is a feature rather than a fix: a note could be *read* from the
+list after #297 and still not *written* from it, and the one way in
+(`contextmenu` / Shift+Enter) is a gesture nobody finds on their own.
+
+`dayTap` is `'cycle'` or `'editor'`, default `'cycle'`. Under `'editor'` the
+plain tap hands the cell to `host.editDay` on both grids and for both habit
+types. It defaults to today's behaviour deliberately: a tap answering in one
+press is what every existing account's muscle memory is built on, and a setting
+that changes what a tap means may not arrive switched on.
+
+It is asked before the habit type, which is the only ordering question in it. A
+measurable habit's tap already opened a dialog — `openCountDialog`, an amount
+and nothing else — so asking `dayTap` only on the boolean arm would have given
+the two types different answers to "is the note reachable", under a setting
+whose entire purpose is that it is. Under `'editor'` both types open
+`#day-dialog`, which already holds an amount field, the two choice buttons,
+Skip, Clear and the note box; no second dialog was built and `openCountDialog`
+is untouched on the `'cycle'` path.
+
+**The `/overview` payload decision from #297 is unchanged, and the routing
+built on it is not.** That section above records `listHost.editDay` calling
+`openHabit(habit.id, {editDay: date})` because the list cannot seed the note
+box truthfully. That was a workaround for a missing third answer, not a
+feature — and it is expensive: the navigation fetched `/habits/:id/entries`
+AND `/habits/:id/stats`, rebuilt up to ten cards of SVG, and left the user on a
+page they had not asked for. `editDayOverList` (`ui/dashboard.js`) fetches the
+entries alone and opens in place, which is strictly less work than what it
+replaces.
+
+Two rules make that safe, and both are about failure.
+
+**It fetches unconditionally.** Shortcutting on `hasNote` — "this list already
+knows this day has no note, so seed `''` and skip the request" — is right
+exactly while that belief is right, and the one case it is wrong is the
+destructive one. `noteDatesByHabit` reads a missing `h.notes` as empty, which is
+precisely what a service-worker-cached `/overview` predating that field sends,
+so the first boot after an upgrade would seed an empty box over every real note
+on the list. A belief that can be silently empty is not a safe premise for a
+write that destroys.
+
+**A fetch that fails opens the dialog anyway, with the note UNKNOWN.**
+`openDayDialog`'s `noteText` gains a third answer beside a string and `''`:
+`null`, meaning nobody could find out. It hides the box and takes `notes` out of
+the request entirely, which `PUT /habits/:id/entries/:date` answers by
+preserving what is stored (`entryWrite`) — the same preserve-on-omit rule #224
+established for a button that never saw the note. The box is hidden rather than
+disabled-and-empty, because an empty box makes the one claim that cannot be
+made here: that this day has no note. Refusing to open at all was the
+alternative and is worse offline, which is the only place this is reachable and
+the place a tap matters most.
+
+The value and the skip still come from the host and not from the reply. They are
+the optimistic model — a queued tap has moved them and the server has not heard
+— so taking them off the fetch would open the dialog on a day the grid behind it
+is painting differently.
+
+**`listHost.edit` now honours its `note` parameter**, which it was documented to
+ignore. It moves `noteDatesByHabit`, the one thing the list holds about notes,
+so an offline save lights or clears the cell's dot with no refetch — and the
+undo restores it, for the reason `wasSkip` is captured: a write that turns out
+not to have been made must leave no mark behind, and a stale dot is a mark.
+
+### Mutation results
+
+| broken | what failed |
+|---|---|
+| `raise`'s early return put back to `lastElementChild === cell && marks.length === 0` | calcheck: the noted cell opens nothing, the unmarked control still passes |
+| the `dayTap` gate dropped (`if (host.editDay)`) | gridcheck: a tap under `cycle` opens a dialog, and records nothing |
+| `editDayOverList`'s fetch stubbed to `[]` | gridcheck: both note seeds come back empty — the #224 landmine, caught |
+| `noteKnown` forced true | daydialog: the box is shown for an unknown note and the write states it |
+| `noteText`'s `= ''` default deleted | daydialog: an absent argument stops meaning "no note" |
+
+### Review round 1: announcing is not enough for a view that recomputes
+
+The in-place open above shipped with a defect the whole suite was green over,
+and it is worth recording because the reasoning that produced it is easy to
+repeat: `saveDay` already ended in `emit('change')`, which is how every other
+dialog in this app tells the world it wrote something, so nothing looked
+missing.
+
+`emit('change')` means *the visible view's data moved*, and the two views answer
+it differently on purpose (`ui/store.js`): the detail page REFETCHES, because
+nothing it shows can be recomputed locally, and the dashboard REPAINTS FROM
+`state`. That asymmetry is sound while every write the list makes for itself has
+already moved `state` optimistically before the request went out — which is true
+of `writeDay` and of `saveCount`, and was not true of the day editor.
+
+So with `editDayOverList` opening that editor over the list, an ordinary ONLINE
+save wrote to the server and `paint()` faithfully redrew the pre-edit day.
+Measured on the branch as first pushed, pressing **✓ Done** and typing a note:
+
+```
+before tap          : {"text":"","bg":"var(--grid-empty)","dot":false}
+after ONLINE save   : {"text":"","bg":"var(--grid-empty)","dot":false}
+stored              : {"value":2,"notes":"a note from the list"}
+after a further 1.5s: {"text":"","bg":"var(--grid-empty)","dot":false}
+```
+
+No tick, no dot, dialog closed, no toast — and it stays that way until the next
+`load()`, which a dashboard left open never gets. Reachable under the DEFAULT
+`dayTap: 'cycle'` through #297's right-click affordance, so it was never gated
+behind the new setting. It could not happen while the host navigated instead:
+the page that open landed on is the one that refetches. The fix is the
+`edit` + `repaint` pair the queued branch has always done, on the success path
+too, which costs the detail view nothing.
+
+**The check written to prove the feature could not see it, and then the check
+written to catch THAT could not either.** The first read the stored row back
+from the API — true on the broken build, since the write does land — which is
+"pinning the DECISION is not pinning the WIRING" in the one place it most
+mattered. The second read the grid, and asserted the tick and the dot on
+`notesSeed.noted`, the day the seed had already given a value and a note: both
+were true before the save, so the check compared the cell to a state it was
+already in and passed against the unrepainted build. Verified by mutation, not
+by reading — the first mutation run came back `ALL GRID CHECKS PASSED` and that
+is what exposed it.
+
+The fixtures lay down 60 days of entries, so a day with no row is not something
+this suite gets by picking an untouched date; `gridcheck.mjs` DELETES one in its
+seed and asserts the cell is blank and dotless before pressing anything. Both
+marks are read afterwards, because the value and the note travel through
+different fields of the host's model: mutating `noteText ?? undefined` to a bare
+`undefined` leaves the tick and drops the dot, and only the second assertion
+catches it.

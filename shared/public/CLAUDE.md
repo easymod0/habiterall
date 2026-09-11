@@ -364,31 +364,96 @@ by REFETCHING, so a frozen palette survives a theme switch. `charts.js`'s dot
 therefore reads `themed(...)`/`shade(...)` exactly as every other mark on this
 grid does, never a resolved literal.
 
-**A note gained three new ways into the day editor, and every one of them is
-SECONDARY — none may steal the plain tap (#297).** `dayCells`
+**A note gained three new ways into the day editor, and every one of them was
+SECONDARY — none could steal the plain tap (#297).** `dayCells`
 (`ui/day-strip.js`) wires `contextmenu` (right-click / long-press) and
 Shift+Enter, on both grids that share that file, to `host.editDay?.(...)` — a
-method the plain click handler never touches. The third is the notes card
+method the plain click handler did not touch. The third is the notes card
 itself: each row is a real `<button>` calling `detailHost.editDay`, which is
 keyboard-reachable by construction rather than by a shortcut nobody discovers
 on their own. All three routes converge on the same rule the day editor has
-always had: `saveDay` unconditionally states the note on every save, so a way
-in that cannot seed the box with the TRUE text would silently destroy whatever
-was there (#224).
+always had: `saveDay` states the note on every save, so a way in that cannot
+seed the box with the TRUE text would silently destroy whatever was there
+(#224).
 
-**`StripHost.editDay` is optional, and the two hosts answer it differently on
-purpose — that split is the whole point of `StripHost` existing (#297).**
-`detail.js`'s `detailHost.editDay` opens the dialog directly: this page holds the
-whole unwindowed history, note text included, so it can seed the dialog
-truthfully with no second fetch. `dashboard.js`'s `listHost.editDay` cannot do
-that — the dashboard holds only the fortnight it asked for and, by design, never
-the note TEXT, only which DATES hold one (`/overview`'s per-habit `notes` array,
-dates only — a note is up to 500 characters and the payload is already
-size-managed) — so it routes through `openHabit(habit.id, { editDay: date })`,
-i.e. detail's own `open`, which opens the habit's page and then the day editor over it once the
-real note is in hand. Opening the editor in place over the dashboard with an
-empty seed would be the #224 landmine again, this time self-inflicted by the
-grid that cannot see the note it would need to seed with.
+**The plain tap is now a FOURTH way in, and it is the account's own choice —
+`dayTap`.** `'cycle'` is the default and is what a tap has always done; under
+`'editor'` `onCheckClick` hands the cell straight to `host.editDay` instead, on
+both grids and for both habit types. Three things about it. The setting is
+asked FIRST, before the habit type is looked at — it is a fact about the TAP
+and the branches below it are facts about the HABIT, so asking it on the
+boolean arm alone would give a measurable habit the amount dialog with no note
+box, under a setting whose whole point is that the note is reachable. It is
+read through `settings.get` at TAP time, never held, because the cells are
+already built when the settings dialog changes it. And `host.editDay` is still
+optional, so a host without one keeps the cycle: a preference may not be able
+to turn a grid off.
+
+**`StripHost.editDay` is optional, and the two hosts still answer it
+differently — but in what they must do to seed it, no longer in WHERE they open
+it (#297, revised).** `detail.js`'s `detailHost.editDay` opens the dialog
+directly: this page holds the whole unwindowed history, note text included, so
+it can seed truthfully with no second fetch. `dashboard.js`'s `listHost.editDay`
+cannot — the dashboard holds only the fortnight it asked for and, by design,
+never the note TEXT, only which DATES hold one (`/overview`'s per-habit `notes`
+array, dates only — a note is up to 500 characters and the payload is already
+size-managed) — so `editDayOverList` FETCHES `/habits/:id/entries` for the text
+and then opens in place.
+
+It used to route through `openHabit(habit.id, {editDay: date})` instead, and
+that was never the feature: it was the only way to seed the box honestly, since
+an empty box over a day that has a note is the #224 landmine self-inflicted by
+the grid that cannot see what it would need to seed with. The fetch is
+**strictly less work than the navigation it replaces** — that fetched this same
+request AND `/habits/:id/stats`, then rebuilt up to ten cards of SVG, to land on
+the same dialog over a page nobody asked to be on.
+
+Two rules keep it honest, and both are about what happens when it does not
+work. It fetches **unconditionally** and does not shortcut on `hasNote`:
+`noteDatesByHabit` reads a missing `h.notes` as empty, which is exactly what a
+service-worker-cached `/overview` predating that field sends, so the one boot
+after an upgrade would seed `''` over every real note — a belief that can be
+silently empty is not a safe thing to decide a destructive write on. And a
+fetch that FAILS still opens the dialog, with the note declared **unknown**:
+`openDayDialog`'s fifth argument takes `null` as a third answer beside a string
+and `''`, which hides the box and leaves `notes` out of the body entirely.
+`PUT /habits/:id/entries/:date` PRESERVES a note it was not asked to change, so
+the day stays fully editable and the note is untouched — which is why refusing
+to open would be the worse answer offline, the one place this is reachable and
+the one place a tap is the whole point of the grid.
+
+**The value and the skip still come from the HOST, and only the note from the
+reply.** They are the optimistic model — a queued tap has already moved them
+and the server has not heard — so reading them off the fetch would open the
+dialog on a day the grid behind it is painting differently. Read AFTER the
+await, beside the habit and for the same reason: a `load()` landing during the
+fetch would otherwise seed the editor with a value the grid has stopped drawing.
+
+**And `saveDay` must tell the host on the SUCCESS path, not only the queued
+one — announcing is not enough for a view that answers by RECOMPUTING.**
+`emit('change')` means "the visible view's data moved", and the two views
+answer it differently on purpose: the detail page refetches, the dashboard
+repaints from `state`. That split is sound because every write the LIST makes
+for itself moves `state` optimistically before the request goes out. The day
+editor is the one writer that did not — so with the editor opening over the
+list, an ordinary ONLINE save landed on the server and `paint()` faithfully
+redrew the pre-edit day: the square stayed empty, no tick and no note dot, with
+the dialog closed and nothing said, until a `load()` a dashboard left open
+never gets. It could not happen while that host NAVIGATED, because the page it
+landed on is the one that refetches — so this is a cost the in-place open
+brings with it, not a pre-existing hole. The fix is the `edit` + `repaint` pair
+the queued branch already does, and it is free for the detail view, whose
+refetch lands on an optimistic edit that agrees with it.
+
+**Pinning that needs a day the save can CHANGE, and the first version of the
+check did not have one.** It asserted the tick and the dot on the day the
+fixture had already given a value and a note, so both were true BEFORE the save
+and the check compared the cell to a state it was already in — green against
+the unrepainted build, measured. That is the root `CLAUDE.md`'s
+fixture-equals-itself trap landing inside the very check written to catch a
+repaint bug, and it is why `gridcheck.mjs` DELETES a day in its seed (the
+fixtures lay down 60 days of entries, so "a day nobody wrote to" is not one
+that exists by default) and asserts the blank start before pressing anything.
 
 **"Recent days" is the one card you ACT on, and it is first for that reason.**
 It is the dashboard's tappable day strip for one habit — `ui/day-strip.js`,
@@ -1614,6 +1679,34 @@ the growth. And the popover is positioned in JS because an SVG rect has no CSS
 box to anchor an HTML tooltip to. `<title>` stays in the markup for screen
 readers but is hidden with `display: none`, or the native bubble covers the
 popover.
+
+**And `raise` must be able to SEE that it has already run, or the cell it
+raises stops being clickable at all.** It moves the hovered cell to the end of
+its parent and then its MARKS after it — the `?` glyph, #297's note dot — so
+the obvious early return, `parent.lastElementChild === cell`, is one a cell
+carrying a mark can never satisfy: `raise` itself put the mark last. Every
+event therefore re-appended the group, and a re-append blurs the cell, and
+`raise` restores the focus it took, and the restore fires `focusin`, which
+raises again. Measured against the unfixed build with a real CDP mouse press on
+a noted day: **2,066 `focusin`s and 66 `pointerover`s for one press, and no
+`click` at all** — the mousedown target was being detached and reattached under
+the pointer for the whole gesture, so the day editor could not be opened from
+any day carrying a note, or, with `questionMarks` on, from any unanswered day.
+`alreadyRaised` walks the exact end state `raise` builds — the cell, then its
+marks, then nothing — rather than counting them or testing `lastElementChild`,
+either of which is satisfiable by an arrangement `raise` would not have
+produced.
+
+Two things about pinning it. The check has to be a **real CDP mouse press**: the
+loop is driven by `pointerover` and `focusin`, neither of which a scripted
+`.click()` dispatches, so a case built on one passes against the unfixed code.
+And it needs the **negative half beside it** — the same press on a day with no
+mark — or a press that opened nothing for an unrelated reason (a mis-hit, a cell
+scrolled out of view) reads as this defect and a build with no fix in it looks
+fixed. `calcheck.mjs`'s note-mark block has both. This is also the shape the
+root `CLAUDE.md` warns about directly: drawing the dot and counting it on
+`data-note-marks` was pinned, and said nothing whatever about whether the day
+underneath could still be opened.
 
 **The search box is OUTSIDE `#grid`, and that is the whole design.**
 `paint()` runs on every keystroke and rebuilds that subtree with

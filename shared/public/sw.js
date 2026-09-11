@@ -294,7 +294,20 @@ const sw = self;
 // can serve the new `ui/detail.js` over a cached old `charts.js` with no such
 // export, a module LINK error before `start()` runs and so outside
 // `#view-error`. No file added or removed, so `SHELL` is unchanged.
-const CACHE_VERSION = 'v31';
+// v32: no new file and no new export — a new IMPORT EDGE and a changed VALUE
+// SHAPE, which is the third case this file's own header rule names. The edge is
+// `ui/dashboard.js` now importing `openDayDialog` from `ui/day-dialog.js`, so a
+// shell holding the new `dashboard.js` over a cache that never fetched
+// `day-dialog.js` is the v30 link error by a different route — `day-dialog.js`
+// was only ever reached through `ui/detail.js`, which is in `SHELL`, so the
+// file is already precached and only the ORDERING is new. The shape is
+// `openDayDialog`'s fifth argument, where `null` now means "the note is not
+// known" rather than "no note": a cached OLD `day-dialog.js` reads that `null`
+// as `''` through its own default and states an empty note on the next Save,
+// which is the #224 destruction the argument exists to prevent. Both halves
+// are exactly why a shell may not be allowed to mix these two modules across
+// this change. No file added or removed, so `SHELL` is unchanged.
+const CACHE_VERSION = 'v32';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

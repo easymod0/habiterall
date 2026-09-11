@@ -367,6 +367,21 @@ export const SETTINGS = {
     type: 'toggle',
     default: false,
   },
+  dayTap: {
+    section: 'Tracking',
+    label: 'Tapping a day',
+    help: 'What a tap on a day square does. The cycle answers in one tap and ' +
+      'says nothing about a note; the editor asks, and is where a note is ' +
+      'written. Holding a square (or Shift+Enter) opens the editor either way.',
+    type: 'select',
+    // The cycle, because it is what a tap has always done: shipping the editor
+    // on would change what every existing account's muscle memory records.
+    default: 'cycle',
+    options: [
+      { value: 'cycle', label: 'Records the next state — one tap' },
+      { value: 'editor', label: 'Opens the day editor, with its note box' },
+    ],
+  },
   atMostUnlogged: {
     section: 'Tracking',
     label: 'On an “at most” habit, a day you never logged',

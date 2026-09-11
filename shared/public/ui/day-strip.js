@@ -54,23 +54,32 @@
  *   it says nothing, which is every tap from a strip — `PUT
  *   /habits/:id/entries/:date` preserves a note it was not asked to change, so
  *   a tap must not move the host's copy either. The day editor states one
- *   (`ui/day-dialog.js`), and `''` is a stated clear. `ui/dashboard.js`'s host
- *   ignores it: nothing opens the day editor over the list.
+ *   (`ui/day-dialog.js`), and `''` is a stated clear — except where that editor
+ *   never learnt what the note says (`noteKnown`), which is absent again for
+ *   the same reason a tap is. BOTH hosts honour it now: the dashboard's moves
+ *   `noteDatesByHabit`, which is the one thing the list holds about notes, so
+ *   an offline save lights or clears the cell's dot with no refetch.
  * @property {() => void} repaint            cheap and local
  * @property {() => Promise<void>} refresh   authoritative reload
  * @property {((habitId: number, date: string) => void)} [editDay]  open the
- *   day editor for this cell, a SECONDARY affordance beside the plain tap
- *   (`dayCells` wires it to a cell's `contextmenu` and Shift+Enter, never the
- *   plain click). Optional, and the two hosts answer it differently on
- *   purpose: `ui/detail.js`'s page holds the whole unwindowed history,
- *   including every note's real text, so it can open the dialog directly and
- *   seed it truthfully. `ui/dashboard.js`'s list holds only the fortnight it
- *   asked for and never a note's TEXT — `/overview` sends only which dates
- *   HOLD one — so opening the editor in place there would seed an empty note
- *   over a day that has one, and `saveDay` always STATES the note on save,
- *   which would destroy it silently on the next Save (#224). Its host routes
- *   through `ui/detail.js`'s own `open(id, {editDay})` instead, which is the
- *   one place holding the note that can seed the dialog honestly.
+ *   day editor for this cell. It is the SECONDARY affordance under the default
+ *   `dayTap: 'cycle'` (`dayCells` wires it to a cell's `contextmenu` and
+ *   Shift+Enter) and the PRIMARY one under `dayTap: 'editor'`, where the plain
+ *   click reaches it too — one method for both, so the two gestures can never
+ *   disagree about what opening the editor on this surface means.
+ *
+ *   Optional, and the two hosts still answer it differently — but no longer in
+ *   WHERE they open it, only in what they have to do to seed it truthfully.
+ *   `ui/detail.js`'s page holds the whole unwindowed history, note text
+ *   included, so it opens the dialog directly. `ui/dashboard.js`'s list holds
+ *   only the fortnight it asked for and never a note's TEXT — `/overview`
+ *   sends only which dates HOLD one — so it FETCHES that habit's entries
+ *   first, and opens with the note declared unknown (`null`, see
+ *   `ui/day-dialog.js`'s `noteKnown`) if it cannot. It used to navigate to the
+ *   habit's own page instead (#297), which was the only way to seed the box
+ *   honestly before `null` was an answer the dialog could take; a whole page
+ *   navigation is a heavy thing to hang on a tap, and it fetched `/stats`
+ *   beside the entries to do it.
  */
 
 import { api } from '/shared/ui/api.js';
@@ -455,16 +464,35 @@ async function writeDay(host, habit, date, to) {
 }
 
 /**
- * The tap cycle, or the amount dialog.
+ * The tap cycle, the amount dialog, or the day editor.
  *
  * Takes a habit ID rather than the habit for the reason `counting` does: a
  * refetch can replace every habit object between the cell being built and the
  * cell being pressed, and writing against an orphan leaves the repaint drawing
  * the old value.
+ *
+ * **`dayTap` is asked FIRST, before the habit type is looked at at all.** The
+ * setting is about what a TAP means, and the two branches below are about what
+ * a HABIT is — collapsing them (asking it only on the boolean arm, say) would
+ * give a measurable habit the amount dialog with no note box under a setting
+ * whose whole point is that the note is reachable. Under `'editor'` both types
+ * open the same `#day-dialog`, which already holds an amount field, the two
+ * choice buttons, Skip, Clear and the note.
+ *
+ * Read through `settings.get` at TAP time and never held, the same rule
+ * `questionMarks` two branches below follows: the settings dialog can change it
+ * while this module is loaded, and every cell in the grid is already built.
  */
 async function onCheckClick(host, habitId, date) {
   const habit = host.habit(habitId);
   if (!habit) return;
+
+  // `host.editDay` is optional, so a host that has none keeps the cycle rather
+  // than making the tap do nothing — a setting cannot be allowed to disable a
+  // grid. Both hosts in this app answer it.
+  if (settings.get('dayTap') === 'editor' && host.editDay) {
+    return void host.editDay(habitId, date);
+  }
 
   try {
     // A habit shown as something to avoid CYCLES rather than asking for a
