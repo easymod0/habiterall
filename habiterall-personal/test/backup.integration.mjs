@@ -543,7 +543,14 @@ try {
 
   /* ---------- case F3: the .db snapshot carries what the JSON export withholds --- */
 
-  const discordWebhookF3 = 'https://discord.com/api/webhooks/123456789012345678/a-secret-token';
+  // The secret segment is named on its own so the assertions below can talk
+  // about the CREDENTIAL rather than about the URL that carries it. Asserting
+  // `text.includes('https://…')` is how CodeQL's
+  // `js/incomplete-url-substring-sanitization` is written — the query is right
+  // that substring-matching a URL is exploitable in a SANITISER, and there is
+  // no sanitiser here, but the shape below is both flag-free and stricter.
+  const discordSecretF3 = 'zz-issue75-unportable-secret-zz';
+  const discordWebhookF3 = `https://discord.com/api/webhooks/123456789012345678/${discordSecretF3}`;
   const putSettingsF3 = await api('/api/settings', {
     method: 'PUT', body: JSON.stringify({ discordWebhook: discordWebhookF3 }),
   });
@@ -565,15 +572,26 @@ try {
   const jsonNameF3 = backupFileName(todayF3, 'json');
   const dbNameF3 = backupFileName(todayF3, 'db');
   const writtenJsonTextF3 = readFileSync(join(dirF3, jsonNameF3), 'utf8');
-  ck('the unportable setting is nowhere in the .json file — the JSON export withholds it',
-    !writtenJsonTextF3.includes(discordWebhookF3), writtenJsonTextF3.slice(0, 400));
+  // The SECRET, not the whole URL: any appearance of the token is a leak, so
+  // this also catches a truncated, re-encoded or reassembled webhook that a
+  // whole-URL match would sail straight past.
+  ck('the unportable credential is nowhere in the .json file — the JSON export withholds it',
+    !writtenJsonTextF3.includes(discordSecretF3), writtenJsonTextF3.slice(0, 400));
 
   const snapshotF3 = new DatabaseSync(join(dirF3, dbNameF3), { readOnly: true });
   try {
     const rowF3 = /** @type {any} */ (
       snapshotF3.prepare('SELECT value FROM settings WHERE key = ?').get('discordWebhook'));
+    // EQUALITY, not containment: the row is selected by its exact key, so the
+    // snapshot must hold exactly what was stored — a stronger claim than
+    // "contains it somewhere", and one with no substring for the URL query to
+    // match. `settings.value` holds a JSON-encoded scalar (the substring form
+    // this replaced hid that: it matched straight through the surrounding
+    // quotes), so decode before comparing rather than comparing to a quoted
+    // literal.
     ck("the unportable setting IS in the .db snapshot's settings table — the whole reason the format exists",
-      rowF3 !== undefined && String(rowF3.value).includes(discordWebhookF3), JSON.stringify(rowF3));
+      rowF3 !== undefined && JSON.parse(String(rowF3.value)) === discordWebhookF3,
+      JSON.stringify(rowF3));
   } finally {
     snapshotF3.close();
   }
