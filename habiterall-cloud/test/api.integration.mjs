@@ -2746,21 +2746,31 @@ console.log('\n--- GET /awards ---');
 
 const getAwards = () => fetch(`${overviewBase}/api/awards`).then((r) => r.json());
 
-// 100 straight completed days: long enough to reach the top streak rung
-// (`SURVIVAL_THRESHOLDS`'s last entry, 100) and to fully contain at least one
-// calendar month with an answer on every day (`coverage`), so the fixture
-// earns at least two award FAMILIES — a fixture earning exactly one cheap
-// award cannot see a narrowed window changing anything (M1). Written directly
-// through `withUser` rather than 100 individual `PUT`s, the way `RECENT_DAYS`
-// above is.
+// skipDays back on for this fixture — a skip inside the run below is what
+// makes M2 (dropping `skipDays` from the `/awards` `computeAwards` call)
+// visible in the deepEqual: with the setting off there is no rest award on
+// either side to diverge over. An earlier block above deliberately left it
+// off, so this cannot be assumed still to hold here.
+await setSkipDays(true);
+
+// 100 days, one of them a deliberate skip that BRIDGES rather than breaks the
+// run (skips are transparent to `computeStreaks`): long enough to reach the
+// top streak rung (`SURVIVAL_THRESHOLDS`'s last entry, 100), to fully contain
+// at least one calendar month with an answer on every day (`coverage`), and to
+// earn a `rest` award now that `skipDays` is on — three award FAMILIES, so the
+// fixture is nowhere near the trap of earning exactly one cheap award, which
+// could not see a narrowed window (M1) or a dropped setting (M2) changing
+// anything. Written directly through `withUser` rather than 100 individual
+// `PUT`s, the way `RECENT_DAYS` above is.
 const marathon = await postHabit({ name: 'Marathon', type: 'boolean' });
 await withUser(alice, async (db) => {
   for (let i = 0; i < 100; i++) {
+    const skip = i === 10;
     await db.query(
       `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
-       VALUES ($1,$2,$3,2,'','')
-       ON CONFLICT (habit_id, date) DO UPDATE SET value = excluded.value`,
-      [marathon.id, alice, isoDaysAgo(i)]
+       VALUES ($1,$2,$3,$4,$5,'')
+       ON CONFLICT (habit_id, date) DO UPDATE SET value = excluded.value, status = excluded.status`,
+      [marathon.id, alice, isoDaysAgo(i), skip ? 0 : 2, skip ? 'skip' : '']
     );
   }
 });
@@ -2788,6 +2798,13 @@ ck('the fixture earned at least one award',
   fromAwardsRoute.length > 0, JSON.stringify(fromAwardsRoute));
 ck('  from at least two different families',
   new Set(fromAwardsRoute.map((a) => a.family)).size >= 2,
+  JSON.stringify(fromAwardsRoute.map((a) => a.family)));
+// Worthless as a check on M2 (dropping `skipDays` from `/awards`'s
+// `computeAwards` call) unless a `rest` award is actually in the compared
+// array — with `skipDays` off there is nothing here for the two routes to
+// diverge over.
+ck('  a rest award is genuinely in play',
+  fromAwardsRoute.some((a) => a.family === 'rest'),
   JSON.stringify(fromAwardsRoute.map((a) => a.family)));
 ck('/awards and /habits/:id/stats report the identical award array',
   JSON.stringify(fromAwardsRoute) === JSON.stringify(fromStatsRoute),
