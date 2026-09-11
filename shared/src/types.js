@@ -305,10 +305,17 @@
  * completion, reported apart from `gaps`/`mean`/`spread` because it has not
  * closed yet — the same distinction `Resilience`'s `openRun` draws against a
  * closed lapse.
+ *
+ * **Skips are transparent to `gaps`/`mean`/`spread` only, and not to
+ * `openGap` (#160).** The three CLOSED figures are about rhythm, so a
+ * planned rest day inside a run of completions must not widen the gap either
+ * side of it; `openGap` is read as a plain factual answer to "when did I
+ * last do this", so it counts every CALENDAR day since the last completion,
+ * skips included.
  * @typedef {object} Regularity
  * @property {boolean} applicable      false only for an at-most habit
- *   resolved to `success` (`unansweredCounts`) — every figure below is null
- *   in that case
+ *   resolved to `success` (`unansweredCounts`) — `gaps` is 0 and the three
+ *   figures below it are null in that case
  * @property {number} gaps             count of CLOSED gaps between
  *   completions; skipped days are transparent and widen nothing
  * @property {number|null} mean        unrounded mean of the closed gaps, in
@@ -316,8 +323,9 @@
  * @property {number|null} spread      unrounded population standard
  *   deviation of the closed gaps, in days; null when `gaps < 2` — the SD of
  *   one sample is 0, which would claim perfect regularity from a single gap
- * @property {number|null} openGap     days since the last completion, not
- *   yet a closed gap; null when the habit has never been completed at all
+ * @property {number|null} openGap     CALENDAR days since the last
+ *   completion (skips included — see above), not yet a closed gap; null when
+ *   the habit has never been completed at all
  */
 
 /**

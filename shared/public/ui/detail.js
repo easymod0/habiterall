@@ -1123,8 +1123,22 @@ function buildStrengthCard({ habit, stats, color, chartWidth }) {
   if (trend && trend.change != null) {
     const pts = Math.round(trend.change * 100);
     tiles.append(tile(pts > 0 ? `+${pts}` : String(pts), `Points, last ${trend.days} days`));
+  } else if (trend) {
+    // `minWindow` names an honest day count ONLY when it is the reason the
+    // figure is withheld, i.e. the habit has not yet accumulated that many
+    // SCORED days at all (#160: `trendOver`'s floor is now on applied EWMA
+    // steps, not calendar days, so a skip-heavy habit can clear `minWindow`
+    // calendar days and still be withheld — "Needs 87 days" would then be
+    // false, since it already has more than that). `Number.isFinite` guards
+    // `trendOver`'s two defensive returns, which hand back `Infinity` for an
+    // unreachable-today `alpha` — "Needs Infinity days" is not the readable
+    // failure that comment claims it is.
+    const label = (Number.isFinite(trend.minWindow) && stats.scores.length < trend.minWindow)
+      ? `Needs ${trend.minWindow} days`
+      : 'Too new to tell';
+    tiles.append(tile('—', label));
   } else {
-    tiles.append(tile('—', trend ? `Needs ${trend.minWindow} days` : 'No trend yet'));
+    tiles.append(tile('—', 'No trend yet'));
   }
   scoreCard.append(tiles);
 

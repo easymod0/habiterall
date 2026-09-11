@@ -577,7 +577,15 @@ export function computeScores(habit, entryMap, start, end, unlogged = UNLOGGED_D
  * and `test/stats.test.js`'s counting-getter test pins that at exactly two
  * invocations per `computeStats`/`summaryStats` call.
  *
- * @returns {{scores: Array<{date: string, score: number}>, alpha: number}}
+ * Also returns `steps`, parallel to `scores`: `steps[i]` is the CUMULATIVE
+ * count of EWMA updates actually applied up to and including index `i`. A
+ * calendar day and an applied step are the same count only for a habit with
+ * no skips — a skip-only window leaves `score` untouched (below) while the
+ * calendar day still elapses, so `trendOver`'s floor has to be asked of this,
+ * not of `scores.length` (#160).
+ *
+ * @returns {{scores: Array<{date: string, score: number}>, alpha: number,
+ *            steps: number[]}}
  */
 function scoresOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
                     creditFrom = undefined) {
@@ -596,7 +604,9 @@ function scoresOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
   );
 
   const out = [];
+  const steps = [];
   let score = 0;
+  let stepCount = 0;    // EWMA updates actually applied so far
   let windowSum = 0;   // running total of credit over the trailing window
   let windowSkips = 0; // skipped days currently inside the window
 
@@ -617,15 +627,19 @@ function scoresOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
     const activeDays = windowDays - windowSkips;
     const target = num * (activeDays / den);
 
-    // A window of nothing but skips leaves the score untouched.
+    // A window of nothing but skips leaves the score untouched — and leaves
+    // `stepCount` untouched with it, which is the whole reason it lives in
+    // this branch rather than in the loop unconditionally.
     if (activeDays > 0 && target > 0) {
       const adherence = Math.min(1, windowSum / target);
       score = score * alpha + adherence * (1 - alpha);
+      stepCount++;
     }
 
     out.push({ date: dates[i], score: Number(score.toFixed(6)) });
+    steps.push(stepCount);
   }
-  return { scores: out, alpha };
+  return { scores: out, alpha, steps };
 }
 
 /* ---------- trend ---------- */
@@ -671,15 +685,32 @@ export const TREND_CONVERGED_SCORE = 0.95;
  * why `minWindow` always rides on the payload even when `change` is withheld:
  * the tile can say WHY rather than just going blank.
  *
+ * **The gate is on applied EWMA STEPS, not on calendar days (#160's fix).**
+ * The bias in `change` is `alpha^(steps at the lookback point) -
+ * alpha^(steps at the last point)`, so it is bounded only by
+ * `alpha^(steps at the lookback point)` — a skip applies no step, so a
+ * skip-heavy stretch (a weekend-skipper on `skipDays`, or a long run of
+ * leading skips) can let a window's CALENDAR length clear `minWindow` while
+ * the EWMA behind the lookback point has barely moved. Measured against the
+ * old `scores.length < minWindow` gate: a daily habit with 57 leading skip
+ * days and then perfect, over an 87-day window, read "+80 points this
+ * month" — a bigger false swing than the artefact this floor exists to
+ * bound. `steps[i]` (`scoresOver`) is the cumulative count of EWMA updates
+ * actually applied through index `i`, which equals the calendar day count
+ * exactly for a habit with no skips — so this changes nothing for the
+ * ordinary habit and withholds exactly the shape above.
+ *
  * @param {Array<{date: string, score: number}>} scores oldest first, from the
  *   same `scoresOver` call the returned `alpha` came from.
  * @param {number} alpha the decay constant `scoresOver` computed for this
  *   habit's frequency — passed in rather than re-read from the habit, so this
  *   is not a third site reading `freq_numerator`/`freq_denominator` (see the
  *   note on `scoresOver`).
+ * @param {number[]} steps cumulative applied-step counts, parallel to
+ *   `scores`, from the same `scoresOver` call.
  * @returns {{days: number, change: number|null, minWindow: number}}
  */
-function trendOver(scores, alpha) {
+function trendOver(scores, alpha, steps) {
   // `alpha` is checked BEFORE `minWindow` is derived from it, and the order is
   // the whole of why this is two statements rather than one. `Math.log` of a
   // non-positive or out-of-range alpha yields NaN or Infinity, and a NaN
@@ -693,12 +724,16 @@ function trendOver(scores, alpha) {
   }
 
   const converged = Math.log(1 - TREND_CONVERGED_SCORE) / Math.log(alpha);
-  const minWindow = Math.ceil(converged) + TREND_LOOKBACK_DAYS;
+  const convergedSteps = Math.ceil(converged);
+  const minWindow = convergedSteps + TREND_LOOKBACK_DAYS;
 
   if (!Number.isFinite(minWindow) || !Number.isInteger(minWindow) || minWindow <= 0) {
     return { days: TREND_LOOKBACK_DAYS, change: null, minWindow: Infinity };
   }
 
+  // A cheap fast path only: `scores.length` is an upper bound on any date's
+  // step count (a step cannot outrun the calendar), so falling short here is
+  // conclusive. Clearing it is not — the step gate below is what decides.
   if (scores.length < minWindow) {
     return { days: TREND_LOOKBACK_DAYS, change: null, minWindow };
   }
@@ -711,10 +746,18 @@ function trendOver(scores, alpha) {
   // that deletes a calendar day (`Pacific/Apia`) makes the two disagree about
   // which element is 30 days back.
   let found = null;
+  let foundIndex = -1;
   for (let i = scores.length - 1; i >= 0; i--) {
-    if (scores[i].date <= target) { found = scores[i]; break; }
+    if (scores[i].date <= target) { found = scores[i]; foundIndex = i; break; }
   }
   if (!found) return { days: TREND_LOOKBACK_DAYS, change: null, minWindow };
+
+  // The floor that actually bounds the bias: the EWMA must have taken at
+  // least `convergedSteps` updates BY the lookback point, not merely that
+  // many calendar days must have gone by since. See the doc comment above.
+  if (steps[foundIndex] < convergedSteps) {
+    return { days: TREND_LOOKBACK_DAYS, change: null, minWindow };
+  }
 
   // Unrounded — the tile rounds to points, exactly as `recovery.averageLength`
   // and `recovery.rate` are rounded at the tile and not here.
@@ -741,10 +784,21 @@ function trendOver(scores, alpha) {
  * `at_most_unlogged` beating the account setting) cannot drift from the one
  * place it is decided.
  *
- * **Skips are transparent**, exactly as `computeMissRuns`/`computeStreaks`
- * treat them: a planned rest day inside a run of completions must not widen
- * the gap either side of it, or `skipDays` used correctly reports as
- * irregular for doing the thing skips are for.
+ * **Skips are transparent to the CLOSED gaps only, and that asymmetry is
+ * deliberate (#160).** `gaps`, `mean` and `spread` treat a skip exactly as
+ * `computeMissRuns`/`computeStreaks` do: a planned rest day inside a run of
+ * completions must not widen the gap either side of it, or `skipDays` used
+ * correctly reports as irregular for doing the thing skips are for — those
+ * three are about RHYTHM, and inflating a gap for a scheduled rest is
+ * precisely what the transparency exists to prevent. `openGap` is different:
+ * it is read as a plain factual answer to "when did I last do this", so it
+ * counts every CALENDAR day since the last completion, skips included — a
+ * habit completed six days ago and resting through every one of them since
+ * must not render "0 days since last" merely because none of the six was a
+ * miss. It is therefore the position in `dates` of the last completion,
+ * never a `done !== null` counter: the index difference stays right under a
+ * zone that deleted or repeated a calendar day, where subtracting the two
+ * date STRINGS would not.
  *
  * **The last gap is OPEN and is not counted as a gap yet** — the same
  * distinction `computeRecovery` draws between a closed lapse and `openRun`,
@@ -778,8 +832,10 @@ function regularityOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
   const closedGaps = [];
   let sinceLast = 0;
   let everCompleted = false;
+  let lastCompletedIndex = -1; // index into `dates`, for the CALENDAR openGap below
 
-  for (const date of dates) {
+  for (let i = 0; i < dates.length; i++) {
+    const date = dates[i];
     const done = isCompleted(habit, entryMap.get(date), unlogged, answeredBy(date, creditFrom));
     if (done === null) continue; // a skip states nothing about the gap it sits inside
 
@@ -788,6 +844,7 @@ function regularityOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
       if (everCompleted) closedGaps.push(sinceLast);
       sinceLast = 0;
       everCompleted = true;
+      lastCompletedIndex = i;
     }
   }
 
@@ -802,7 +859,12 @@ function regularityOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
     spread = Math.sqrt(variance);
   }
 
-  return { applicable: true, gaps, mean, spread, openGap: everCompleted ? sinceLast : null };
+  // CALENDAR days since the last completion — see the doc comment above for
+  // why this one figure is not skip-transparent. `dates.length - 1` is the
+  // index of the last date in the (already-clamped) window.
+  const openGap = everCompleted ? (dates.length - 1) - lastCompletedIndex : null;
+
+  return { applicable: true, gaps, mean, spread, openGap };
 }
 
 /* ---------- on pace ---------- */
@@ -1941,7 +2003,7 @@ export function computeStats(habit, entries,
   // day" — and a history bar, a weekday rate or a times-per-week bucket
   // painting a day as kept that the streak beside it counts as missed is that
   // same disagreement one surface further out.
-  const { scores, alpha } = scoresOver(habit, entryMap, dates, unlogged, creditFrom);
+  const { scores, alpha, steps } = scoresOver(habit, entryMap, dates, unlogged, creditFrom);
 
   // Built ONCE (#219) and folded two ways: `computeStreaks` and
   // `computeMissRuns`/`computeResilience` each used to build an identical
@@ -1969,7 +2031,7 @@ export function computeStats(habit, entries,
   return {
     score: scores.length ? scores[scores.length - 1].score : 0,
     scores,
-    trend: trendOver(scores, alpha),
+    trend: trendOver(scores, alpha, steps),
     regularity: regularityOver(habit, entryMap, dates, unlogged, creditFrom),
     streaks,
     currentStreak: currentStreak(streaks, end),

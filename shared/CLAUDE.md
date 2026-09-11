@@ -703,10 +703,16 @@ frequency card does not already say; the population standard deviation of the
 closed gaps is what tells the two apart, and `regularityOver` withholds it
 under **two** closed gaps rather than one, because the population SD of a
 single sample is 0, which would claim perfect regularity from one data point.
-Skips are transparent to the walk, exactly as `computeMissRuns`/`computeStreaks`
-treat them, so a planned rest day inside a run of completions does not widen
-the gap on either side of it. The last gap is OPEN and is not counted as a gap
-yet — reported separately as `openGap`, the same distinction `computeRecovery`
+Skips are transparent to the CLOSED gaps, exactly as `computeMissRuns`/
+`computeStreaks` treat them, so a planned rest day inside a run of completions
+does not widen the gap on either side of it — `gaps`, `mean` and `spread` are
+about rhythm, and that is the whole of what the transparency protects. `openGap`
+does NOT share it (#160): it is read as a plain factual answer to "when did I
+last do this", so it counts every CALENDAR day since the last completion, skips
+included — a habit last completed six days ago and resting through every one of
+them since must not render "0 days since last" merely because none of the six
+was a miss. The last gap is OPEN and is not counted as a closed gap yet —
+reported separately as `openGap`, the same distinction `computeRecovery`
 draws between a closed lapse and `openRun`. And `regularityOver` is withheld
 outright (`applicable: false`) under the same gate the awards card already
 withholds its own card under — an at-most habit resolved to `success`, asked

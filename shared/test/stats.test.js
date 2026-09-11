@@ -1551,26 +1551,54 @@ test('a habit that genuinely got worse reports a negative change', () => {
 });
 
 test('the lookback is indexed by DATE, not by position', () => {
-  // Same entries, once with no `start` (scores[0] sits at the earliest row)
-  // and once with an explicit `start` that narrows the window — moving
-  // scores[0] forward while leaving the window past the 87-day floor. In
-  // both cases the trend must be the change since exactly 30 CALENDAR days
-  // before the last score, which this asserts by recomputing that figure
-  // independently from `stats.scores` itself rather than trusting the
-  // field.
-  const end = '2026-06-30';
-  const wideStart = addDays(end, -199); // 200 days
-  const rows = dateRange(wideStart, end).map((date) => ({ date, value: YES, status: '' }));
+  // The old version of this test built a CONTIGUOUS `dates` array in both of
+  // its branches, so `scores[scores.length - 1 - 30]` and "the last point
+  // dated <= addDays(last.date, -30)" picked the identical element — the
+  // issue's own named wrong version (`scores.length - 31`) is arithmetically
+  // `scores.length - 1 - 30`, precisely the index neither branch could tell
+  // apart from the right one. This fixture's window SPANS 2011-12-30, which
+  // `Pacific/Apia` deleted from its calendar outright, so under that one zone
+  // `scores` comes back ONE ELEMENT SHORTER than the calendar span — the one
+  // input that actually separates a date-indexed scan from a positional one.
+  // `test/timezones.test.js` already re-runs this whole file under six fixed
+  // zones, Apia among them, so this fixture needs no new infrastructure to
+  // make the sweep bite.
+  const end = '2012-01-20';
+  const start = '2011-10-15'; // 98 calendar days: past the 87-day floor with room
+  const rows = dateRange(start, end).map((date) => ({ date, value: YES, status: '' }));
+  const stats = computeStats(boolHabit, rows, { end });
 
-  const narrowStart = addDays(end, -119); // 120 days — still past the 87-day floor
+  // Computed from `stats.scores` itself rather than trusted from the field —
+  // the score at the point with the GREATEST date that is <= 30 days before
+  // the last one. This expression is correct in every zone; only a
+  // positional implementation disagrees with it, and only under Apia.
+  const last = stats.scores.at(-1);
+  const cutoff = addDays(last.date, -30);
+  let found = null;
+  for (let i = stats.scores.length - 1; i >= 0; i--) {
+    if (stats.scores[i].date <= cutoff) { found = stats.scores[i]; break; }
+  }
+  assert.ok(found, `expected a score dated on or before ${cutoff}`);
+  assert.equal(stats.trend.change, last.score - found.score);
 
-  for (const opts of [{ end }, { start: narrowStart, end }]) {
-    const stats = computeStats(boolHabit, rows, opts);
-    const target = addDays(end, -30);
-    const found = stats.scores.find((p) => p.date === target);
-    assert.ok(found, `expected a score dated ${target}`);
-    const expected = stats.scores.at(-1).score - found.score;
-    assert.equal(stats.trend.change, expected);
+  // The `?start=` branch below is kept beside it — it pins a different thing
+  // (that narrowing the window does not move the answer) and is still worth
+  // having, but it CANNOT by itself catch the positional bug: narrowing
+  // moves `scores[0]` forward and leaves the last 31 elements, and so this
+  // comparison, untouched. That is exactly why the Apia fixture above is a
+  // separate case rather than a replacement for this one.
+  const wideEnd = '2026-06-30';
+  const wideStart = addDays(wideEnd, -199); // 200 days
+  const wideRows = dateRange(wideStart, wideEnd).map((date) => ({ date, value: YES, status: '' }));
+  const narrowStart = addDays(wideEnd, -119); // 120 days — still past the 87-day floor
+
+  for (const opts of [{ end: wideEnd }, { start: narrowStart, end: wideEnd }]) {
+    const s = computeStats(boolHabit, wideRows, opts);
+    const target = addDays(wideEnd, -30);
+    const f = s.scores.find((p) => p.date === target);
+    assert.ok(f, `expected a score dated ${target}`);
+    const expected = s.scores.at(-1).score - f.score;
+    assert.equal(s.trend.change, expected);
   }
 });
 
@@ -1598,6 +1626,51 @@ test('TREND_CONVERGED_SCORE is the top strength band', () => {
   assert.equal(TREND_CONVERGED_SCORE, STRENGTH_BANDS[STRENGTH_BANDS.length - 1]);
   assert.equal(TREND_CONVERGED_SCORE, 0.95);
   assert.equal(STRENGTH_BANDS[STRENGTH_BANDS.length - 1], 0.95);
+});
+
+test('a skip-heavy habit does not clear the floor on calendar days alone', () => {
+  // 57 leading skip days then perfect, over an 87-day window: the CALENDAR
+  // day count clears `minWindow` (87), but only 30 of those days ever
+  // applied an EWMA step — far short of the 57 steps convergence needs. The
+  // old gate (`scores.length < minWindow`) let this through and reported
+  // "+80 points this month" on a habit kept perfectly on every day it was
+  // not resting — the exact defect the floor exists to prevent (#160).
+  const end = '2026-06-30';
+  const start = addDays(end, -86); // 87 days inclusive
+  const rows = dateRange(start, end).map((date, i) => (
+    i < 57 ? { date, value: 0, status: 'skip' } : { date, value: YES, status: '' }
+  ));
+  const stats = computeStats(boolHabit, rows, { end });
+  assert.equal(stats.trend.change, null);
+});
+
+test('the weekend-skipper is the ordinary case', () => {
+  // A daily boolean habit, completed every weekday and `status: 'skip'`
+  // every Saturday and Sunday, over the ordinary 87-day floor: this is not a
+  // contrived fixture, it is `skipDays` used exactly as intended by an
+  // account that rests on weekends. The old gate reported "+8 points" here.
+  const end = '2026-06-30';
+  const weekendSkipperRows = (windowDays) => {
+    const start = addDays(end, -(windowDays - 1));
+    return dateRange(start, end).map((date) => {
+      const dow = fromISO(date).getDay(); // 0 = Sunday, 6 = Saturday; fromISO is LOCAL midnight
+      return (dow === 0 || dow === 6)
+        ? { date, value: 0, status: 'skip' }
+        : { date, value: YES, status: '' };
+    });
+  };
+
+  assert.equal(computeStats(boolHabit, weekendSkipperRows(87), { end }).trend.change, null);
+
+  // Widened until it DOES report — 111 is measured by experiment (see the
+  // scratch script in the fix's report), not derived from any constant here,
+  // and is pinned as a literal for exactly that reason. 110 must still
+  // withhold, or this boundary is not the one the test claims to pin.
+  assert.equal(computeStats(boolHabit, weekendSkipperRows(110), { end }).trend.change, null);
+  const wide = computeStats(boolHabit, weekendSkipperRows(111), { end });
+  assert.notEqual(wide.trend.change, null);
+  assert.ok(wide.trend.change * 100 <= 5,
+    `expected the reported change bounded at 5 points, got ${wide.trend.change * 100}`);
 });
 
 /* ---------- regularity: the spread of the gaps between completions ---------- */
@@ -1688,6 +1761,43 @@ test('the open gap is reported separately and is not counted as a gap', () => {
   assert.equal(stats.regularity.openGap, 6);
   assert.equal(stats.regularity.gaps, 2); // pinned: the open gap is not a third
   assert.equal(stats.regularity.mean, 2);
+});
+
+test('a skip does not shorten the open gap, though it does shorten a closed one', () => {
+  // Complete 2026-06-01, then `status: 'skip'` every day through 06-07 (the
+  // last day of the window): the habit was last done six CALENDAR days ago
+  // and the tile that reads `openGap` says so as a plain fact — "6d since
+  // last" — so a skip-transparent open gap would render "0d" on a day the
+  // habit was last completed nearly a week earlier, which is false (#160).
+  const habit = bool();
+  const rested = computeStats(habit, [
+    { date: '2026-06-01', value: YES, status: '' },
+    { date: '2026-06-02', value: 0, status: 'skip' },
+    { date: '2026-06-03', value: 0, status: 'skip' },
+    { date: '2026-06-04', value: 0, status: 'skip' },
+    { date: '2026-06-05', value: 0, status: 'skip' },
+    { date: '2026-06-06', value: 0, status: 'skip' },
+    { date: '2026-06-07', value: 0, status: 'skip' },
+  ], { end: '2026-06-07' });
+  assert.equal(rested.regularity.openGap, 6);
+
+  // The pair is the assertion: over the SAME skipped stretch, a CLOSED gap
+  // stays skip-transparent, which is the asymmetry this fix is careful not
+  // to erase in the other direction. Complete 06-01, skip 06-02..06-06,
+  // complete 06-07: the gap the two completions bound must still read 1, not
+  // 6, or a planned rest taken through `skipDays` would report as irregular
+  // for doing the thing skips exist for.
+  const closedAcrossSkips = computeStats(habit, [
+    { date: '2026-06-01', value: YES, status: '' },
+    { date: '2026-06-02', value: 0, status: 'skip' },
+    { date: '2026-06-03', value: 0, status: 'skip' },
+    { date: '2026-06-04', value: 0, status: 'skip' },
+    { date: '2026-06-05', value: 0, status: 'skip' },
+    { date: '2026-06-06', value: 0, status: 'skip' },
+    { date: '2026-06-07', value: YES, status: '' },
+  ], { end: '2026-06-07' });
+  assert.equal(closedAcrossSkips.regularity.gaps, 1);
+  assert.equal(closedAcrossSkips.regularity.mean, 1);
 });
 
 test('one gap yields no spread', () => {
