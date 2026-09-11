@@ -383,6 +383,114 @@ what `Grid.nextState` reads. `Widgets.answered` ignores an answer about an OLDER
 day than the record holds — a reminder answered at 00:05 names yesterday and is
 right to, but the widget has moved on.
 
+### The stats widget
+
+**A second provider, `StatsWidget`, over the SAME record store — one habit's
+score, current streak and a seven-day strip, read-only.** Reusing
+`Widgets.Record` rather than adding a second store is the same argument this
+section already makes above: `remap`/`onRestored`, `refreshedOrGone` and the
+encode/decode fail-safes are three hard-won mechanisms, and a second record
+type would have had to re-implement all three — precisely where those bugs
+lived.
+
+**The figures are cached ANSWERS, and mirroring them is the refused option.**
+`score` and `currentStreak` come from `/api/overview`, which already returns
+both per habit, so this widget added no sixth mirror and no `Api.stats()`. What
+it does NOT do is recompute either: the decay behind `score` is Loop's
+`0.5^(sqrt(frequency)/13)`, the most intricate arithmetic in the project, and a
+second implementation would drift from the first invisibly. "Make the strip
+update between syncs" is the version of this argument that will look tempting
+to the next person; the refusal is written as a comment at the one place the
+figures are taken from the fetch (`Widgets.refreshed`), because that is the
+only thing that will stop them.
+
+**The figures are as of `record.date`, on a line a user can see — except
+`record.date` alone cannot answer "are they current".** Same rule as the
+checkmark cell's own note above, and the same precedent behind it: the first
+version of THAT put the explanation in `setContentDescription` alone ("It has
+to be VISIBLE, not just described"), so a stats widget repeating that mistake
+would have been the identical bug on a second surface. But `record.date` names
+the day the ENTRY is about, not when `score`/`currentStreak` were last
+fetched, and `Widgets.answered` can record an answer with no network at all — a
+notification button, its number pad, or the checkmark widget's own tap. A
+morning sync leaves the figures at yesterday's answer; a 9am tap in the shade
+moves the strip to today with no fetch behind it, and `record.date == today`
+then read as "everything here is current" for up to six hours, contradicting
+the strip cell sitting right beside it. `Record.figuresStale` is the second
+flag this needed: set on BOTH of `answered`'s branches — an answer has been
+recorded with no fetch behind it, not "the strip moved", so the branch that
+leaves `date` unchanged (an older-day answer) still sets it — cleared in
+`Widgets.refreshed` (a successful fetch is exactly what makes the figures
+current again), and shown as its own sentence (`stats_figures_behind`) rather
+than the dated one — naming a date would be a false claim when the day itself
+is not stale, only the score and streak are. `WidgetSync.noteRefused` leaves
+the flag untouched rather than setting or clearing it, but not because
+setting it would put the note line on screen: on every path that can produce
+a refusal (the shade, the number pad, a widget's own tap), the `answered`
+that preceded the write already set the flag, so the note line is already
+showing before the refusal ever runs, and leaving it alone changes nothing
+there. The decision only matters on the one path that enqueues without
+calling `noteAnswer` — the list screen's own tap (`MainActivity`). A refusal
+never reached the server, so it is neither evidence the figures are stale nor
+evidence they are current, and a boolean cannot hold "this refusal's own
+answer" apart from "an earlier one still unfetched" — so it is left exactly
+as found, and over-reporting staleness is the fail-safe direction.
+
+**`redraw` and `armMidnight` used to be hard-coded to `HabitWidget` alone, and
+the worse of the two failure modes was not "never redrawn."** Both asked
+`getAppWidgetIds(ComponentName(app, HabitWidget::class.java))` — the checkmark
+provider by name, from before `StatsWidget` existed. Left alone, a stats
+widget would never be redrawn by any of the five triggers, and — the sharper
+bug — with ONLY a stats widget on a home screen, `armMidnight`'s `wanted` read
+false off that same hard-coded question and CANCELLED the one alarm that would
+ever redraw anything at midnight. One helper now answers "the live ids, per
+provider" for both `redraw` and `armMidnight`, so the two cannot drift apart on
+which providers count again, and one alarm still serves both — not a second
+alarm per provider.
+
+**Read-only, deliberately — a tap opens the app on that habit and the widget
+answers nothing.** Its `PendingIntent` needs `data` distinct from every other
+widget's, for the same `filterEquals` reason the alarms above are two
+PendingIntents rather than one (`habiterall://snooze/<id>` vs
+`habiterall://remind/<id>`): extras are ignored by intent equality, so without
+a distinct `habiterall://stats/<widgetId>`, two stats widgets — or a stats
+widget and a checkmark widget for the same habit — would collapse onto one
+PendingIntent.
+
+**The strip is colour-only, and the collapse that comes with that is
+accepted — except for a day the model counts as KEPT.** At ~20dp a cell there
+is no room for `Widgets.markFor`'s glyphs, so `UNKNOWN`, `SKIPPED` and a
+yes/no `NO` all tint to `widget_cell_empty` and the strip does not tell them
+apart. That is accepted, not an oversight: it is a seven-day trend rather than
+a per-day answer, and the per-day answer is one tap away in the app. What the
+strip must not lose is the avoided-habit inversion — a clean day in the
+habit's own colour, a slip in red — which comes free from reusing
+`HabitWidget.fill` rather than writing a second one. The one collapse that is
+NOT accepted is `unloggedIsSuccess`: `Widgets.markFor` already draws a ghost
+`✓` for `state == UNKNOWN && habit.unloggedIsSuccess` on the big cell, because
+on such a habit an unanswered day IS a kept one, not merely an unknown one. A
+strip with no glyph for that state read a full-marks week as a blank one,
+beside a red cell for a day that really was a slip. `HabitWidget.stripFill`
+carries the same arm as the faint alpha variant a numerical partial-credit day
+already uses — no new colour — and lives beside `fill` rather than inside it,
+so the big cell's rendering and its own tests stay untouched; only
+`StatsWidget` calls it. A ghost-kept day and a numerical partial day now read
+identically on the strip, which is a small, deliberate loss next to a kept day
+painting as if nothing happened.
+
+**`gone` hides the figures, not only the strip.** A gone record keeps its last
+`score`/`currentStreak` in storage (`refreshedOrGone` leaves them rather than
+zeroing them), and drawing them beside "Removed" would be exactly the second,
+contradicting claim the strip's own blanking already refuses to make — so the
+score text, the progress bar and the streak are all hidden when
+`record.gone`, leaving only the name and the note line, the same as the
+checkmark widget's own cell does with its one mark.
+
+**It follows the LAUNCHER's light/dark, never the account's `theme` setting.**
+`res/values-night/colors.xml` is the only `values-night` in the app and always
+has been; this is that same behaviour on a second layout, and this paragraph is
+the recorded decision rather than the default nobody chose.
+
 ## The WebView back stack
 
 **A view is named by a fragment, never a path** (`#/habit/42`), because that

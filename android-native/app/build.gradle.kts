@@ -177,4 +177,9 @@ dependencies {
     // the unit tests inflate.
     debugImplementation("androidx.compose.ui:ui-test-manifest")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+    // A real local server for `WidgetSync.refreshFromServer` to hit, so the
+    // request it makes can be read back (the query string) rather than
+    // trusted from the call site. Pinned to the same version as the `okhttp`
+    // implementation dependency above, which is what it embeds a client for.
+    testImplementation("com.squareup.okhttp3:mockwebserver:5.5.0")
 }

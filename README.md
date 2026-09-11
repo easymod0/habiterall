@@ -1539,7 +1539,7 @@ Two options, in increasing order of effort:
 | | What you get | Needs |
 |---|---|---|
 | **Add to Home Screen** | The full app, offline, no browser chrome | Nothing — HTTPS |
-| **[Native app](android-native/README.md)** | **Notification actions** — answer Yes / No / a count from the shade — plus reminders that fire offline and a plain-http LAN address | Download the APK from [Releases](../../releases) |
+| **[Native app](android-native/README.md)** | **Notification actions** — answer Yes / No / a count from the shade — plus reminders that fire offline, two home-screen widgets (a one-tap habit and a read-only score/streak/strip), and a plain-http LAN address | Download the APK from [Releases](../../releases) |
 
 The native client works against **either edition**. It asks the server how it
 signs people in and shows whichever it reports: a username and password form for

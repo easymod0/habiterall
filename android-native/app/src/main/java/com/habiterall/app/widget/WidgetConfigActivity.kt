@@ -28,7 +28,10 @@ import java.time.LocalDate
  *
  * The fetch is the overview rather than the habit list, so the widget can be
  * drawn correctly the instant it is placed instead of waiting for a refresh to
- * tell it what today holds.
+ * tell it what today holds. It asks for [Widgets.MAX_STRIP_DAYS], not one day
+ * — a freshly placed STATS widget needs the whole strip populated on the
+ * spot, and the checkmark widget draws no differently off a wider window than
+ * it did off a narrow one, so there is no cost to widening the fetch for both.
  */
 class WidgetConfigActivity : ComponentActivity() {
 
@@ -67,7 +70,7 @@ class WidgetConfigActivity : ComponentActivity() {
             }
 
             val habits = withContext(Dispatchers.IO) {
-                runCatching { api.overview(days = 1).habits.filter { !it.archived } }
+                runCatching { api.overview(days = Widgets.MAX_STRIP_DAYS).habits.filter { !it.archived } }
                     .getOrNull()
             }
             if (habits == null) {

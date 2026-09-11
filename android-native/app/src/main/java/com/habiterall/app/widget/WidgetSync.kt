@@ -79,11 +79,19 @@ object WidgetSync {
      * One request, and only when a widget exists — the overview rather than the
      * habit list because it carries the DAYS, which is the half a widget is
      * about.
+     *
+     * [Widgets.MAX_STRIP_DAYS], not `1`: this is the six-hourly heartbeat
+     * (`Reminders.ScheduleWorker`) that is the stats widget's strip's own
+     * refresh, and a one-day window silently yields a strip [Widgets.encodeHistory]
+     * can put nothing but "unknown" in — the checkmark widget's one cell never
+     * noticed because it only ever reads `today`. [refreshFrom] itself is left
+     * asking nothing of its own: the list's fetch (its other caller) already
+     * asks for a far larger window, and narrowing this call is enough.
      */
     suspend fun refreshFromServer(context: Context, api: Api) {
         val app = context.applicationContext
         if (runCatching { Settings(app).cachedWidgets() }.getOrDefault(emptyList()).isEmpty()) return
-        val data = runCatching { api.overview(days = 1) }.getOrNull() ?: return
+        val data = runCatching { api.overview(days = Widgets.MAX_STRIP_DAYS) }.getOrNull() ?: return
         refreshFrom(app, data.habits)
     }
 
@@ -117,6 +125,31 @@ object WidgetSync {
                 Settings(app).updateWidgets { records ->
                     records.map {
                         if (it.habitId == habitId && it.date == date) {
+                            // NOT `figuresStale = true`, on purpose — but not
+                            // because setting it would put the note line on
+                            // screen: on every path that can reach a refusal
+                            // (the shade's buttons, the number pad, a widget's
+                            // own tap), the `noteAnswer`/`Widgets.answered`
+                            // that preceded the write already set the flag,
+                            // so `stats_figures_behind` is already showing
+                            // before this ever runs, and leaving it alone
+                            // changes nothing there. The one path this
+                            // decision is not a no-op for is `MainActivity`'s
+                            // list-screen tap, which enqueues without calling
+                            // `noteAnswer` at all.
+                            //
+                            // A refusal never reached the server, so it moved
+                            // none of the server's figures — it is neither
+                            // evidence they are behind nor evidence they are
+                            // current. A boolean cannot distinguish "the
+                            // answer THIS refusal just rolled back" from "an
+                            // earlier answer that landed and has not been
+                            // re-fetched since", so the flag is left exactly
+                            // as found rather than set or cleared —
+                            // over-reporting staleness is the fail-safe
+                            // direction, and clearing it here could erase a
+                            // genuine staleness this refusal knows nothing
+                            // about.
                             it.copy(value = null, skip = false)
                         } else {
                             it
