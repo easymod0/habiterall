@@ -197,6 +197,14 @@ into one screen, and the number of columns follows the width you have.
 
 Plus current streak, best streak, and total completions at a glance.
 
+**History**, **Strength** and **Times per week** each carry one more figure now:
+how much of the whole window you've actually answered, not just the months
+that fit inside it whole; which way the strength curve has moved over the last
+30 days, once it's had long enough to say anything trustworthy at all; and how
+evenly your completions land rather than just how many of them there are —
+Monday/Wednesday/Friday and three days in a row hit the exact same weekly
+count, and only one of them keeps breaking.
+
 <div align="center">
 <img src="docs/screenshots/statistics.png" width="820"
      alt="A habit's detail view: strength 96%, current streak 15, best streak 29, 385 total done; the strength curve holding above 80% across five months; a fourteen-month calendar heatmap; and the ten best streaks listed by date, newest first.">
