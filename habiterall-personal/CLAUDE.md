@@ -288,3 +288,100 @@ stop. `test/browser-fleet.mjs` is the script; the runner itself is shared.
 
 Your data is a single file at `data/habiterall.db` — back it up by copying it,
 or use `GET /api/export`.
+
+## Scheduled backups (issue #75)
+
+`backup.js`'s periodic job rides `notifier.js`'s existing one-minute tick
+(`startNotifier`'s `onTick` hook) rather than starting a second timer — the
+process gets one timer, full stop. That has a real consequence for
+`HABITERALL_NOTIFY=off`: with reminders off the tick used to not exist at all,
+which would have meant a configured backup silently never ran on an instance
+that had turned reminders off for an unrelated reason. `notifier.js`'s `start`
+now keeps the tick alive whenever a backup hook is present, feeding it
+`collect: () => []` so no reminder is ever considered — the tick runs for the
+backup's sake alone.
+
+`backup_status` holds one row and the date it records is the date the run
+**began**, not the date of the last attempt. The latter would be a write every
+tick — 1,440 a day for a job that runs once — and the run's start date is also
+exactly the dedupe key `dueBackup` needs: claim the day first, and a process
+killed mid-run leaves the honest `'running'` state behind rather than a stale
+`'ok'`.
+
+`backup_status.error` is a short CLASSIFICATION (`reportableError` in
+`backup.js`), never the raw error message — a Node `fs` error's `.message`
+embeds the path it operated on, and the directory is exactly what
+`GET /api/backup/status` promises never to disclose. The full message still
+goes to the server's own log at `error`, which is the operator's log and
+where the detail belongs.
+
+It is a table and not a setting on purpose, for the same reason
+`server_secrets` and `auth_credentials` are not: this is the server reporting
+on itself, never sent by the client and never carried by a backup — a backup
+destination inside a backup would be both a leak (the server's own filesystem
+layout) and a loop (restoring the file would restore the setting that named
+where to restore it from). `GET /api/backup/status` therefore answers with no
+directory path at all, only a basename for `file` — the operator chose the
+directory in their own compose file and does not need the app to hand it back,
+and disclosing a server filesystem path buys nothing on an edition whose
+password is optional.
+
+A day whose run FAILED is not retried until the next local date: the row
+claims the day before the attempt, and `dueBackup`'s dedupe is the date alone —
+it cannot tell a failed attempt from a successful one, only that today has
+already been tried. The trade is one lost night against a status write on
+every one of the 1,440 ticks a day, and the failure is not silent in the
+meantime — it is visible in the dialog (`GET /api/backup/status`) until the
+next day's run repairs it or an operator does.
+
+**`HABITERALL_BACKUP_FORMAT` adds a second artefact beside the JSON export,
+never replaces it as the reviewed default.** `json` stays the default so
+phase one's behaviour is unchanged for every existing install; `db` and `both`
+are opt-in. The mechanism is SQLite's own `VACUUM INTO` — one statement, WAL-
+aware (it captures rows still resident in the write-ahead log), no dependency
+added — rather than a file copy, which would need the `.db`/`-wal`/`-shm`
+trio and a caller careful about when it is safe to read them.
+
+**The path is a BOUND parameter, `db.prepare('VACUUM INTO ?').run(path)`,
+never string concatenation.** The directory is operator-controlled, so
+building the statement by concatenation would make a quote in the path a
+SQL-injection surface — this is not a style preference.
+
+**`VACUUM INTO` refuses a target that already exists**, so a stale `.db.tmp`
+left by a crashed previous run would otherwise break every future snapshot
+permanently; the write unlinks one, best effort, before ever calling it.
+
+**`VACUUM INTO` blocks the event loop, and that changes a phase-one premise.**
+`node:sqlite` is synchronous, so a `.db` snapshot stalls this whole server for
+as long as the clone takes. Phase one justified awaiting the backup hook
+inside `startNotifier`'s `running` guard on the grounds that the write was
+"synchronous and measured in milliseconds" — true of the JSON export, **not**
+true of `format: db` or `both` on a large database. Single-user personal at
+03:00 makes the blast radius acceptable and the cost is unmeasured at size;
+this is also the reason cloud's dump runs as a separate child process rather
+than a statement inside the app.
+
+**Retention always covers BOTH families, `kinds: ['json', 'db']`, regardless
+of which formats this run wrote** — never the cloud-only `sql` family, which a
+personal instance must not touch even if someone points both editions at one
+directory. An operator who switches `both` -> `json` must not find `.db` files
+piling up forever with nothing managing them; keeping the prune wide is what
+makes format a free choice rather than one that leaves cleanup behind.
+
+**A `.db` snapshot is credential-bearing where the JSON export is not.** The
+JSON export already carries the habits (archived included), the categories and
+the portable settings — a `.db` snapshot's real addition is the settings that
+export deliberately withholds (`notifyChannels`, `discordWebhook`,
+`discordChannelId`, `discordUserId`, `notifyTimezone`, `ntfyTopicUrl`,
+`ntfyToken`) and the tables JSON never reaches at all: `auth_credentials` (the
+password hash), `server_secrets` (the session secret), `sessions`,
+`notify_log`, `notify_status`, `device_clock`, `backup_status` itself. That is
+a real cost to say plainly, not just a capability: treat a `.db` snapshot like
+the database, not like the portable export.
+
+**Both artefacts are created mode `0600`** (fix round, issue #75) — the JSON
+export at creation (`writeFileSync(..., { mode: 0o600 })`) and the `.db`
+snapshot via `chmodSync` on the temporary file BEFORE the rename, since SQLite
+creates the file itself and the mode cannot be passed to `VACUUM INTO`. Code
+should not be looser than the README's own instruction to store a `.db`
+snapshot like the database itself.

@@ -626,43 +626,73 @@ export async function sendTest(userId, settings, deps = {}) {
  * on construction, against whatever the suite's database holds, with a real
  * `fetch`. So the seam is here rather than a spy.
  *
+ * `deps.onTick` is the scheduled backup's join point (issue #75) onto this
+ * process's one timer — see `onTick` on `NotifyContext` in
+ * `@habiterall/shared/notify-send.js`. `start(env, { onTick })` is
+ * deliberately the IDENTICAL call the personal edition's own `start` takes
+ * (`habiterall-personal/src/notifier.js`): the two editions disagreeing about
+ * how a hook is passed in is exactly the drift this repo pays for. Reminders
+ * being off must not silently take the backup down with them — a dump hung
+ * purely off this tick would otherwise never run on an instance with
+ * `HABITERALL_NOTIFY=off` — so the tick still starts, with
+ * `collect: () => []` so no reminder is ever considered and no
+ * `withNotifierScope` scan is ever issued, whenever a hook is present even
+ * with reminders disabled.
+ *
  * @param {Record<string, string|undefined>} [env]
- * @param {{startNotifier?: typeof startNotifier}} [deps]
- * @returns {{stop: () => void} | null} null when disabled
+ * @param {{startNotifier?: typeof startNotifier,
+ *   onTick?: (instant: Date|number) => Promise<any>|any}} [deps]
+ * @returns {{stop: () => void} | null} null only when disabled AND no hook
  */
 export function start(env = process.env, deps = {}) {
   const begin = deps.startNotifier ?? startNotifier;
   const config = notifierConfig(env);
-  if (!config.enabled) {
+  if (!config.enabled && !deps.onTick) {
     log.warn('notify.disabled', { reason: 'HABITERALL_NOTIFY=off' });
     return null;
+  }
+  if (!config.enabled) {
+    log.warn('notify.disabled_but_ticking', {
+      reason: 'HABITERALL_NOTIFY=off',
+      consequence: 'reminders are off; the tick keeps running for a scheduled job (backups)',
+    });
   }
 
   // `ntfy_answers` said once, at startup, for the same reason `mode` is: with
   // no `app_url` an ntfy reminder still goes out, just with no buttons on it,
   // and nothing else says so — `channelInteractive` otherwise has no caller
-  // at all.
-  log.info('notify.starting', {
-    mode: config.botToken ? 'bot' : 'webhook',
-    interval_ms: config.intervalMs,
-    app_url: config.appUrl || '(unset)',
-    max_accounts_per_tick: MAX_ACCOUNTS_PER_TICK,
-    // Both are DERIVED from `PG_POOL_MAX` and had no surface at all. An
-    // operator who sets the pool to 2 to fit a small managed Postgres silently
-    // gets a tick one account wide; one who raises it to 40 expecting a faster
-    // tick silently gets the 6/8 caps. Both are correct, and neither was
-    // discoverable from anywhere but the source.
-    collect_concurrency: COLLECT_CONCURRENCY,
-    delivery_concurrency: DELIVERY_CONCURRENCY,
-    ntfy_answers: channelInteractive('ntfy', {}, { appUrl: config.appUrl }) ? 'on' : 'off',
-  });
+  // at all. Only said when reminders are actually enabled — with them off,
+  // this would describe a mode that is not running, right beside the line
+  // above that already said so.
+  if (config.enabled) {
+    log.info('notify.starting', {
+      mode: config.botToken ? 'bot' : 'webhook',
+      interval_ms: config.intervalMs,
+      app_url: config.appUrl || '(unset)',
+      max_accounts_per_tick: MAX_ACCOUNTS_PER_TICK,
+      // Both are DERIVED from `PG_POOL_MAX` and had no surface at all. An
+      // operator who sets the pool to 2 to fit a small managed Postgres
+      // silently gets a tick one account wide; one who raises it to 40
+      // expecting a faster tick silently gets the 6/8 caps. Both are correct,
+      // and neither was discoverable from anywhere but the source.
+      collect_concurrency: COLLECT_CONCURRENCY,
+      delivery_concurrency: DELIVERY_CONCURRENCY,
+      ntfy_answers: channelInteractive('ntfy', {}, { appUrl: config.appUrl }) ? 'on' : 'off',
+    });
+  }
 
   let lastPrunedDay = '';
 
   // Only for receiving button presses; sending needs no socket. One connection
   // per instance, whatever the number of accounts — the bot is the operator's,
-  // and each user points it at their own channel.
-  const gateway = config.botToken
+  // and each user points it at their own channel. Gated on `config.enabled`
+  // too, and not only on a token being present: the backup hook above joins
+  // the TICK, not the gateway, and `HABITERALL_NOTIFY=off` must keep the
+  // gateway shut even when a bot token is configured for later use — otherwise
+  // an operator who only set `HABITERALL_BACKUP_DIR` got the bot back online,
+  // socket open, with a stale Yes/No/Skip button from before reminders were
+  // disabled still able to write an entry.
+  const gateway = config.enabled && config.botToken
     ? connectGateway({
       token: config.botToken,
       log,
@@ -687,24 +717,33 @@ export function start(env = process.env, deps = {}) {
     // Travels the same route `botToken` and `appUrl` already do: no reaching
     // into `process.env` from inside `shared/src` for it.
     signAnswer,
-    collect: async (instant) => {
-      const accounts = await collect(instant);
+    // With reminders off but a hook present (the scheduled-backup case this
+    // function's own comment explains), `collect` is `() => []` so no
+    // reminder is ever considered and no account scan ever runs; the tick
+    // keeps running purely so `deps.onTick` gets called from it.
+    collect: config.enabled
+      ? async (instant) => {
+        const accounts = await collect(instant);
 
-      // Once a day, not once a minute: this is housekeeping and it costs a
-      // transaction per account.
-      const day = new Date(Number(instant)).toISOString().slice(0, 10);
-      if (day !== lastPrunedDay) {
-        lastPrunedDay = day;
-        for (const account of accounts) {
-          await prune(account.id, instant).catch((err) =>
-            log.warn('notify.prune_failed', { user: account.id }, err));
+        // Once a day, not once a minute: this is housekeeping and it costs a
+        // transaction per account.
+        const day = new Date(Number(instant)).toISOString().slice(0, 10);
+        if (day !== lastPrunedDay) {
+          lastPrunedDay = day;
+          for (const account of accounts) {
+            await prune(account.id, instant).catch((err) =>
+              log.warn('notify.prune_failed', { user: account.id }, err));
+          }
         }
-      }
 
-      return accounts;
-    },
+        return accounts;
+      }
+      : () => [],
     mark,
     recordOutcome,
+    // Passed through unchanged, whether reminders are on or off — see this
+    // function's own doc comment for why the tick has to keep running for it.
+    onTick: deps.onTick,
   };
 
   const notifier = begin(ctx);

@@ -4,8 +4,9 @@ import helmet from 'helmet';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { api } from './api.js';
+import { api, buildBackupPayload } from './api.js';
 import { db } from './db.js';
+import { backupTask, backupConfig } from './backup.js';
 import { SqliteStore } from './session-store.js';
 import {
   initAuth, mountAuth, requireAuth, mode, sessionSecret, state as authState,
@@ -311,10 +312,29 @@ if (isEntryPoint) {
 
   const runtime = watchRuntime(log);
 
+  // `null` when `HABITERALL_BACKUP_DIR` is unset — the opt-in. `buildBackupPayload`
+  // is injected here rather than imported by `backup.js` itself, which is what
+  // keeps `api.js` -> `backup.js` -> `api.js` from being a cycle (`api.js`'s
+  // `/backup/status` route already imports `backupStatus`/`backupConfig` from
+  // `backup.js`). See `backup.js`'s file header for the full reasoning.
+  const backup = backupTask(process.env, { payload: buildBackupPayload });
+  if (backup) {
+    // The schedule and the keep count only — never the directory. Fine to log
+    // here, unlike the API response: this is the server's OWN log, which only
+    // the operator reads, and they are the one who set the directory in the
+    // first place.
+    const backupCfg = backupConfig(process.env);
+    log.info('backup.starting', {
+      dir: backupCfg.dir, schedule: backupCfg.schedule, keep: backupCfg.keep,
+    });
+  }
+
   // Only from the entry point, exactly like `listen`: a test that imports this
   // module for its routes must not start posting real reminders to whatever
-  // webhook the developer's own database happens to hold.
-  const notifier = startNotifier();
+  // webhook the developer's own database happens to hold. The backup hook
+  // rides the same guard for the same reason — an imported-for-its-routes test
+  // must not start writing real backup files either.
+  const notifier = startNotifier(process.env, backup ? { onTick: backup } : {});
 
   // The drain between the signal and the exit, including the deadline that
   // bounds it: `shared/src/shutdown.js`, which both editions call.

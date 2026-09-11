@@ -348,6 +348,7 @@ Several layers, and they catch different things:
 | The same, over SQLite | `npm run test:summarycache -w habiterall-personal` | nothing |
 | The same cache under a FORCED race | `npm run test:summaryrace -w habiterall-cloud` | Postgres |
 | Backup round trip | `npm run test:roundtrip -w habiterall-personal` | nothing |
+| The scheduled backup, and what it prunes | `npm run test:backup -w habiterall-personal` | nothing |
 | Dashboard summary anchor | `npm run test:overview -w habiterall-personal` | nothing |
 | Award inputs, from storage | `npm run test:awards -w habiterall-personal` | nothing |
 | Whose day a route judges by | `npm run test:callerday -w habiterall-personal` | nothing |
@@ -359,6 +360,7 @@ Several layers, and they catch different things:
 | Cloud SIGTERM drains, and the pool closes | `npm run test:drain -w habiterall-cloud` | Postgres |
 | Which claim names the account | `npm run test:claims -w habiterall-cloud` | Postgres |
 | Cloud round trip | `npm run test:roundtrip -w habiterall-cloud` | Postgres |
+| The scheduled dump, and what it prunes | `npm run test:backup -w habiterall-cloud` | Postgres |
 | Query plans and schema invariants | `npm run test:plans -w habiterall-cloud` | Postgres |
 | Tenancy | `npm run test:tenancy` | Postgres |
 | Compose files | `npm run docs:compose -- --check`, and the CI `compose` job | Docker, for the job |
