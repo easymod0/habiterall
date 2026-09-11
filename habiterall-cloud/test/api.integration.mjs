@@ -388,12 +388,27 @@ const putNoteEntry = (habitIdArg, date, body) => fetch(
   }
 ).then((r) => r.json());
 
-await putNoteEntry(habitId, isoDaysAgo(2), { value: 9, notes: 'wrote about it' });
-await putNoteEntry(habitId, isoDaysAgo(1), { value: 9 });
-await putNoteEntry(habitId, isoDaysAgo(0), { status: 'skip', notes: 'skipped but noted' });
+// Its OWN habit, never `habitId`. The first version of this block wrote these
+// three days onto the shared `habitId`, and the third of them turns TODAY into
+// a skip — which does not extend a run, so the `RECENT_DAYS` run this file sets
+// up at the top became nine days ending yesterday. The assertion that notices
+// is ~2,300 lines below (`while still carrying the summary figures it is for`,
+// from #147), which pins that habit's streak and score as literals, and it went
+// from 0.381137/10 to 0.347244/9. It did not fail reliably either: the Cloud API
+// job passed three runs and failed two on this branch before the cause was
+// found, so the shared-fixture write reads as flake until it is looked at.
+const notesHabit = await fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'Notes 297', type: 'numerical', target_value: 5 }),
+}).then((r) => r.json());
+
+await putNoteEntry(notesHabit.id, isoDaysAgo(2), { value: 9, notes: 'wrote about it' });
+await putNoteEntry(notesHabit.id, isoDaysAgo(1), { value: 9 });
+await putNoteEntry(notesHabit.id, isoDaysAgo(0), { status: 'skip', notes: 'skipped but noted' });
 
 const notesView = await getOverview({ days: 7 });
-const notesRow = notesView.habits.find((h) => h.id === habitId);
+const notesRow = notesView.habits.find((h) => h.id === notesHabit.id);
 ck("cloud: a day with a note has its date in that habit's notes",
   notesRow.notes.includes(isoDaysAgo(2)), JSON.stringify(notesRow.notes));
 ck('cloud: a day with an entry and no note does NOT have its date in notes',
@@ -3118,12 +3133,15 @@ for (const id of gateIds) {
 for (const id of [
   sortCharlie.id, sortAlpha.id, sortBravo.id, tieZzz.id, tieAaa.id,
   rmNever.id, rmWeekAgo.id, rmYesterday.id,
-  // #297's negative-case habit. Its own entry is not on `habitId`, so the
-  // targeted DELETE below does not reach it, and the import block's
-  // "the victim's data is untouched" counts EVERY entry alice has — which
-  // is the check this list's comment is about, and the one this habit
-  // failed in CI when it was left out.
+  // #297's two habits, for the same reason and in the same breath. Neither
+  // carries its entries on `habitId`, so the targeted DELETE below does not
+  // reach either, and the import block's "the victim's data is untouched"
+  // counts EVERY entry alice has — which is the check this list's comment is
+  // about, and the one the negative-case habit failed in CI when it was left
+  // out. `notesHabit` holds three entries and failed it the same way the
+  // moment the notes checks were moved off the shared habit.
   noNotesHabit.id,
+  notesHabit.id,
 ]) {
   await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
 }
