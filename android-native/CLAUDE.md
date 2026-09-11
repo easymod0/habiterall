@@ -549,13 +549,32 @@ the browser.
 
 ## Known gap
 
-A typed amount has **three** readers that already disagree about `8,5` —
-`HabitFormScreen.parseAmount` and a bare `toDoubleOrNull` in both
-`CountEntryActivity` and the day dialog — so `numberFormat` is in `notMirrored`
-with no single reader to give an answer to. That is **issue #157**: an account
-that has CHOSEN a convention is followed in the browser and not here. Under
-`auto`, which is almost everybody, the phone resolves its own locale and there is
-nothing to carry.
+**A typed amount has one reader, `parseAmount` in `ui/Amount.kt`, and it is a
+DEVICE-TIER decision rather than a sixth mirror.** Before #157 this client had
+three: `HabitFormScreen.parseAmount` and a bare `toDoubleOrNull` in both
+`CountEntryActivity`'s number pad and `MainActivity`'s day dialog
+(`CountDialog`) — which disagreed with each other about `8,5` before they could
+even disagree with the web. All three now call the one function, and what
+decides the thousands-separator convention is `deviceAmountFormat()` —
+`Locale.getDefault()`, asked again on every parse — never the account's
+`numberFormat` setting, which is why that key stays in `AppSettingsDefaultsTest`'s
+`notMirrored` rather than moving to `AppSettings`. `auto` — the setting's own
+default, and almost everybody's value — already means exactly this: the phone
+resolves its own locale and a browser on the same device would resolve the
+same one, with nothing to carry over the wire.
+
+What that leaves open, plainly: an account that has explicitly CHOSEN `point`
+or `comma` is honoured in the browser and not here. That half is knowingly
+unfixed, and the reason a mirror is not a better trade is bounded by
+`parseAmount` itself — its `format` argument only decides which SPELLING of a
+thousands group is refused, never what is accepted, since a group is refused
+under both conventions and neither accepts one. So a wrong guess at the
+device's convention can only ever refuse a spelling loudly (a phone in the
+wrong convention shows "Type it without the thousands separator" on an input
+that was actually fine); it can never silently store a row out by a factor of a
+thousand. A sixth hand-written mirror would buy a better refusal message on an
+explicit-choice account, not a correct row — not the trade the root CLAUDE.md's
+mirror rule is for.
 
 **The habit ORDER and the reorder GATE used to arrive from two different
 requests, and there was a narrow window where they could disagree — fixed

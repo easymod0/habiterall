@@ -34,8 +34,9 @@ parser before it is offered, and it decides the whole branch rather than just
 the number in it — `1,500 steps` holds a thousands group and is not ambiguous,
 it is not an amount, and a box may not suggest something it would then refuse.
 The phone has said the actionable thing since #111; a test reads its string out
-of `HabitFormScreen.kt`, because a comment claiming two clients agree is
-precisely the claim that goes stale.
+of `ui/Amount.kt` (`HabitFormScreen.kt` until #157 moved the rule there),
+because a comment claiming two clients agree is precisely the claim that goes
+stale.
 
 **Three surfaces read a typed amount, and the third was reading it with
 `Number()`.** The day editor and the dashboard share `ui/amount.js`; a Discord
@@ -305,5 +306,79 @@ refetch of data the client is about to refetch anyway.
 rule silently beats the attribute, which once made the day editor show both
 habit types' controls at once. Only a real browser catches this class of bug —
 that is why `test/browser/` exists.
+
+## #157: the phone's own three-way disagreement, and the device tier over there too
+
+The web's rule (above) was never the phone's problem. Android had grown three
+independent readers of a typed amount, and they disagreed with each other before
+ever getting to disagree with the web:
+
+| where | how | `8,5` | `10.000` |
+|---|---|---|---|
+| `HabitFormScreen.parseAmount` (habit target) | comma→dot, thousands refusal, always POINT | 8.5 | 10 |
+| `CountEntryActivity` (notification number pad) | `toDoubleOrNull` | refused | 10 |
+| `MainActivity` day dialog (`CountDialog`) | `toDoubleOrNull` | refused | 10 |
+
+Only the habit form had a real parser, and even it was not locale-aware: it
+always read a dot as the decimal point and a comma as a thousands separator,
+regardless of the device. So a German phone's goal box already silently read
+`10.000` as ten — the exact #108 bug the web fixed, unnoticed on Android because
+nothing here was testing a non-`en-US` locale.
+
+Two designs were on the table. **A real mirror** — carry the account's
+`numberFormat` down to the phone and pick `AmountFormat` from it, the same as
+every other client-honoured setting — would agree with an EXPLICIT `point` or
+`comma` choice, at the cost of a sixth hand-written mirror the root CLAUDE.md
+asks to be justified every time one is proposed. **The device tier** — resolve
+`AmountFormat` from `Locale.getDefault()` alone, the same `auto` tier
+`resolveNumberFormat` already falls back to — costs nothing over the wire and
+gets `auto` (the setting's own default, and almost everybody's value) exactly
+right, at the cost of ignoring an account's explicit choice on this one client.
+
+**The device tier is what shipped**, for a reason specific to this parser and not
+a general argument against mirrors: the cost of being wrong is bounded by
+construction. `parseAmount`'s `format` argument decides only which SPELLING of a
+thousands group is refused — `10,000` under `POINT`, `10.000` under `COMMA` —
+and never what is accepted, because a group is refused under BOTH conventions
+and neither accepts one. `8,5` and `8.5` are eight and a half either way. So a
+wrong guess at the device's own convention can only ever refuse a spelling
+loudly (an account on `comma` but a phone whose OS is set to `en-US` sees "Type
+it without the thousands separator" on an input that was actually fine); it can
+never silently store a row out by a factor of a thousand, which is the failure
+mode #108 and this issue both exist to close. A mirror would buy a better
+refusal message on that one mismatched phone, not a correct row — not the trade
+the root CLAUDE.md's mirror rule is for. `numberFormat` therefore stays in
+`AppSettingsDefaultsTest`'s `notMirrored` map; only the reason string changed,
+from "three readers that do not agree" to "one reader, by design, nothing
+crosses the wire."
+
+**What is knowingly left open**: an account that has explicitly set `point` or
+`comma` — rather than leaving it on `auto` — is honoured in the browser and not
+on the phone. Closing that gap for real is the mirror this issue declined to
+build; if it is ever worth it, `Overview` (or `/settings`) is where the value
+would have to ride down, the same way `habitSort` already does, rather than a
+seventh place reading `GET /settings` directly.
+
+**The fix unified the three readers before changing what any of them decided.**
+`ui/Amount.kt` is `HabitFormScreen.kt`'s old `parseAmount`/`amountComplaint`,
+moved wholesale and then taught to take an explicit `AmountFormat` (defaulting
+to `deviceAmountFormat()`), so `CountEntryActivity` and `CountDialog` could be
+pointed at the SAME function rather than each growing their own copy of the
+rule. `AmountWiringTest` is the suite that exists because this repo's own
+named defect class is pinning the decision without pinning the wiring: it
+renders `HabitFormScreen` and drives `CountEntryActivity` under
+`Locale.GERMANY`, asserting the `HabitInput` and the shown `Toast` rather than
+a return value of `parseAmount` itself. The third call site, `CountDialog`
+(`MainActivity`'s day dialog), was pulled out to a top-level composable for the
+same seam reason `HabitList` was — but a compose-driven test for it could not
+be built: `android-native/README.md` already names the trap ("a real
+`AlertDialog` under `createComposeRule` hangs `waitForIdle` indefinitely...
+there is no timeout and no failure — the test simply never returns"), and a
+version of the test reproduced exactly that, running for roughly a minute
+before the test JVM died of an `OutOfMemoryError` rather than failing an
+assertion. `CountDialog`'s production wiring onto `parseAmount`/`amountComplaint`
+is done regardless; its wiring test is the one piece of this issue left
+unverified by an automated suite, reported rather than papered over with a
+source guard.
 
 
