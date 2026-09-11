@@ -1800,6 +1800,15 @@ function buildNotesCard({ habit, notesByDate }) {
     }
     c.hidden = false;
 
+    // This rebuild DROPS keyboard focus if it was on a row, and that is a
+    // known gap rather than an oversight (review round 2). `repaint`'s whole
+    // argument is that it touches no nodes, and the calendar's `draw` carries
+    // a `tabStop` date across its own rebuild for exactly this reason — but a
+    // `.note-row` carries no `data-focus-key`, so the ONLINE path already
+    // loses focus here through `render()`, and this reaches the same
+    // pre-existing gap by one more route rather than opening a new one.
+    // Closing it properly means a focus key on the row AND a `restoreFocus`
+    // in `repaint`, which today calls none — a bigger change than this card.
     list.replaceChildren();
     const shown = dates.slice(0, NOTES_LIMIT);
     for (const date of shown) {
@@ -1825,8 +1834,10 @@ function buildNotesCard({ habit, notesByDate }) {
 
     // Removed and rebuilt rather than left to grow stale beside a rows list
     // that just moved — the count itself is exactly the thing an offline edit
-    // can change.
-    c.querySelector('.hint')?.remove();
+    // can change. `:scope >` so this can only ever eat the line it appended
+    // itself: a `.hint` added later inside a row, or in the card head, is not
+    // this function's to remove and an unscoped query would take it silently.
+    c.querySelector(':scope > .hint')?.remove();
     const hiddenCount = dates.length - shown.length;
     if (hiddenCount > 0) {
       const more = document.createElement('p');

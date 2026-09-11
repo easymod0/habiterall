@@ -770,7 +770,60 @@ try {
          JSON.stringify(afterAdd));
     }
 
-    await reconnectAndDrain();
+    /* ---------- clearing the LAST note offline hides the card ---------- */
+
+    // The branch nothing else in the repo reaches. `buildNotesCard` returns
+    // null for a habit with no notes, so a repaint that empties the map has
+    // to HIDE the card it cannot un-build — the promise made in `detail.js`,
+    // in `shared/public/CLAUDE.md` and in the archive, and until this case it
+    // rested on nothing. Reached from inside this block without navigating
+    // (which offline could not do) by clearing the two notes this habit now
+    // has, one at a time.
+    const clearNoteRow = async (text) => {
+      await ev(`[...document.querySelectorAll('#view-detail .notes-list .note-row')]
+        .find(r => r.querySelector('.note-text')?.textContent === ${JSON.stringify(text)})
+        ?.click()`);
+      await sleep(600);
+      await ev(`document.getElementById('day-notes').value = ''`);
+      await ev(`document.querySelector('#day-boolean .day-choice[data-action="done"]').click()`);
+      await sleep(700);
+    };
+
+    await clearNoteRow('kept note');
+    const oneLeft = await ev(`(() => {
+      const c = [...document.querySelectorAll('#view-detail .card')]
+        .find(x => x.querySelector('.card-title')?.textContent === 'Notes');
+      return { rows: [...document.querySelectorAll('#view-detail .notes-list .note-text')]
+                 .map(e => e.textContent),
+               display: c ? getComputedStyle(c).display : null };})()`);
+    ck('with ONE note left the card is still shown, which is what makes the '
+       + 'hide below a hide and not a card that was never there',
+       oneLeft.rows.length === 1 && oneLeft.display !== 'none' && oneLeft.display !== null,
+       JSON.stringify(oneLeft));
+
+    await clearNoteRow('a fresh offline note');
+    // `getComputedStyle(...).display`, never `.hidden` — the attribute is set
+    // either way, and what carries it is `[hidden] { display: none !important }`
+    // in the stylesheet. A check reading the property would stay green with
+    // that rule gone, which is the exact shape of the class-only mistake this
+    // same review round found on the strip's own mark.
+    const noneLeft = await ev(`(() => {
+      const c = [...document.querySelectorAll('#view-detail .card')]
+        .find(x => x.querySelector('.card-title')?.textContent === 'Notes');
+      return { found: !!c, display: c ? getComputedStyle(c).display : null,
+               rows: [...document.querySelectorAll('#view-detail .notes-list .note-text')]
+                 .map(e => e.textContent) };})()`);
+    ck("clearing the habit's LAST note offline hides the notes card rather "
+       + 'than leaving an empty list',
+       noneLeft.found === true && noneLeft.display === 'none',
+       JSON.stringify(noneLeft));
+
+    // Threaded into a check rather than discarded — `reconnectAndDrain`
+    // REPORTS its timeout instead of throwing precisely so the message lands
+    // in a check's evidence, which is only true of a caller that reads it.
+    const notesDrained = await reconnectAndDrain();
+    ck('the notes-card probe drained its outbox on reconnect',
+       notesDrained === '', notesDrained);
   }
 
   /* ---------- paging, and forgetting where it was ---------- */
@@ -1227,11 +1280,17 @@ try {
         '#view-detail .day-strip .check[data-date="${date}"] .check-box');
       if (!el) return null;
       const cs = getComputedStyle(el, '::after');
-      return { content: cs.content, width: parseFloat(cs.width) };
+      return { content: cs.content, width: parseFloat(cs.width),
+               bg: cs.backgroundColor, ring: cs.boxShadow };
     })()`);
     const notedPseudo = await notePseudo(notesProbe.noted);
+    // A generated box of real width is not yet a VISIBLE dot: the mark is
+    // carried by `background: var(--surface)` plus the `box-shadow` ring, and
+    // dropping either leaves an invisible 6x6 box that `content`/`width`
+    // alone still pass (review round 2). Both are read here.
     ck("the note-bearing day's dot is actually DRAWN, not merely classed",
-       !!notedPseudo && notedPseudo.content !== 'none' && notedPseudo.width > 0,
+       !!notedPseudo && notedPseudo.content !== 'none' && notedPseudo.width > 0
+         && notedPseudo.bg !== 'rgba(0, 0, 0, 0)' && notedPseudo.ring !== 'none',
        JSON.stringify(notedPseudo));
     const plainPseudo = await notePseudo(notesProbe.plain);
     // The negative half — what stops a rule drawing a dot on every cell from

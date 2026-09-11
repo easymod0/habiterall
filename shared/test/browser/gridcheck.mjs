@@ -718,11 +718,17 @@ try{
       const el = document.querySelector('${boxSel(date)}');
       if (!el) return null;
       const cs = getComputedStyle(el, '::after');
-      return { content: cs.content, width: parseFloat(cs.width) };
+      return { content: cs.content, width: parseFloat(cs.width),
+               bg: cs.backgroundColor, ring: cs.boxShadow };
     })()`);
     const notedPseudo = await notePseudo(notesSeed.noted);
+    // A generated box of real width is not yet a VISIBLE dot: the mark is
+    // carried by `background: var(--surface)` plus the `box-shadow` ring, and
+    // dropping either leaves an invisible 6x6 box that `content`/`width`
+    // alone still pass (review round 2). Both are read here.
     ck("the note-bearing day's dot is actually DRAWN, not merely classed",
-       !!notedPseudo && notedPseudo.content !== 'none' && notedPseudo.width > 0,
+       !!notedPseudo && notedPseudo.content !== 'none' && notedPseudo.width > 0
+         && notedPseudo.bg !== 'rgba(0, 0, 0, 0)' && notedPseudo.ring !== 'none',
        JSON.stringify(notedPseudo));
     const plainPseudo = await notePseudo(notesSeed.plain);
     // The negative half, and the one that stops a rule drawing a dot on EVERY

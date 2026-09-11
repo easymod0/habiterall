@@ -728,7 +728,8 @@ try {
       const pseudo = (el) => { const box = el?.querySelector('.check-box');
         if (!box) return null;
         const cs = getComputedStyle(box, '::after');
-        return { content: cs.content, width: parseFloat(cs.width) }; };
+        return { content: cs.content, width: parseFloat(cs.width),
+                 bg: cs.backgroundColor, ring: cs.boxShadow }; };
       return {
         notedHasMark: !!noted?.querySelector('.check-box')?.classList.contains('has-note'),
         plainHasMark: !!plain?.querySelector('.check-box')?.classList.contains('has-note'),
@@ -747,10 +748,15 @@ try {
     // actually existing at all (review round). `content` must not be `'none'`
     // and the drawn box must have real width; the note-free cell must draw no
     // pseudo-element.
+    // Both the generated box AND what makes it visible — `background:
+    // var(--surface)` plus the `box-shadow` ring — because a transparent 6x6
+    // box passes `content`/`width` while showing the user nothing (round 2).
     ck("at 360px, the note-bearing cell's dot is actually DRAWN, not merely "
       + 'classed',
       !!cellGeom.notedPseudo && cellGeom.notedPseudo.content !== 'none'
-        && cellGeom.notedPseudo.width > 0,
+        && cellGeom.notedPseudo.width > 0
+        && cellGeom.notedPseudo.bg !== 'rgba(0, 0, 0, 0)'
+        && cellGeom.notedPseudo.ring !== 'none',
       JSON.stringify(cellGeom));
     ck('...and the note-free cell draws no pseudo-element at all',
       !!cellGeom.plainPseudo && cellGeom.plainPseudo.content === 'none',
