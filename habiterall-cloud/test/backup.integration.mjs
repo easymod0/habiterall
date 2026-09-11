@@ -27,8 +27,26 @@
  *      the real `notifier.js` `start()` — and the hook it calls returns
  *      promptly rather than blocking the shared tick on the dump;
  *  10. disabled by default (no `HABITERALL_BACKUP_DIR`), on both halves;
- *  11. a directory with no usable `DATABASE_URL_ADMIN` is refused loudly, and
- *      the real entry point still boots.
+ *  11. a directory with no usable `DATABASE_URL_ADMIN` is refused loudly, but
+ *      only ONCE, at boot, never per request — and the real entry point
+ *      still boots.
+ *
+ * And, from the fix round following review of 13aa15d:
+ *
+ *  12. a directory that cannot be CREATED at all (a regular file sitting at a
+ *      path component) does not crash the process — `runBackup`'s own outer
+ *      try/catch, proved through the REAL production call path
+ *      (`backupTask`'s un-awaited promise chain) rather than a test's own
+ *      try/catch, which would hide the bug this exists for;
+ *  13. a directory that EXISTS but cannot be WRITTEN — the root-owned-volume
+ *      case — neither crashes the process nor leaves `pg_dump` running for
+ *      the full two-hour timeout once its destination errors;
+ *  14. two concurrent runs never share one temporary file name, so two
+ *      replicas sharing one volume can never interleave two dumps into one
+ *      file;
+ *  15. `PGPASSWORD` is set in the child's environment only when the admin URL
+ *      actually carried a password, and never overwrites an inherited one
+ *      with an empty string.
  *
  * `pg_dump` opens its own connection outside the pool, so nothing here goes
  * through `withUser`/`withoutUser`: an admin `pg.Client` is used directly for
@@ -74,7 +92,8 @@ const PG_DUMP = process.env.HABITERALL_PG_DUMP ?? 'pg_dump';
 const backupModulePath = fileURLToPath(new URL('../src/backup.js', import.meta.url));
 const backup = await import('../src/backup.js');
 const {
-  backupConfig, pgDumpConnection, pgDumpArgs, runBackup, backupTask, backupInFlight,
+  backupConfig, reportBackupConfig, pgDumpConnection, pgDumpArgs, runBackup, backupTask,
+  backupInFlight,
 } = backup;
 const notifier = await import('../src/notifier.js');
 const { api } = await import('../src/api.js');
@@ -204,6 +223,13 @@ try {
   const dumpText1 = readFileSync(join(dir1, files1[0]), 'utf8');
   ck("case1: the canary habit's name is in the dump — not the file's existence, not its size",
     dumpText1.includes(CANARY_NAME), `dump length=${dumpText1.length}`);
+  // FIX 5 (issue #75 fix round): the dump holds every tenant's rows plus
+  // every stored ntfy token and Discord webhook, so it must land 0o600, not
+  // the createWriteStream default (0666, typically 0644 under an ordinary
+  // umask).
+  const mode1 = statSync(join(dir1, files1[0])).mode & 0o777;
+  ck('case1 (FIX 5): the dump file is created mode 0o600',
+    mode1 === 0o600, mode1.toString(8));
 
   /* ---------- case 2: no password in argv ---------- */
 
@@ -514,13 +540,39 @@ exit 1
   // connection but never DATABASE_URL_ADMIN — and it is what would catch a
   // reverted `DATABASE_URL_ADMIN ?? DATABASE_URL` fallback even if case 11b's
   // spawned server did not.
-  const { lines: lines11, result: cfg11 } = await captureLogs(() =>
+  //
+  // FIX 3 (issue #75 fix round): `backupConfig` used to log
+  // `backup.admin_url_missing` itself, as a side effect of computing
+  // `enabled` — and `GET /backup/status` calls exactly this function, via
+  // `backupEnabled()`, on EVERY request. So the first assertion here is that
+  // `backupConfig` alone now logs NOTHING; the message moved to the separate
+  // `reportBackupConfig`, asserted next; and the THIRD block below is FIX 3's
+  // own case — hitting the route repeatedly must produce zero error lines.
+  const { lines: quietLines11, result: cfg11 } = await captureLogs(() =>
     backupConfig({ HABITERALL_BACKUP_DIR: dir11, DATABASE_URL }));
   ck('case11: enabled is false', cfg11.enabled === false, JSON.stringify(cfg11));
-  ck('case11: backup.admin_url_missing is logged at error, naming the variable',
-    lines11.some((l) => l.includes('"level":"error"') && l.includes('"msg":"backup.admin_url_missing"')
+  ck('case11 (FIX 3): backupConfig itself logs nothing — it is pure now',
+    quietLines11.length === 0, quietLines11.join('').slice(0, 400));
+
+  const { lines: reportLines11 } = await captureLogs(() => reportBackupConfig(cfg11));
+  ck('case11 (FIX 3): the separate reportBackupConfig logs backup.admin_url_missing at error, naming the variable',
+    reportLines11.some((l) => l.includes('"level":"error"') && l.includes('"msg":"backup.admin_url_missing"')
       && l.includes('DATABASE_URL_ADMIN')),
-    lines11.join('').slice(0, 800));
+    reportLines11.join('').slice(0, 800));
+
+  console.log('--- case 11 (FIX 3): hitting GET /api/backup/status repeatedly in the misconfigured state logs zero error lines ---');
+  process.env.HABITERALL_BACKUP_DIR = dir11;
+  delete process.env.DATABASE_URL_ADMIN;
+  const { lines: routeLines11 } = await captureLogs(async () => {
+    for (let i = 0; i < 5; i++) {
+      const r = await apiCall('/api/backup/status');
+      assert.strictEqual(r.status, 200);
+    }
+  });
+  ck('case11 (FIX 3): five requests in the misconfigured state produce ZERO error-level lines — the route costs nothing',
+    !routeLines11.some((l) => l.includes('"level":"error"')),
+    routeLines11.join('').slice(0, 800));
+  delete process.env.HABITERALL_BACKUP_DIR;
 
   console.log('--- case 11b: through the real entry point, the server still boots ---');
   const serverPath = fileURLToPath(new URL('../src/server.js', import.meta.url));
@@ -568,6 +620,16 @@ exit 1
     ck('case11b: the server boots and answers healthy despite the misconfigured backup variable', true);
     ck('case11b: the real process logged backup.admin_url_missing at boot too',
       logs11.includes('"msg":"backup.admin_url_missing"'), logs11.slice(0, 800));
+    // FIX 3 (issue #75 fix round): `reportBackupConfig` is called exactly
+    // ONCE at boot in `server.js`, unconditionally — never inside
+    // `backupConfig` itself and never from a route. `waitFor`'s polling above
+    // issued several requests to `/healthz`, which does not touch
+    // `backupConfig` at all, but this count is still the direct check that
+    // boot logs it once and only once, regardless of what else the process
+    // does afterward.
+    const missingCount11b = (logs11.match(/"msg":"backup\.admin_url_missing"/g) ?? []).length;
+    ck('case11b (FIX 3): backup.admin_url_missing is logged EXACTLY ONCE at boot, not per request',
+      missingCount11b === 1, `count=${missingCount11b}\n${logs11.slice(0, 800)}`);
   } finally {
     if (child11 && exit11 === null) {
       child11.kill('SIGTERM');
@@ -578,6 +640,218 @@ exit 1
     }
     issuerSrv.close();
   }
+
+  /* ---------- case 12 (FIX 1): a directory that cannot be created at all does not crash the process ---------- */
+
+  console.log('--- case 12 (FIX 1): HABITERALL_BACKUP_DIR through a regular file does not crash the process ---');
+  const blockerFile12 = join(workdir, 'case12-blocker-file');
+  writeFileSync(blockerFile12, 'not a directory');
+  const dir12a = join(blockerFile12, 'sub');   // mkdirSync(dir, {recursive:true}) throws ENOTDIR
+  const envCfg12a = {
+    ...baseEnv, HABITERALL_BACKUP_DIR: dir12a,
+    HABITERALL_BACKUP_SCHEDULE: '00:00', HABITERALL_BACKUP_KEEP: '7',
+  };
+  const task12a = backupTask(envCfg12a);
+  ck('case12a: backupTask is armed (the config itself is otherwise valid)', task12a !== null);
+
+  // First, `runBackup` directly — this is what isolates its OWN outer
+  // try/catch from `backupTask`'s belt-and-braces `.catch()` (added
+  // alongside it): a mutation that removes only the outer try/catch must
+  // still be caught even though the belt-and-braces layer would otherwise
+  // paper over it in the production path exercised just below.
+  const cfg12direct = backupConfig(envCfg12a);
+  let threw12direct = null;
+  try {
+    await runBackup(cfg12direct, { instant: new Date(2031, 1, 20, 3, 0) });
+  } catch (err) {
+    threw12direct = err;
+  }
+  ck('case12a (FIX 1): runBackup itself does not reject, called directly',
+    threw12direct === null, threw12direct ? String(threw12direct.stack ?? threw12direct) : '');
+
+  // Then the REAL production call path, not a test's own try/catch around
+  // `runBackup` directly: `backupTask` builds
+  // `inFlight = runBackup(...).catch(...).finally(...)` and that closure is
+  // never awaited by ITS OWN caller (`server.js`/`notifier.js`). A test that
+  // only wrapped `runBackup` itself in try/catch would pass whether or not
+  // the fix exists, because the test's own try/catch would hide the bug.
+  // `process.on('unhandledRejection', ...)` is what lets an actual unhandled
+  // rejection be OBSERVED here without also crashing this test process —
+  // Node only terminates on one when there is no listener at all.
+  let unhandled12a = null;
+  const onUnhandled12a = (err) => { unhandled12a = err; };
+  process.on('unhandledRejection', onUnhandled12a);
+  const { lines: lines12a } = await captureLogs(async () => {
+    task12a(new Date(2031, 1, 20, 3, 0));
+    await backupInFlight();
+    // An unhandled rejection surfaces on a LATER turn of the event loop than
+    // the promise settling; give it one before checking.
+    await new Promise((r) => setImmediate(r));
+  });
+  process.off('unhandledRejection', onUnhandled12a);
+  ck('case12a (FIX 1): the real production call path produces NO unhandled rejection',
+    unhandled12a === null, unhandled12a ? String(unhandled12a.stack ?? unhandled12a) : '');
+  ck('case12a (FIX 1): an error was logged',
+    lines12a.some((l) => l.includes('"msg":"backup.failed"')), lines12a.join('').slice(0, 400));
+  ck('case12a (FIX 1): no file was written — the directory could not even be created',
+    !existsSync(dir12a), dir12a);
+
+  const stillServing12a = await apiCall('/api/habits');
+  ck('case12a (FIX 1): the process is still serving after the failure',
+    stillServing12a.status === 200, JSON.stringify(stillServing12a).slice(0, 200));
+
+  /* ---------- case 13 (FIX 1 + FIX 2): a directory that EXISTS but cannot be WRITTEN ---------- */
+
+  console.log('--- case 13 (FIX 1 + FIX 2): a directory that exists but cannot be written (the root-owned-volume case) ---');
+  if (process.getuid && process.getuid() === 0) {
+    ck('case13: skipped — the suite is running as root, which ignores a directory\'s mode bits', true,
+      'skip: cannot simulate a permission-denied directory as root — see the report');
+  } else {
+    const dir13 = join(workdir, 'case13');
+    mkdirSync(dir13, { recursive: true });
+    chmodSync(dir13, 0o500);   // r-x: the dir exists and can be listed, but no new file can be created in it
+
+    // A stub that emits comfortably more than a kernel pipe's default 64 KiB
+    // so that — without FIX 2's kill — an unconsumed pipe would eventually
+    // block this child's own write() and hang until BACKUP_TIMEOUT_MS (two
+    // hours). `/dev/urandom` rather than a loop of printf: fast, and no
+    // shell-quoting surface.
+    const bigDump13 = join(workdir, 'big-pg-dump.sh');
+    writeFileSync(bigDump13, '#!/bin/sh\nhead -c 500000 /dev/urandom\n');
+    chmodSync(bigDump13, 0o755);
+
+    const envCfg13 = {
+      ...baseEnv, HABITERALL_BACKUP_DIR: dir13,
+      HABITERALL_BACKUP_SCHEDULE: '00:00', HABITERALL_BACKUP_KEEP: '7',
+      HABITERALL_PG_DUMP: bigDump13,
+    };
+    const task13 = backupTask(envCfg13);
+
+    let unhandled13 = null;
+    const onUnhandled13 = (err) => { unhandled13 = err; };
+    process.on('unhandledRejection', onUnhandled13);
+    task13(new Date(2031, 1, 21, 3, 0));
+    const inflight13 = backupInFlight();
+    const startedAt13 = Date.now();
+    // A generous bound: the bug's signature is TWO HOURS, so 30s is nowhere
+    // near it, and a fixed run settles in well under a second. This does NOT
+    // wait out an unfixed run's full timeout — it only needs to observe that
+    // the run has NOT settled within the bound.
+    const settled13 = await Promise.race([
+      // `.then(onFulfilled, onRejected)` rather than `.catch()` after —
+      // this must resolve the RACE either way a settlement happens, and
+      // `inFlight` should never reject anyway (see `backupTask`'s own
+      // belt-and-braces `.catch()`).
+      inflight13.then(() => 'settled', () => 'settled-rejected'),
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), 30000)),
+    ]);
+    const elapsed13 = Date.now() - startedAt13;
+    await new Promise((r) => setImmediate(r));
+    process.off('unhandledRejection', onUnhandled13);
+
+    ck('case13 (FIX 2): the run settles in seconds rather than hanging for the full timeout',
+      settled13 !== 'timeout', `settled=${settled13} elapsed=${elapsed13}ms`);
+    ck('case13 (FIX 1): no unhandled rejection either',
+      unhandled13 === null, unhandled13 ? String(unhandled13.stack ?? unhandled13) : '');
+
+    const files13x = readdirSync(dir13);
+    ck('case13: no .sql file was written', !files13x.some((f) => f.endsWith('.sql')), JSON.stringify(files13x));
+
+    chmodSync(dir13, 0o700);   // restore so the outer cleanup (rmSync) can remove it
+    const stillServing13 = await apiCall('/api/habits');
+    ck('case13: the process is still serving after the failure',
+      stillServing13.status === 200, JSON.stringify(stillServing13).slice(0, 200));
+  }
+
+  /* ---------- case 14 (FIX 4): two concurrent runs never share one temporary file name ---------- */
+
+  console.log('--- case 14 (FIX 4): two concurrent runs never share one temporary file name ---');
+  const dir14 = join(workdir, 'case14');
+  mkdirSync(dir14, { recursive: true });
+  const slowDump14 = join(workdir, 'slow-stub-pg-dump.sh');
+  writeFileSync(slowDump14, '#!/bin/sh\nsleep 0.5\nprintf "dump-data-from-pid-%s\\n" "$$"\n');
+  chmodSync(slowDump14, 0o755);
+  const cfg14 = backupConfig({
+    ...baseEnv, HABITERALL_BACKUP_DIR: dir14,
+    HABITERALL_BACKUP_SCHEDULE: '00:00', HABITERALL_BACKUP_KEEP: '7',
+    HABITERALL_PG_DUMP: slowDump14,
+  });
+  const instant14 = new Date(2031, 1, 22, 3, 0);
+  // Two RUNS directly (not through `backupTask`'s own `inFlight` guard,
+  // which exists precisely to keep one PROCESS from doing this to itself) —
+  // standing in for two separate REPLICA processes racing the same
+  // directory, each with its own module state and no shared `inFlight`.
+  const run14a = runBackup(cfg14, { instant: instant14 });
+  const run14b = runBackup(cfg14, { instant: instant14 });
+  let tmpNames14 = [];
+  await waitFor(() => {
+    tmpNames14 = readdirSync(dir14).filter((f) => f.endsWith('.tmp'));
+    return tmpNames14.length >= 2;
+  }, { timeoutMs: 5000, intervalMs: 20, what: 'two distinct .tmp files to coexist' });
+  ck('case14: two concurrent runs write to two DIFFERENT temporary names',
+    new Set(tmpNames14).size === 2, JSON.stringify(tmpNames14));
+  await Promise.all([run14a, run14b]);
+  const files14 = readdirSync(dir14);
+  ck('case14: neither run leaves a .tmp behind once both have settled',
+    !files14.some((f) => f.endsWith('.tmp')), JSON.stringify(files14));
+  ck('case14: exactly one final .sql file remains — one writer won the rename '
+    + '(the residual of two replicas duplicating the work is a documented single-writer assumption, not this fix)',
+    files14.filter((f) => f.endsWith('.sql')).length === 1, JSON.stringify(files14));
+
+  /* ---------- case 15 (FIX 5): PGPASSWORD only when the admin URL actually carried one ---------- */
+
+  console.log('--- case 15 (FIX 5): PGPASSWORD is set in the child only when the admin URL actually carried a password ---');
+  const envDump15 = join(workdir, 'env-dump-pg-dump.sh');
+  writeFileSync(envDump15,
+    '#!/bin/sh\nif [ -n "${PGPASSWORD+x}" ]; then printf "PGPASSWORD_SET=%s\\n" "$PGPASSWORD"; '
+    + 'else printf "PGPASSWORD_UNSET\\n"; fi\n');
+  chmodSync(envDump15, 0o755);
+
+  // (a) an admin URL WITH a password: PGPASSWORD is set to it.
+  const dir15a = join(workdir, 'case15a');
+  const cfg15a = backupConfig({
+    ...baseEnv, HABITERALL_BACKUP_DIR: dir15a,
+    HABITERALL_BACKUP_SCHEDULE: '00:00', HABITERALL_BACKUP_KEEP: '7',
+    HABITERALL_PG_DUMP: envDump15,
+  });
+  ck('case15a: config is enabled (the admin URL in this suite carries a password)', cfg15a.enabled === true);
+  // Derived from the SAME admin URL the suite runs with, rather than
+  // hard-coded, so this case still means something if the suite is ever run
+  // against different credentials.
+  const expectedPassword15a = pgDumpConnection(DATABASE_URL_ADMIN).password;
+  ck('case15a: the admin URL this suite runs with does carry a non-empty password '
+    + '(or this case is not testing what it claims to)', expectedPassword15a.length > 0);
+  await runBackup(cfg15a, { instant: new Date(2031, 1, 23, 3, 0) });
+  const files15a = readdirSync(dir15a);
+  const out15a = readFileSync(join(dir15a, files15a[0]), 'utf8');
+  ck('case15a (FIX 5): PGPASSWORD is set in the child env, to the URL\'s own password',
+    out15a.includes(`PGPASSWORD_SET=${expectedPassword15a}`), out15a);
+
+  // (b) an admin URL with NO password segment at all: PGPASSWORD must not be
+  // fabricated as an empty string, and — the exact bug — must not OVERWRITE
+  // an inherited PGPASSWORD from the parent process's own environment.
+  const dir15b = join(workdir, 'case15b');
+  const url15b = 'postgres://owner@localhost:5432/habiterall';   // no password
+  const cfg15b = backupConfig({
+    DATABASE_URL_ADMIN: url15b, HABITERALL_BACKUP_DIR: dir15b,
+    HABITERALL_BACKUP_SCHEDULE: '00:00', HABITERALL_BACKUP_KEEP: '7',
+    HABITERALL_PG_DUMP: envDump15,
+  });
+  ck('case15b: a passwordless admin URL is still a valid, enabled connection string',
+    cfg15b.enabled === true, JSON.stringify(cfg15b));
+
+  const priorPgPassword15 = process.env.PGPASSWORD;
+  process.env.PGPASSWORD = 'inherited-from-parent-env';
+  try {
+    await runBackup(cfg15b, { instant: new Date(2031, 1, 23, 3, 0) });
+  } finally {
+    if (priorPgPassword15 === undefined) delete process.env.PGPASSWORD;
+    else process.env.PGPASSWORD = priorPgPassword15;
+  }
+  const files15b = readdirSync(dir15b);
+  const out15b = readFileSync(join(dir15b, files15b[0]), 'utf8');
+  ck('case15b (FIX 5): an inherited PGPASSWORD is NOT overwritten with an empty string for a passwordless URL',
+    out15b.includes('PGPASSWORD_SET=inherited-from-parent-env'), out15b);
 
   console.log(`\n${fails ? `${fails} check(s) failed` : 'all checks passed'}`);
 } finally {

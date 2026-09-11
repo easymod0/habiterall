@@ -1079,9 +1079,34 @@ HABITERALL_BACKUP_KEEP=7
 #
 # Two ways to keep the app from ever holding that credential at all: run
 # `pg_dump` from outside the app on your own schedule (see SETUP.md for the
-# manual command), or create a dedicated least-privilege dump role — a
-# `BYPASSRLS` role granted only `SELECT` — instead of handing over the owner
-# credential.
+# manual command), or create a dedicated least-privilege dump role instead of
+# handing over the owner credential. This exact grant list was MEASURED, not
+# merely suggested: a NOSUPERUSER role with BYPASSRLS, USAGE on the schema,
+# and SELECT on every table AND every sequence dumps successfully — exit 0,
+# the canary row present, and byte-identical to the superuser dump (32,083
+# bytes, both). The SEQUENCES grant is the part that is easy to miss: without
+# it `pg_dump` fails with `permission denied for sequence categories_id_seq`.
+#
+#   CREATE ROLE habiterall_dump WITH LOGIN PASSWORD '...' NOSUPERUSER BYPASSRLS;
+#   GRANT USAGE ON SCHEMA public TO habiterall_dump;
+#   GRANT SELECT ON ALL TABLES IN SCHEMA public TO habiterall_dump;
+#   GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO habiterall_dump;
+#   -- and after any migration that adds a table or sequence:
+#   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO habiterall_dump;
+#   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON SEQUENCES TO habiterall_dump;
+#
+# Point DATABASE_URL_ADMIN at this role instead of the owner and the app never
+# holds a credential that can write anything.
+#
+# ONE REPLICA ONLY may own this directory. Nothing here serialises the dump
+# across processes — each run's temporary file has a unique, per-run suffix,
+# so two replicas can no longer interleave their bytes into one corrupt file
+# reported as success, but two replicas pointed at the same
+# HABITERALL_BACKUP_DIR will still both dump and one will simply win the
+# rename, duplicating the work. The no-overlap guarantee this feature makes
+# is per PROCESS (in-memory module state), not a lock over the directory, so
+# it cannot coordinate two replicas by itself. If you run more than one
+# replica of the app, set HABITERALL_BACKUP_DIR on exactly one of them.
 
 # Path to `pg_dump` inside the image, if you need something other than the
 # one already on PATH. `pg_dump` must be AT LEAST the server's major version
@@ -1846,7 +1871,12 @@ export deliberately withholds (your Discord/ntfy credentials, the notify
 timezone), plus tables JSON never touches at all — the password hash, the
 session secret, sessions, and the notifier's own logs. That is also its cost:
 **a `.db` snapshot is a credential-bearing file** and has to be stored like the
-database itself, not like the portable export.
+database itself, not like the portable export. Both artefacts (`.json` and
+`.db`) are created mode `0600` — owner read/write only, not whatever your
+umask would otherwise leave. `VACUUM INTO` is one SQLite statement, but it
+**is synchronous and blocks the whole server for as long as it takes** — fine
+for personal's single user at 03:00, and the reason cloud runs its dump as a
+separate process instead of a statement inside the app.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -1886,12 +1916,22 @@ logs an error naming the missing credential and writes no backups — it does
 not fail silently and it never falls back to the restricted role. If you would
 rather the app never hold that credential at all, run `pg_dump` from outside
 the app on your own schedule instead (see `habiterall-cloud/SETUP.md`), or
-grant a dedicated least-privilege dump role — `BYPASSRLS` with only `SELECT`
-— in place of the owner credential. `pg_dump` also has to be **at least the
-server's own major version**, or it refuses to run — the image ships one
-matched to the Postgres major in these compose files, so bumping the server's
-major means bumping the image's client too. There is no per-account restore,
-no point-in-time recovery and no replica here; see #240.
+grant a dedicated least-privilege dump role in place of the owner credential —
+a **measured, verified** combination, not merely suggested: `NOSUPERUSER`,
+`BYPASSRLS`, `USAGE` on the schema, and `SELECT` on every table and every
+sequence dumps successfully and byte-identically to the superuser dump; the
+exact `GRANT` statements are in `examples/cloud.env.example`. `pg_dump` also
+has to be **at least the server's own major version**, or it refuses to run —
+the image ships one matched to the Postgres major in these compose files, so
+bumping the server's major means bumping the image's client too. There is no
+per-account restore, no point-in-time recovery and no replica here; see #240.
+
+Only **one replica** may own a `HABITERALL_BACKUP_DIR`. The no-overlap
+guarantee (a unique temporary filename per run) is per-process module state,
+not a lock on the directory, so two replicas pointed at the same volume will
+both dump and one will simply win the rename — not a corrupt file, but
+duplicated work. If you run more than one instance of the app, set
+`HABITERALL_BACKUP_DIR` on exactly one of them.
 
 | Variable | Default | Purpose |
 |---|---|---|

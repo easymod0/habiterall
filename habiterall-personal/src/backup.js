@@ -21,7 +21,7 @@
  */
 
 import {
-  mkdirSync, writeFileSync, readdirSync, renameSync, unlinkSync, statSync,
+  mkdirSync, writeFileSync, readdirSync, renameSync, unlinkSync, statSync, chmodSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { db } from './db.js';
@@ -209,9 +209,22 @@ export async function runBackup(cfg, deps) {
           // concatenation would make a quote in the path a SQL-injection
           // surface. This is not optional.
           db.prepare('VACUUM INTO ?').run(tmpPath);
+          // Mode 0600, applied to the TEMPORARY file before the rename below
+          // — never after — so the final file is never briefly
+          // world-readable. SQLite creates the file itself, so unlike the
+          // JSON branch this cannot be passed at creation time: this
+          // snapshot holds the password hash and the session secret
+          // (root CLAUDE.md's fidelity note on this format), and a typical
+          // umask would otherwise leave it 0644.
+          chmodSync(tmpPath, 0o600);
         } else {
           const body = JSON.stringify(payload(), null, 2);
-          writeFileSync(tmpPath, body);
+          // Mode 0600 at creation time (fix round, issue #75): this file
+          // is stored "like the database itself", per the README, and the
+          // code should not be looser than that sentence — `writeFileSync`'s
+          // default mode (0666, so typically 0644 under an ordinary umask)
+          // would leave it group/world-readable.
+          writeFileSync(tmpPath, body, { mode: 0o600 });
         }
         // Atomic: rename onto the final name is one filesystem operation, so
         // a reader never observes a truncated file. A crash between the

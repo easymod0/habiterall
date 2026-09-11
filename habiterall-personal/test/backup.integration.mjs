@@ -42,6 +42,12 @@
  * schedule of '00:00' so each is due at whatever real time the suite happens
  * to run.
  *
+ * A fix round following review of 13aa15d adds mode assertions to cases 1
+ * (`.json`), F1 (`.db`) and F2 (`both`): both artefacts must land 0600, not
+ * whatever the OS default leaves under the runner's umask — the `.db`
+ * snapshot holds the password hash and the session secret, and the README
+ * already says to store it like the database itself.
+ *
  *   node test/backup.integration.mjs
  */
 
@@ -214,6 +220,12 @@ try {
   const files1 = readdirSync(dir1);
   ck('exactly one file appears after the tick', files1.length === 1, JSON.stringify(files1));
   ck('it is named for today', files1[0] === backupFileName(today1), files1[0]);
+  // Fix round (issue #75): the JSON export is stored "like the database
+  // itself" per the README, so the code must not be looser than that
+  // sentence — writeFileSync's default (typically 0644 under an ordinary
+  // umask) would leave it group/world-readable.
+  const mode1 = statSync(join(dir1, files1[0])).mode & 0o777;
+  ck('the .json artefact is created mode 0600', mode1 === 0o600, mode1.toString(8));
 
   const written1 = JSON.parse(readFileSync(join(dir1, files1[0]), 'utf8'));
   const viaButton1 = (await api('/api/export')).body;
@@ -416,6 +428,11 @@ try {
     filesF1[0] === backupFileName(todayF1, 'db'), filesF1[0]);
   ck('no .tmp remains after a successful db-only run',
     !filesF1.some((f) => f.endsWith('.tmp')), JSON.stringify(filesF1));
+  // Fix round (issue #75): the .db snapshot holds the password hash and the
+  // session secret (case F3, below, proves it holds a Discord webhook too),
+  // so it must land 0600, not VACUUM INTO's own default.
+  const modeF1 = statSync(join(dirF1, filesF1[0])).mode & 0o777;
+  ck('the .db artefact is created mode 0600', modeF1 === 0o600, modeF1.toString(8));
   // The status row must agree the run was clean. Without this, a mutation
   // that has `VACUUM INTO` write straight at the FINAL name (bypassing the
   // tmp-then-rename step) still leaves exactly one correctly-named .db file
@@ -463,6 +480,13 @@ try {
   ck('format: both writes exactly two files', filesF2.length === 2, JSON.stringify(filesF2));
   ck('both are dated today, one of each family',
     new Set(filesF2).has(jsonNameF2) && new Set(filesF2).has(dbNameF2), JSON.stringify(filesF2));
+  // Fix round (issue #75): both artefacts of a 'both' run, not just one.
+  const modeJsonF2 = statSync(join(dirF2, jsonNameF2)).mode & 0o777;
+  const modeDbF2 = statSync(join(dirF2, dbNameF2)).mode & 0o777;
+  ck("format: both — the .json artefact is created mode 0600",
+    modeJsonF2 === 0o600, modeJsonF2.toString(8));
+  ck("format: both — the .db artefact is created mode 0600",
+    modeDbF2 === 0o600, modeDbF2.toString(8));
 
   const writtenJsonF2 = JSON.parse(readFileSync(join(dirF2, jsonNameF2), 'utf8'));
   const viaButtonF2 = (await api('/api/export')).body;

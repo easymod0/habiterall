@@ -51,6 +51,14 @@ RUN mkdir -p /out/blueprints /out/icons /out/images && chown -R node:node /out
 # postgres:17-alpine. It is the only package this image installs.
 RUN apk add --no-cache postgresql17-client
 
+# Where the scheduled dump lands (`HABITERALL_BACKUP_DIR=/backups` in the
+# compose examples) — the exact same rule as `/out` above, paid the exact
+# same way: Docker seeds an empty named volume from whatever is at that path
+# in the image, ownership included, so a path the image does not have becomes
+# root-owned, and this container runs as `node`. Without this, the first
+# scheduled run's `createWriteStream` fails EACCES on a fresh volume.
+RUN mkdir -p /backups && chown -R node:node /backups
+
 USER node
 EXPOSE 3000
 

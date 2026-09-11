@@ -351,6 +351,16 @@ SQL-injection surface — this is not a style preference.
 left by a crashed previous run would otherwise break every future snapshot
 permanently; the write unlinks one, best effort, before ever calling it.
 
+**`VACUUM INTO` blocks the event loop, and that changes a phase-one premise.**
+`node:sqlite` is synchronous, so a `.db` snapshot stalls this whole server for
+as long as the clone takes. Phase one justified awaiting the backup hook
+inside `startNotifier`'s `running` guard on the grounds that the write was
+"synchronous and measured in milliseconds" — true of the JSON export, **not**
+true of `format: db` or `both` on a large database. Single-user personal at
+03:00 makes the blast radius acceptable and the cost is unmeasured at size;
+this is also the reason cloud's dump runs as a separate child process rather
+than a statement inside the app.
+
 **Retention always covers BOTH families, `kinds: ['json', 'db']`, regardless
 of which formats this run wrote** — never the cloud-only `sql` family, which a
 personal instance must not touch even if someone points both editions at one
@@ -368,3 +378,10 @@ password hash), `server_secrets` (the session secret), `sessions`,
 `notify_log`, `notify_status`, `device_clock`, `backup_status` itself. That is
 a real cost to say plainly, not just a capability: treat a `.db` snapshot like
 the database, not like the portable export.
+
+**Both artefacts are created mode `0600`** (fix round, issue #75) — the JSON
+export at creation (`writeFileSync(..., { mode: 0o600 })`) and the `.db`
+snapshot via `chmodSync` on the temporary file BEFORE the rename, since SQLite
+creates the file itself and the mode cannot be passed to `VACUUM INTO`. Code
+should not be looser than the README's own instruction to store a `.db`
+snapshot like the database itself.

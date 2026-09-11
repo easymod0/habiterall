@@ -12,7 +12,9 @@ import { throttleTouch } from './session-touch.js';
 import { initAuth, beginLogin, completeLogin, logoutUrl, requireAuth } from './auth.js';
 import { api, overviewMemoGauge } from './api.js';
 import { start as startNotifier, ntfyAnswerAdapter } from './notifier.js';
-import { backupConfig, backupTask, preflight as backupPreflight } from './backup.js';
+import {
+  backupConfig, reportBackupConfig, backupTask, preflight as backupPreflight,
+} from './backup.js';
 import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
 import { armShutdown, installShutdown } from '@habiterall/shared/shutdown.js';
@@ -380,13 +382,23 @@ const server = await start();
 // a real webhook. Nothing schedules the Android channel: the phone does that.
 // The backup hook rides the same guard for the same reason — a test importing
 // this module for its routes must not start dumping the real database either.
-const backup = backupTask();
+const backupCfg = backupConfig(process.env);
+// Once, at boot, whether or not backups end up enabled — never per request.
+// `GET /backup/status` (api.js) calls `backupEnabled()` -> `backupConfig()`
+// on every hit, and `backupConfig` is now PURE (FIX 3, issue #75 fix round):
+// what it found wrong used to be logged as a side effect of that call, so
+// any one of N tenants opening the "Backup and restore" dialog could drive
+// an error-level line into the operator's log at the read limiter's rate —
+// in exactly the state this feature ships deliberately (a backup directory
+// set before `DATABASE_URL_ADMIN` is added). Calling the reporter here,
+// unconditionally, is what still gets that line logged loudly at boot.
+reportBackupConfig(backupCfg);
+const backup = backupTask(process.env);   // null unless HABITERALL_BACKUP_DIR is set
 if (backup) {
   // dir, schedule and keep are fine in the server's own log — only the
   // operator reads it, and they are the one who set the directory in their
   // own compose file in the first place. It is the API response
   // (`GET /backup/status`, api.js) that must never carry any of them.
-  const backupCfg = backupConfig(process.env);
   log.info('backup.starting', {
     dir: backupCfg.dir, schedule: backupCfg.schedule, keep: backupCfg.keep,
   });

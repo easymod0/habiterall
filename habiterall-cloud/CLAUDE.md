@@ -728,6 +728,46 @@ on disk is the crash-safe record that the day succeeded (so a redeploy at
 run being retried every minute for the rest of the day while still trying
 again once, after a restart, if the operator has fixed the problem.
 
+**This edition is multi-replica and nothing here serialises the dump across
+processes — that is a deliberate, stated assumption, not an oversight.** Each
+run's temporary file carries a random, per-run suffix rather than a fixed
+`.tmp` name, so two replicas can no longer interleave their bytes into one
+corrupt file that still gets logged as `backup.ok` on both sides — but that
+fix only removes the CORRUPTION, not the RACE: two replicas both pointed at
+one `HABITERALL_BACKUP_DIR` will still both see `todaysFileExists` false, both
+dump the whole database, and both `renameSync` onto the same final name — one
+wins, one's work is simply thrown away. The no-two-runs-at-once guarantee
+(`inFlight`, `lastAttemptDate`) is **per-process module state**, not a lock
+over the directory, and cannot coordinate a second process by construction.
+Exactly ONE replica may own a backup directory; `examples/cloud.env.example`
+and the README say so in the operator-facing words.
+
+**A fix round following review of 13aa15d changed two things worth reading
+before touching this file again, because neither is visible from the diff
+alone:**
+
+- **`backupConfig` is deliberately free of logging side effects.**
+  `GET /backup/status` calls `backupEnabled()` -> `backupConfig()` on every
+  request, so a version of `backupConfig` that logged `backup.admin_url_missing`
+  as a side effect of computing `enabled` meant any ONE of N tenants opening
+  the "Backup and restore" dialog could drive an error-level line into the
+  operator's log, repeatedly, in exactly the state this feature ships
+  deliberately (a directory set before `DATABASE_URL_ADMIN` is added).
+  `backupConfig` now only classifies what it found (`scheduleInvalid`,
+  `keepInvalid`, `adminUrlMissing`, plus the raw values); `reportBackupConfig`
+  is the separate function that actually logs, called exactly ONCE, at boot,
+  from `server.js`, never from a route.
+- **A write-stream failure now kills the child.** Without it, `pg_dump`
+  writing to a destination that has started erroring (e.g. `ENOSPC`) blocks on
+  its own `write()` once the OS pipe fills (64 KiB), and nothing notices until
+  `BACKUP_TIMEOUT_MS` (two hours) finally kills it — for those two hours the
+  child holds its `REPEATABLE READ` snapshot open, which pins the xmin horizon
+  and bloats every table `pg_dump` has already touched, while `inFlight` blocks
+  every later attempt for the rest of that window. `runBackup` now destroys
+  `child.stdout` (closing the pipe's read end, so the child's next write fails
+  with `EPIPE`) and sends `SIGKILL` the moment the write stream errors, rather
+  than waiting on the timeout to notice.
+
 ## Local stack
 
 `docker compose up -d` brings up Postgres, Authentik (server + worker), the

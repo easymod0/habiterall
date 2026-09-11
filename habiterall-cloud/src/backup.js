@@ -32,6 +32,7 @@ import { spawn } from 'node:child_process';
 import {
   mkdirSync, readdirSync, unlinkSync, renameSync, statSync, existsSync, createWriteStream,
 } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { assertConnectionString } from './db/url.js';
 import { parseBackupSchedule, backupFileName, prunableBackups } from '@habiterall/shared/backup.js';
@@ -66,9 +67,24 @@ const STDERR_CAP_BYTES = 8 * 1024;
  * key) so `shared/test/compose.test.js`'s graph walker can see it. Never
  * throws — a bad backup variable must not stop the server booting.
  *
+ * PURE — no logging, no side effects (fix-round FIX 3, issue #75).
+ * `backupEnabled()` calls this on every `GET /backup/status` request, and
+ * this function used to log `backup.admin_url_missing` at ERROR as a side
+ * effect of computing `enabled` — so any ONE of N tenants opening the
+ * "Backup and restore" dialog drove an error-level line into the operator's
+ * log at the read limiter's rate, in exactly the state this feature ships
+ * deliberately (a backup directory set before `DATABASE_URL_ADMIN` is
+ * added). What WOULD have been logged is carried out on the returned object
+ * instead (`scheduleInvalid`/`keepInvalid`/`adminUrlMissing`, plus the raw
+ * values the messages need) so `reportBackupConfig` can log it once, at
+ * boot, without this function needing to know who is asking.
+ *
  * @param {Record<string, string|undefined>} env
  * @returns {{dir: string, schedule: string, scheduleMinutes: number,
- *   keep: number, adminUrl: string, pgDump: string, enabled: boolean}}
+ *   keep: number, adminUrl: string, pgDump: string, enabled: boolean,
+ *   scheduleInvalid: boolean, rawSchedule: string|undefined,
+ *   keepInvalid: boolean, rawKeep: string|undefined,
+ *   adminUrlMissing: boolean}}
  */
 export function backupConfig(env) {
   const dir = String(env.HABITERALL_BACKUP_DIR ?? '').trim();
@@ -78,9 +94,7 @@ export function backupConfig(env) {
   // Unset says nothing wrong; set-but-unparseable is a typo that must not
   // silently disable the backups, and must not be silent either.
   const scheduleWasSet = rawSchedule !== undefined && rawSchedule !== '';
-  if (parsedSchedule === null && scheduleWasSet) {
-    log.warn('backup.schedule_invalid', { value: rawSchedule, fallback: DEFAULT_SCHEDULE });
-  }
+  const scheduleInvalid = parsedSchedule === null && scheduleWasSet;
   const schedule = parsedSchedule === null ? DEFAULT_SCHEDULE : String(rawSchedule);
   const scheduleMinutes = parsedSchedule === null ? DEFAULT_SCHEDULE_MINUTES : parsedSchedule;
 
@@ -89,11 +103,9 @@ export function backupConfig(env) {
   const parsedKeep = Math.floor(Number(rawKeep));
   // `keep: 0` must never be honoured — it would mean deleting the file this
   // very run just wrote.
-  const keepInvalid = !Number.isFinite(parsedKeep) || parsedKeep < 1;
-  if (keepInvalid && keepWasSet) {
-    log.warn('backup.keep_invalid', { value: rawKeep, fallback: DEFAULT_KEEP });
-  }
-  const keep = keepInvalid ? DEFAULT_KEEP : parsedKeep;
+  const parsedKeepInvalid = !Number.isFinite(parsedKeep) || parsedKeep < 1;
+  const keepInvalid = parsedKeepInvalid && keepWasSet;
+  const keep = parsedKeepInvalid ? DEFAULT_KEEP : parsedKeep;
 
   // No fallback to DATABASE_URL. `migrate.js` has one (`DATABASE_URL_ADMIN ??
   // DATABASE_URL`) and copying it here is the silent-empty-backup trap: it
@@ -117,7 +129,31 @@ export function backupConfig(env) {
   const pgDump = String(env.HABITERALL_PG_DUMP ?? '').trim() || 'pg_dump';
 
   const dirWanted = Boolean(dir);
-  if (dirWanted && !adminUrlUsable) {
+  const adminUrlMissing = dirWanted && !adminUrlUsable;
+
+  return {
+    dir, schedule, scheduleMinutes, keep, adminUrl, pgDump,
+    enabled: dirWanted && adminUrlUsable,
+    scheduleInvalid, rawSchedule, keepInvalid, rawKeep, adminUrlMissing,
+  };
+}
+
+/**
+ * Log what `backupConfig` found wrong, if anything — split out of it on
+ * purpose (FIX 3, issue #75 fix round). Call this ONCE, at boot, beside
+ * `preflight` — never per request. See `backupConfig`'s own comment for why
+ * logging cannot live there.
+ *
+ * @param {ReturnType<typeof backupConfig>} cfg
+ */
+export function reportBackupConfig(cfg) {
+  if (cfg.scheduleInvalid) {
+    log.warn('backup.schedule_invalid', { value: cfg.rawSchedule, fallback: DEFAULT_SCHEDULE });
+  }
+  if (cfg.keepInvalid) {
+    log.warn('backup.keep_invalid', { value: cfg.rawKeep, fallback: DEFAULT_KEEP });
+  }
+  if (cfg.adminUrlMissing) {
     // An operator who asked for backups and did not get them must be told at
     // the top of their volume of a log, not left with silence.
     log.error('backup.admin_url_missing', {
@@ -125,11 +161,6 @@ export function backupConfig(env) {
         'not a valid connection string, or not a postgres:// URL',
     });
   }
-
-  return {
-    dir, schedule, scheduleMinutes, keep, adminUrl, pgDump,
-    enabled: dirWanted && adminUrlUsable,
-  };
 }
 
 /**
@@ -205,104 +236,174 @@ export async function runBackup(cfg, deps = {}) {
   // folding the two together breaks one of them (root CLAUDE.md).
   const { date } = zonedClock(instant, '');
 
-  mkdirSync(cfg.dir, { recursive: true });
-
-  const name = backupFileName(date, 'sql');
-  const finalPath = join(cfg.dir, name);
-  const tmpPath = `${finalPath}.tmp`;
-  // A stale `.tmp` from a crashed previous run must not be mistaken for this
-  // run's output — best effort, the same rule as personal's `.db` snapshot.
-  try { unlinkSync(tmpPath); } catch { /* no stale .tmp — fine */ }
-
-  let conn;
+  // FIX 1 (issue #75 fix round): this function's own JSDoc says "never
+  // throws", and it did not keep that promise — `mkdirSync` below and the
+  // `renameSync`/`statSync` pair further down used to sit OUTSIDE every try
+  // in this function. `backupTask` builds `inFlight = runBackup(...)
+  // .finally(...)` with no `.catch()` (belt-and-braces added there too, see
+  // its own comment) and never awaits the result, so a rejection here became
+  // an UNHANDLED promise rejection — which Node treats as fatal by default —
+  // taking down the whole instance (every tenant's reminders and API with
+  // it) for something as ordinary as a read-only mount, a regular file
+  // sitting at a path component, or a root-owned volume. Wrapping the WHOLE
+  // body (mirroring `habiterall-personal/src/backup.js`'s `runBackup`, which
+  // already does this) is what keeps that promise true: every path below now
+  // logs `backup.failed` at error and returns normally.
   try {
-    conn = pgDumpConnection(cfg.adminUrl);
+    mkdirSync(cfg.dir, { recursive: true });
+
+    const name = backupFileName(date, 'sql');
+    const finalPath = join(cfg.dir, name);
+    // A random, per-RUN suffix (FIX 4, issue #75 fix round) — never
+    // `process.pid`, because in a container the node process is usually pid
+    // 1, so two replicas sharing this volume would pick the SAME name and
+    // this would do nothing. Before this, two replicas both saw
+    // `todaysFileExists` false, both opened the identical `${finalPath}.tmp`
+    // with O_TRUNC, interleaved two dumps' bytes into it, and both renamed —
+    // a corrupt file logged as `backup.ok` on both sides. With a unique
+    // suffix per run, two writers can never share one temporary file, so the
+    // blanket "unlink a stale .tmp first" this module used to do is GONE:
+    // with unique names nothing this run wrote can already exist, and
+    // unlinking blindly would delete another writer's still-in-progress
+    // file — the very corruption this fix removes. What each failure path
+    // below still does is unlink its OWN tmp file. The suffix sits between
+    // the `.sql` extension and the final `.tmp`, so it can never match
+    // `BACKUP_SQL_FILE_RE` (anchored `\.sql$`) and retention can never see it
+    // as a kind this module manages.
+    const tmpPath = `${finalPath}.${randomUUID()}.tmp`;
+
+    let conn;
+    try {
+      conn = pgDumpConnection(cfg.adminUrl);
+    } catch (err) {
+      log.error('backup.failed', { date }, err);
+      return;
+    }
+
+    const child = spawn(cfg.pgDump, pgDumpArgs(conn.arg), {
+      // PGPASSWORD only when the URL actually carried a password (FIX 5,
+      // issue #75 fix round). Always setting the key — even to `''` for a
+      // passwordless URL — would OVERRIDE an inherited PGPASSWORD from the
+      // parent environment with nothing, and would suppress a `.pgpass`
+      // lookup that `--no-password` (see `pgDumpArgs`) leaves as the only
+      // other way to authenticate. Never in argv either way — see
+      // `pgDumpConnection`'s own comment.
+      env: conn.password ? { ...process.env, PGPASSWORD: conn.password } : { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    // Bounded: a per-row Postgres error can spew, and this only has to name
+    // the cause, not reproduce the whole thing.
+    let stderrTail = '';
+    child.stderr.on('data', (chunk) => {
+      if (stderrTail.length < STDERR_CAP_BYTES) stderrTail += chunk.toString('utf8');
+    });
+
+    // Mode 0o600 (FIX 5, issue #75 fix round): this file holds every
+    // tenant's rows plus every stored ntfy token and Discord webhook, and
+    // `createWriteStream`'s default (0666, so typically 0644 under an
+    // ordinary umask) would leave it group/world-readable; `renameSync`
+    // preserves whatever mode the file was created with.
+    const tmpStream = createWriteStream(tmpPath, { mode: 0o600 });
+    let streamErr = null;
+    /** @type {Promise<void>} */
+    const streamFinished = new Promise((resolve) => {
+      tmpStream.on('finish', () => resolve());
+      tmpStream.on('error', (err) => {
+        streamErr = err;
+        // FIX 2 (issue #75 fix round): without this, `pipe` stops reading on
+        // a write error but nothing tells `pg_dump` to stop producing — the
+        // OS pipe fills at 64 KiB, the child blocks on its own `write()`,
+        // and `BACKUP_TIMEOUT_MS` (two hours) becomes the ONLY thing that
+        // ever notices. For those two hours `pg_dump` holds its REPEATABLE
+        // READ snapshot open, pinning the xmin horizon so vacuum cannot
+        // reclaim, while `inFlight` blocks every later attempt. Destroying
+        // `stdout` unblocks the child's write immediately by closing the
+        // read end of the pipe (its next write fails with EPIPE); the
+        // `SIGKILL` is belt and braces in case something else still holds it
+        // open.
+        child.stdout.destroy();
+        child.kill('SIGKILL');
+        resolve();
+      });
+    });
+    child.stdout.pipe(tmpStream);
+
+    let childErr = null;
+    let exitCode = null;
+    let exitSignal = null;
+    /** @type {Promise<void>} */
+    const childClosed = new Promise((resolve) => {
+      child.on('error', (err) => { childErr = err; resolve(); });
+      child.on('close', (code, signal) => { exitCode = code; exitSignal = signal; resolve(); });
+    });
+
+    // A hung child must not leave `inFlight` set forever — see the
+    // constant's own comment above. `timedOut` is what tells the timeout
+    // kill apart from an operator's own SIGTERM in the log below (FIX 5,
+    // issue #75 fix round) — the one failure whose remedy differs (a bigger
+    // `BACKUP_TIMEOUT_MS`, or a faster dump) from every other signal.
+    let timedOut = false;
+    let killGrace = null;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      killGrace = setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_MS);
+    }, BACKUP_TIMEOUT_MS);
+
+    // BOTH, not either. Renaming on the child's exit alone is a
+    // truncated-file race: the child can close its stdout and exit before
+    // the write stream has finished flushing everything it already
+    // received.
+    await Promise.all([childClosed, streamFinished]);
+    clearTimeout(timeout);
+    if (killGrace) clearTimeout(killGrace);
+
+    const failed = Boolean(childErr) || Boolean(streamErr) || exitCode !== 0 || Boolean(exitSignal);
+    if (failed) {
+      // The partial bytes must not survive (premise 5: a killed dump left
+      // 9,435 bytes of truncated SQL on disk, looking like a backup).
+      try { unlinkSync(tmpPath); } catch { /* best effort */ }
+      log.error('backup.failed', {
+        date, exit_code: exitCode, signal: exitSignal ?? undefined,
+        ...(timedOut ? { timed_out: true } : {}),
+        stderr: stderrTail.trim(),
+      }, ...(childErr ?? streamErr ? [childErr ?? streamErr] : []));
+      return;
+    }
+
+    renameSync(tmpPath, finalPath);
+    const bytes = statSync(finalPath).size;
+
+    let pruned;
+    try {
+      const names = readdirSync(cfg.dir);
+      // `kinds: ['sql']` and never `json`/`db` — a cloud instance must not
+      // delete a personal instance's files if someone ever points both at
+      // one directory.
+      pruned = prunableBackups(names, cfg.keep, { except: [name], kinds: ['sql'] });
+      for (const doomed of pruned) unlinkSync(join(cfg.dir, doomed));
+    } catch (err) {
+      // The file that DID land above stays — only the STATE says error, the
+      // same rule personal's runBackup follows: a volume quietly filling up
+      // from a failed prune is exactly the failure that must be loud.
+      log.error('backup.prune_failed', { date, file: name }, err);
+      return;
+    }
+
+    if (pruned.length) {
+      log.info('backup.pruned', { date, count: pruned.length, files: pruned.join(', ') });
+    }
+
+    log.info('backup.ok', { date, file: name, bytes, pruned: pruned.length });
   } catch (err) {
+    // Every other failure path lands here — `mkdirSync`, or anything thrown
+    // by an `fs` call outside the inner handlers above (`renameSync`,
+    // `statSync`): log at error and return normally rather than let it
+    // propagate. See this function's own comment above for the cost of NOT
+    // having this (FIX 1, issue #75 fix round).
     log.error('backup.failed', { date }, err);
-    return;
   }
-
-  const child = spawn(cfg.pgDump, pgDumpArgs(conn.arg), {
-    env: { ...process.env, PGPASSWORD: conn.password },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
-  // Bounded: a per-row Postgres error can spew, and this only has to name the
-  // cause, not reproduce the whole thing.
-  let stderrTail = '';
-  child.stderr.on('data', (chunk) => {
-    if (stderrTail.length < STDERR_CAP_BYTES) stderrTail += chunk.toString('utf8');
-  });
-
-  const tmpStream = createWriteStream(tmpPath);
-  let streamErr = null;
-  /** @type {Promise<void>} */
-  const streamFinished = new Promise((resolve) => {
-    tmpStream.on('finish', () => resolve());
-    tmpStream.on('error', (err) => { streamErr = err; resolve(); });
-  });
-  child.stdout.pipe(tmpStream);
-
-  let childErr = null;
-  let exitCode = null;
-  let exitSignal = null;
-  /** @type {Promise<void>} */
-  const childClosed = new Promise((resolve) => {
-    child.on('error', (err) => { childErr = err; resolve(); });
-    child.on('close', (code, signal) => { exitCode = code; exitSignal = signal; resolve(); });
-  });
-
-  // A hung child must not leave `inFlight` set forever — see the constant's
-  // own comment above.
-  let killGrace = null;
-  const timeout = setTimeout(() => {
-    child.kill('SIGTERM');
-    killGrace = setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_MS);
-  }, BACKUP_TIMEOUT_MS);
-
-  // BOTH, not either. Renaming on the child's exit alone is a truncated-file
-  // race: the child can close its stdout and exit before the write stream has
-  // finished flushing everything it already received.
-  await Promise.all([childClosed, streamFinished]);
-  clearTimeout(timeout);
-  if (killGrace) clearTimeout(killGrace);
-
-  const failed = Boolean(childErr) || Boolean(streamErr) || exitCode !== 0 || Boolean(exitSignal);
-  if (failed) {
-    // The partial bytes must not survive (premise 5: a killed dump left 9,435
-    // bytes of truncated SQL on disk, looking like a backup).
-    try { unlinkSync(tmpPath); } catch { /* best effort */ }
-    log.error('backup.failed', {
-      date, exit_code: exitCode, signal: exitSignal ?? undefined,
-      stderr: stderrTail.trim(),
-    }, ...(childErr ?? streamErr ? [childErr ?? streamErr] : []));
-    return;
-  }
-
-  renameSync(tmpPath, finalPath);
-  const bytes = statSync(finalPath).size;
-
-  let pruned;
-  try {
-    const names = readdirSync(cfg.dir);
-    // `kinds: ['sql']` and never `json`/`db` — a cloud instance must not
-    // delete a personal instance's files if someone ever points both at one
-    // directory.
-    pruned = prunableBackups(names, cfg.keep, { except: [name], kinds: ['sql'] });
-    for (const doomed of pruned) unlinkSync(join(cfg.dir, doomed));
-  } catch (err) {
-    // The file that DID land above stays — only the STATE says error, the
-    // same rule personal's runBackup follows: a volume quietly filling up
-    // from a failed prune is exactly the failure that must be loud.
-    log.error('backup.prune_failed', { date, file: name }, err);
-    return;
-  }
-
-  if (pruned.length) {
-    log.info('backup.pruned', { date, count: pruned.length, files: pruned.join(', ') });
-  }
-
-  log.info('backup.ok', { date, file: name, bytes, pruned: pruned.length });
 }
 
 let inFlight = null;
@@ -356,7 +457,19 @@ export function backupTask(env = process.env, deps = {}) {
       return;
     }
     lastAttemptDate = date;
-    inFlight = runBackup(cfg, { ...deps, instant }).finally(() => { inFlight = null; });
+    inFlight = runBackup(cfg, { ...deps, instant })
+      // Deliberately redundant with `runBackup`'s own outer try/catch (FIX
+      // 1, issue #75 fix round): `.finally()` below does NOT swallow a
+      // rejection — it observes settlement and then re-throws the same
+      // reason — so without this `.catch()`, a future unguarded throw
+      // inside `runBackup` would still leave `inFlight` a REJECTED promise
+      // with no handler, and this call site is never awaited by its own
+      // caller (see this function's own comment above), so Node would treat
+      // that as an unhandled rejection and terminate the process. The cost
+      // of being wrong here is the whole instance, which is why this stays
+      // even though `runBackup` should never let anything reach it.
+      .catch((err) => { log.error('backup.unhandled', { date }, err); })
+      .finally(() => { inFlight = null; });
     // Deliberately NOT awaited — see this function's own comment above.
   };
 }
