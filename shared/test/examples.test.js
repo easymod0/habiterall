@@ -59,6 +59,35 @@ test('every excuse in NOT_PRINTED still names a file that is there', () => {
     'Remove it from scripts/sync-compose-docs.mjs.');
 });
 
+/**
+ * One service's own lines out of a compose file, ending where the next service
+ * begins.
+ *
+ * A service key is the only thing at exactly two spaces of indentation; every
+ * key inside one is at four or more, and the top-level `volumes:` is at zero.
+ * So the next `\n  name:` is the boundary, and end of file is the boundary for
+ * whichever service is written last.
+ *
+ * Then the trailing comment run comes off, and that half is not cosmetic: a
+ * comment block sits ABOVE the service it describes, so everything between the
+ * last key of one service and the next service's own line is prose about the
+ * NEXT one. Without this, `app`'s block swallowed the paragraph introducing
+ * `notifier` — and a guard reading one service's rules and attributing them to
+ * another is worse than no guard, because it fails and gets "fixed" by moving
+ * the prose.
+ *
+ * @param {string} text @param {string} name @returns {string}
+ */
+function serviceBlock(text, name) {
+  const start = text.indexOf(`\n  ${name}:\n`);
+  assert.ok(start >= 0, `no service named ${name} in this compose file`);
+  const rest = text.slice(start + 1);
+  const next = rest.slice(1).search(/\n {2}[a-z][a-z0-9-]*:\n/);
+  const lines = (next === -1 ? rest : rest.slice(0, next + 1)).split('\n');
+  while (lines.length > 0 && /^\s*(#.*)?$/.test(lines[lines.length - 1])) lines.pop();
+  return lines.join('\n');
+}
+
 test('the examples pull the published images, not a local build', () => {
   // A `build:` here would send a reader to clone the repository, which is the
   // one thing these files exist to avoid.
@@ -88,7 +117,20 @@ test('the cloud example runs migrations as a separate credential', () => {
   assert.match(text, /service_completed_successfully/,
     'the app does not wait for migrations to finish');
 
-  const appBlock = text.slice(text.indexOf('  app:'));
+  // Bounded at the NEXT service rather than run to end of file, and that is
+  // not tidying. It used to be a slice to EOF, which was correct only for as
+  // long as `app` happened to be the last service in the file: #194 added a
+  // `notifier` below it whose comment names DATABASE_URL_ADMIN on purpose —
+  // that is where an operator turning backups on is now told to put it — and
+  // the unbounded slice failed on a service it was never about. A guard whose
+  // verdict turns on the order two services are written in is a guard that is
+  // right by accident.
+  const appBlock = serviceBlock(text, 'app');
+  // Both ends of the slice, because both ways of getting it wrong are silent:
+  // one reads the wrong service and the other reads nothing at all and passes.
+  assert.match(appBlock, /APP_PORT/, 'the app block does not contain the app');
+  assert.ok(!appBlock.includes('notifier-entry.js'),
+    'the app block ran past the app and into the notifier');
   assert.ok(!appBlock.includes('DATABASE_URL_ADMIN'),
     'the app must not hold the admin credential');
   assert.match(appBlock, /habiterall_app:/, 'the app must connect as the restricted role');

@@ -4,12 +4,13 @@
 #   cp ../examples/cloud.env.example .env    # then fill in the secrets
 #   docker compose up -d
 #
-# The app, the database and the migration step carry no environment block here.
-# It is in ../examples/docker-compose.cloud.yml — the file the README prints
-# and a reader downloads — and the three services below EXTEND those rather
-# than copying them, so it exists once for this edition. The two were
-# maintained by hand and had drifted in both directions: six variables here
-# that the example never mentioned, and a `TZ` there that this file did not set.
+# The app, the notifier, the database and the migration step carry no
+# environment block here. It is in ../examples/docker-compose.cloud.yml — the
+# file the README prints and a reader downloads — and the four services below
+# EXTEND those rather than copying them, so it exists once for this edition.
+# The two were maintained by hand and had drifted in both directions: six
+# variables here that the example never mentioned, and a `TZ` there that this
+# file did not set.
 #
 # What is added below is exactly what a checkout is for and a published file
 # cannot have: `build:` in place of `image:`, and the identity provider. Note
@@ -240,6 +241,20 @@ services:
     # alias the browser-facing host to the Authentik container.
     extra_hosts:
       - '${OIDC_HOST_ALIAS:-localhost}:host-gateway'
+
+  # The reminder tick, the Discord gateway and the scheduled backup (#194) —
+  # same `image:` tag as the other three build sites, so Compose builds it
+  # once. `habiterall-backups` is already declared below, and `depends_on`
+  # comes across from the extended file.
+  notifier:
+    extends:
+      file: ../examples/docker-compose.cloud.yml
+      service: notifier
+    build:
+      context: ..
+      dockerfile: habiterall-cloud/Dockerfile
+    image: habiterall-cloud:latest
+    container_name: habiterall-notifier
 
 # Named again here: `extends` works at the service level, so a top-level
 # declaration in the file being extended is not carried across. `db-data` is

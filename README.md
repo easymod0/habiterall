@@ -746,10 +746,6 @@ services:
       authentik-bootstrap: { condition: service_completed_successfully }
     ports:
       - '${BIND_ADDR:-}:${APP_PORT:-3100}:3000'
-    volumes:
-      # Scheduled backups land here, not in db-data: a volume that dies takes
-      # the database with it, so the dump belongs on separate storage.
-      - habiterall-backups:/backups
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten
@@ -764,10 +760,13 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?openssl rand -hex 32}
       ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}   # local testing ONLY
       TRUST_PROXY: ${TRUST_PROXY:-1}                       # TLS terminators in front
+      # Still here, and it is not the scheduler: `POST /api/notify/test` — the
+      # "Send a test" button in ⚙ → Notifications — runs in THIS process and
+      # reads the token and PUBLIC_URL to build the message. `HABITERALL_NOTIFY`
+      # and the tick's own knobs are NOT here, because nothing in this process
+      # reads them any more; they are on `notifier` below, and setting them here
+      # would be a line that does nothing while looking like the switch.
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}            # adds Yes / No / Skip buttons
-      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
-      HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
-      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
       # Which hosts a user's ntfy topic URL may name. Empty is ntfy.sh alone;
       # your own ntfy REPLACES that, and `off` refuses every one. The server
       # fetches whatever is here, so this is the whole guard. An entry may name
@@ -777,20 +776,6 @@ services:
       # The fallback clock. A container has no timezone, so it is UTC; users
       # can override it for their own reminders in ⚙ → Notifications.
       TZ: ${TZ:-Etc/UTC}
-
-      # Scheduled backups: one whole-database pg_dump a night, every account,
-      # one file. Empty DIR is off. The dump must bypass row-level security
-      # (every tenant table is FORCE ROW LEVEL SECURITY), which the app's own
-      # restricted role cannot do — and this example deliberately does not
-      # grant the app the database owner credential that would let it. Add
-      # that credential to this service yourself, knowingly, to turn backups
-      # on; see "Scheduled backups" in the README and cloud.env.example for
-      # what to add and what it costs. Until you do, the app logs an error
-      # naming the missing credential and writes no backups.
-      HABITERALL_BACKUP_DIR: ${HABITERALL_BACKUP_DIR:-}    # e.g. /backups; empty is off
-      HABITERALL_BACKUP_SCHEDULE: ${HABITERALL_BACKUP_SCHEDULE:-}  # 03:00
-      HABITERALL_BACKUP_KEEP: ${HABITERALL_BACKUP_KEEP:-}  # 7
-      HABITERALL_PG_DUMP: ${HABITERALL_PG_DUMP:-}          # pg_dump path; the image's own is on PATH
 
       # Limits, the pool, and logging. Empty means the default, so these are
       # here to make the knob reachable from .env rather than to set anything
@@ -824,6 +809,84 @@ services:
     # slow anyway. Raising it does not lengthen the drain -- the 8s is fixed
     # in the app, so a longer grace only means the process leaves earlier
     # than the grace allows.
+    stop_grace_period: 10s
+
+  # The reminder tick, the Discord gateway and the scheduled backup — split out
+  # of `app` (issue #194) so a fleet of app replicas shares no tick, no gateway
+  # socket and no extra Postgres connections between them. See
+  # `habiterall-cloud/src/notifier-entry.js` for the full reasoning.
+  #
+  # EXACTLY ONE OF THIS, EVER — never `--scale` it. The app is the service you
+  # scale; this one is not, and is never run more than once. On Kubernetes the
+  # Deployment needs `strategy: { type: Recreate }`: the default `RollingUpdate`
+  # starts the new pod before terminating the old one, so `replicas: 1` alone
+  # still has a window with TWO Discord gateways open, both able to answer the
+  # same three-second button press — Discord shows "This interaction failed" on
+  # a press that was, in fact, handled by the other one.
+  #
+  # Hand-written rather than `extends: service: app`: `extends` concatenates
+  # sequences and cannot remove a key, so extending `app` would inherit its
+  # `ports:` and both containers would fight for the published port.
+  notifier:
+    image: ghcr.io/easymod0/habiterall-cloud:latest
+    depends_on:
+      db: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    command: ['node', 'src/notifier-entry.js']
+    volumes:
+      # Scheduled backups land here, not in db-data: a volume that dies takes
+      # the database with it, so the dump belongs on separate storage.
+      - habiterall-backups:/backups
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://habiterall_app:${APP_DB_PASSWORD}@db:5432/habiterall
+      # MUST be the same value as the app's own SESSION_SECRET, above — this
+      # process signs every ntfy answer code with it, and the app's
+      # `/notify/ntfy/answer` route verifies the signature with its own copy.
+      # A mismatch fails every ntfy button closed, silently.
+      SESSION_SECRET: ${SESSION_SECRET:?openssl rand -base64 36}
+      PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}
+      HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
+      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}
+      NTFY_ALLOWED_HOSTS: ${NTFY_ALLOWED_HOSTS:-}
+      TZ: ${TZ:-Etc/UTC}
+
+      # Scheduled backups: one whole-database pg_dump a night, every account,
+      # one file. Empty DIR is off. The dump must bypass row-level security
+      # (every tenant table is FORCE ROW LEVEL SECURITY), which this process's
+      # own restricted DATABASE_URL role cannot do — and this example
+      # deliberately does not grant it the database owner credential that
+      # would let it. Add DATABASE_URL_ADMIN to THIS service yourself,
+      # knowingly, to turn backups on; see "Scheduled backups" in the README
+      # and cloud.env.example for what to add and what it costs. Until you do,
+      # this container logs an error naming the missing credential and writes
+      # no backups. Add the same credential to `app` as well only if you also
+      # want ⚙ → Backup and restore to report backups as on — that dialog
+      # reads the APP's own environment, and the app never dumps.
+      HABITERALL_BACKUP_DIR: ${HABITERALL_BACKUP_DIR:-}    # e.g. /backups; empty is off
+      HABITERALL_BACKUP_SCHEDULE: ${HABITERALL_BACKUP_SCHEDULE:-}  # 03:00
+      HABITERALL_BACKUP_KEEP: ${HABITERALL_BACKUP_KEEP:-}  # 7
+      HABITERALL_PG_DUMP: ${HABITERALL_PG_DUMP:-}          # pg_dump path; the image's own is on PATH
+
+      # This process's OWN pool, interpolated from a separate knob
+      # (NOTIFIER_PG_POOL_MAX) rather than PG_POOL_MAX: it competes with no
+      # request traffic, so 2-3 is plenty, where the app's 10 is sized against
+      # /healthz's memo.
+      PG_POOL_MAX: ${NOTIFIER_PG_POOL_MAX:-}
+      PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}
+      PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}
+      PGSSL: ${PGSSL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      LOG_FORMAT: ${LOG_FORMAT:-}
+      LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}
+      LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}
+    # Not on-failure alone by convention: with HABITERALL_NOTIFY=off and no
+    # backup directory configured, this container has nothing to run and its
+    # entry point exits 0 having said so. `unless-stopped` would restart that
+    # forever; a genuine crash is a non-zero exit and still restarts.
+    restart: on-failure
     stop_grace_period: 10s
 
 volumes:
@@ -1001,9 +1064,12 @@ AUTHENTIK_BOOTSTRAP_EMAIL=admin@example.com
 AUTHENTIK_BOOTSTRAP_TOKEN=CHANGE_ME_api_token_for_setup
 
 # ---- reminders --------------------------------------------------------------
-# Reminders pointed at a Discord webhook are sent by this process, once a
-# minute; users with only the on-device destination cost nothing here, because
-# the phone arms its own alarms. `off` disables the loop entirely.
+# Read by the `notifier` container, not `app` (#194): the reminder tick, the
+# Discord gateway and the scheduled backup all run there now, so a fleet of
+# `app` replicas shares none of them. Reminders pointed at a Discord webhook
+# are sent once a minute; users with only the on-device destination cost
+# nothing here, because the phone arms its own alarms. Turning reminders off
+# is `HABITERALL_NOTIFY=off` — or simply not running the `notifier` container.
 HABITERALL_NOTIFY=on
 HABITERALL_NOTIFY_INTERVAL_MS=60000
 # Accounts visited per tick. A tick is a minute and each account may cost a
@@ -1071,22 +1137,29 @@ HABITERALL_BACKUP_KEEP=7
 
 # The dump needs a role that can BYPASS row-level security (superuser, or
 # `BYPASSRLS`) — every tenant table is `FORCE ROW LEVEL SECURITY`, which
-# applies RLS to the table OWNER too, so the app's own restricted DATABASE_URL
-# role cannot do this at all, and dumping "as the owner" plainly is not
-# enough either.
+# applies RLS to the table OWNER too, so this edition's restricted
+# DATABASE_URL role cannot do this at all, and dumping "as the owner" plainly
+# is not enough either.
 #
-# The shipped compose files deliberately do NOT give the app that credential:
-# the app not being able to change the schema, or read past row-level
-# security, is part of this edition's security model. To turn scheduled
-# backups on, add DATABASE_URL_ADMIN to the app service yourself, in an
-# override file or your own compose edit — for example, the same
-# postgres://habiterall_owner:${DB_OWNER_PASSWORD}@db:5432/habiterall the
+# The shipped compose files deliberately do NOT give the `notifier` service
+# that credential either — the tick, the gateway and the dump run there
+# (#194), and its own restricted DATABASE_URL is no more able to bypass RLS
+# than the app's. Not holding it is part of this edition's security model. To
+# turn scheduled backups on, add DATABASE_URL_ADMIN to the `notifier` service
+# yourself, in an override file or your own compose edit — for example, the
+# same postgres://habiterall_owner:${DB_OWNER_PASSWORD}@db:5432/habiterall the
 # `migrate` service already uses. That is a deliberate, informed widening:
-# a compromise of the app process then reaches a credential that can rewrite
-# the schema and read every tenant's rows, which is why this is opt-in and
-# not the default. Until you add it, the app logs an error naming the missing
-# credential and writes no backups — it does not fail silently and it never
-# falls back to the restricted role.
+# a compromise of the notifier process then reaches a credential that can
+# rewrite the schema and read every tenant's rows, which is why this is
+# opt-in and not the default. Until you add it, the notifier logs an error
+# naming the missing credential and writes no backups — it does not fail
+# silently and it never falls back to the restricted role.
+#
+# `GET /api/backup/status` is answered by the APP, from the app's OWN
+# environment — so if you put DATABASE_URL_ADMIN on `notifier` alone, backups
+# run correctly while ⚙ → Backup and restore reports them as off. Add the same
+# credential to `app` as well, purely so that dialog can say backups are on;
+# the app never dumps with it.
 #
 # Two ways to keep the app from ever holding that credential at all: run
 # `pg_dump` from outside the app on your own schedule (see SETUP.md for the
@@ -1124,15 +1197,19 @@ HABITERALL_BACKUP_KEEP=7
 # Point DATABASE_URL_ADMIN at this role instead of the owner and the app never
 # holds a credential that can write anything.
 #
-# ONE REPLICA ONLY may own this directory. Nothing here serialises the dump
-# across processes — each run's temporary file has a unique, per-run suffix,
-# so two replicas can no longer interleave their bytes into one corrupt file
-# reported as success, but two replicas pointed at the same
-# HABITERALL_BACKUP_DIR will still both dump and one will simply win the
-# rename, duplicating the work. The no-overlap guarantee this feature makes
-# is per PROCESS (in-memory module state), not a lock over the directory, so
-# it cannot coordinate two replicas by itself. If you run more than one
-# replica of the app, set HABITERALL_BACKUP_DIR on exactly one of them.
+# EXACTLY ONE of the `notifier` container may own this directory — and that is
+# now the STRONGER statement it sounds like, not merely the safe one: the
+# notifier is the one container that runs this (#194), so run exactly one of
+# it. It is never `--scale`d and is never run more than once; see the compose
+# file's own comment on the service for the Kubernetes `Recreate` note this
+# implies for the Discord gateway it also owns. Nothing here serialises the
+# dump across processes even so — each run's temporary file has a unique,
+# per-run suffix, so two would-be notifiers can no longer interleave their
+# bytes into one corrupt file reported as success, but two pointed at the same
+# HABITERALL_BACKUP_DIR would still both dump and one would simply win the
+# rename, duplicating the work. The no-overlap guarantee this feature makes is
+# per PROCESS (in-memory module state), not a lock over the directory, so it
+# cannot coordinate a second one by itself.
 
 # Path to `pg_dump` inside the image, if you need something other than the
 # one already on PATH. `pg_dump` must be AT LEAST the server's major version
@@ -1168,6 +1245,7 @@ MAX_UPLOAD_MB=16
 #LOG_RUNTIME_MS=60000
 #LOG_LAG_WARN_MS=200
 #PG_POOL_MAX=10                 # what the /healthz memo is sized against
+#NOTIFIER_PG_POOL_MAX=3         # the notifier's own pool; it competes with nobody
 #PG_STATEMENT_TIMEOUT_MS=15000  # a query past this is cancelled; raise for a very long export, 0 to disable
 #PG_IDLE_TX_TIMEOUT_MS=30000    # idle-in-transaction for this long is a bug, not a slow query; 0 disables
 #PGSSL=                         # `require` for a managed Postgres reached over TLS
@@ -1278,10 +1356,6 @@ services:
       migrate: { condition: service_completed_successfully }
     ports:
       - '${BIND_ADDR:-}:${APP_PORT:-3100}:3000'
-    volumes:
-      # Scheduled backups land here, not in db-data: a volume that dies takes
-      # the database with it, so the dump belongs on separate storage.
-      - habiterall-backups:/backups
     environment:
       NODE_ENV: production
       # The RESTRICTED role — not the owner. This is what makes a forgotten
@@ -1294,10 +1368,13 @@ services:
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?}
       ALLOW_INSECURE_OIDC: ${ALLOW_INSECURE_OIDC:-false}   # local testing ONLY
       TRUST_PROXY: ${TRUST_PROXY:-1}                       # TLS terminators in front
+      # Still here, and it is not the scheduler: `POST /api/notify/test` — the
+      # "Send a test" button in ⚙ → Notifications — runs in THIS process and
+      # reads the token and PUBLIC_URL to build the message. `HABITERALL_NOTIFY`
+      # and the tick's own knobs are NOT here, because nothing in this process
+      # reads them any more; they are on `notifier` below, and setting them here
+      # would be a line that does nothing while looking like the switch.
       DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}            # adds Yes / No / Skip buttons
-      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}          # reminders this server sends
-      HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
-      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}     # accounts visited per tick
       # Which hosts a user's ntfy topic URL may name. Empty is ntfy.sh alone;
       # your own ntfy REPLACES that, and `off` refuses every one. The server
       # fetches whatever is here, so this is the whole guard. An entry may name
@@ -1307,20 +1384,6 @@ services:
       # The fallback clock. A container has no timezone, so it is UTC; users
       # can override it for their own reminders in ⚙ → Notifications.
       TZ: ${TZ:-Etc/UTC}
-
-      # Scheduled backups: one whole-database pg_dump a night, every account,
-      # one file. Empty DIR is off. The dump must bypass row-level security
-      # (every tenant table is FORCE ROW LEVEL SECURITY), which the app's own
-      # restricted role cannot do — and this example deliberately does not
-      # grant the app the database owner credential that would let it. Add
-      # that credential to this service yourself, knowingly, to turn backups
-      # on; see "Scheduled backups" in the README and cloud.env.example for
-      # what to add and what it costs. Until you do, the app logs an error
-      # naming the missing credential and writes no backups.
-      HABITERALL_BACKUP_DIR: ${HABITERALL_BACKUP_DIR:-}    # e.g. /backups; empty is off
-      HABITERALL_BACKUP_SCHEDULE: ${HABITERALL_BACKUP_SCHEDULE:-}  # 03:00
-      HABITERALL_BACKUP_KEEP: ${HABITERALL_BACKUP_KEEP:-}  # 7
-      HABITERALL_PG_DUMP: ${HABITERALL_PG_DUMP:-}          # pg_dump path; the image's own is on PATH
 
       # Limits, the pool, and logging. Empty means the default, so these are
       # here to make the knob reachable from .env rather than to set anything
@@ -1354,6 +1417,84 @@ services:
     # slow anyway. Raising it does not lengthen the drain -- the 8s is fixed
     # in the app, so a longer grace only means the process leaves earlier
     # than the grace allows.
+    stop_grace_period: 10s
+
+  # The reminder tick, the Discord gateway and the scheduled backup — split out
+  # of `app` (issue #194) so a fleet of app replicas shares no tick, no gateway
+  # socket and no extra Postgres connections between them. See
+  # `habiterall-cloud/src/notifier-entry.js` for the full reasoning.
+  #
+  # EXACTLY ONE OF THIS, EVER — never `--scale` it. The app is the service you
+  # scale; this one is not, and is never run more than once. On Kubernetes the
+  # Deployment needs `strategy: { type: Recreate }`: the default `RollingUpdate`
+  # starts the new pod before terminating the old one, so `replicas: 1` alone
+  # still has a window with TWO Discord gateways open, both able to answer the
+  # same three-second button press — Discord shows "This interaction failed" on
+  # a press that was, in fact, handled by the other one.
+  #
+  # Hand-written rather than `extends: service: app`: `extends` concatenates
+  # sequences and cannot remove a key, so extending `app` would inherit its
+  # `ports:` and both containers would fight for the published port.
+  notifier:
+    image: ghcr.io/easymod0/habiterall-cloud:latest
+    depends_on:
+      db: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    command: ['node', 'src/notifier-entry.js']
+    volumes:
+      # Scheduled backups land here, not in db-data: a volume that dies takes
+      # the database with it, so the dump belongs on separate storage.
+      - habiterall-backups:/backups
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://habiterall_app:${APP_DB_PASSWORD}@db:5432/habiterall
+      # MUST be the same value as the app's own SESSION_SECRET, above — this
+      # process signs every ntfy answer code with it, and the app's
+      # `/notify/ntfy/answer` route verifies the signature with its own copy.
+      # A mismatch fails every ntfy button closed, silently.
+      SESSION_SECRET: ${SESSION_SECRET:?openssl rand -base64 36}
+      PUBLIC_URL: ${PUBLIC_URL:?the address browsers use, https in production}
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      HABITERALL_NOTIFY: ${HABITERALL_NOTIFY:-on}
+      HABITERALL_NOTIFY_INTERVAL_MS: ${HABITERALL_NOTIFY_INTERVAL_MS:-60000}
+      NOTIFY_MAX_ACCOUNTS: ${NOTIFY_MAX_ACCOUNTS:-500}
+      NTFY_ALLOWED_HOSTS: ${NTFY_ALLOWED_HOSTS:-}
+      TZ: ${TZ:-Etc/UTC}
+
+      # Scheduled backups: one whole-database pg_dump a night, every account,
+      # one file. Empty DIR is off. The dump must bypass row-level security
+      # (every tenant table is FORCE ROW LEVEL SECURITY), which this process's
+      # own restricted DATABASE_URL role cannot do — and this example
+      # deliberately does not grant it the database owner credential that
+      # would let it. Add DATABASE_URL_ADMIN to THIS service yourself,
+      # knowingly, to turn backups on; see "Scheduled backups" in the README
+      # and cloud.env.example for what to add and what it costs. Until you do,
+      # this container logs an error naming the missing credential and writes
+      # no backups. Add the same credential to `app` as well only if you also
+      # want ⚙ → Backup and restore to report backups as on — that dialog
+      # reads the APP's own environment, and the app never dumps.
+      HABITERALL_BACKUP_DIR: ${HABITERALL_BACKUP_DIR:-}    # e.g. /backups; empty is off
+      HABITERALL_BACKUP_SCHEDULE: ${HABITERALL_BACKUP_SCHEDULE:-}  # 03:00
+      HABITERALL_BACKUP_KEEP: ${HABITERALL_BACKUP_KEEP:-}  # 7
+      HABITERALL_PG_DUMP: ${HABITERALL_PG_DUMP:-}          # pg_dump path; the image's own is on PATH
+
+      # This process's OWN pool, interpolated from a separate knob
+      # (NOTIFIER_PG_POOL_MAX) rather than PG_POOL_MAX: it competes with no
+      # request traffic, so 2-3 is plenty, where the app's 10 is sized against
+      # /healthz's memo.
+      PG_POOL_MAX: ${NOTIFIER_PG_POOL_MAX:-}
+      PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}
+      PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}
+      PGSSL: ${PGSSL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-}
+      LOG_FORMAT: ${LOG_FORMAT:-}
+      LOG_RUNTIME_MS: ${LOG_RUNTIME_MS:-}
+      LOG_LAG_WARN_MS: ${LOG_LAG_WARN_MS:-}
+    # Not on-failure alone by convention: with HABITERALL_NOTIFY=off and no
+    # backup directory configured, this container has nothing to run and its
+    # entry point exits 0 having said so. `unless-stopped` would restart that
+    # forever; a genuine crash is a non-zero exit and still restarts.
+    restart: on-failure
     stop_grace_period: 10s
 
 volumes:
