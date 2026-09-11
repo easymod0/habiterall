@@ -622,6 +622,39 @@ test('a second signal before adoption exits immediately and does not re-run the 
   );
 });
 
+test('shutdown.early defaults to the current reason, and a passed reason reaches the line', async () => {
+  // The default, asserted as the literal it is today rather than against the
+  // module's own fallback expression — a test importing the constant it checks
+  // pins the name and nothing about whether the sentence is still true.
+  const withDefault = armHarness();
+  withDefault.fire('SIGTERM');
+  assert.ok(await waitFor(() => withDefault.exits.length > 0, 1000), 'the default-reason case never exited');
+  const defaultEarly = withDefault.logs.find((l) => l.event === 'shutdown.early');
+  assert.equal(defaultEarly.fields.reason, 'signal arrived before the server was listening');
+
+  // A caller with no server at all — the notifier's own case — passes its own
+  // sentence, and that is the one the line must carry instead.
+  const order = [];
+  const logs = [];
+  const exits = [];
+  const handlers = new Map();
+  const record = (level) => (event, fields, err) => {
+    logs.push({ level, event, fields, err });
+    order.push(event);
+  };
+  armShutdown({
+    log: { info: record('info'), warn: record('warn'), error: record('error') },
+    cleanup: () => order.push('cleanup'),
+    reason: 'this process has no server; this is its only shutdown path',
+    exit: (code) => { order.push(`exit:${code}`); exits.push(code); },
+    onSignal: (signal, handler) => handlers.set(signal, handler),
+  });
+  handlers.get('SIGTERM')();
+  assert.ok(await waitFor(() => exits.length > 0, 1000), 'the passed-reason case never exited');
+  const passedEarly = logs.find((l) => l.event === 'shutdown.early');
+  assert.equal(passedEarly.fields.reason, 'this process has no server; this is its only shutdown path');
+});
+
 test('DRAIN_DEADLINE_MS is 8000', () => {
   // The literal, on purpose. Docker's default `stop_grace_period` is 10s, so
   // this number's whole job is to be under it — asserting it against its own
