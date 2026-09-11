@@ -407,4 +407,18 @@ is untested": what no automated suite in this repo can currently see is
 reader, and that nothing else under `ui/` reads an amount any other way, are
 both pinned.
 
+**A review round found the claim above true only with a symmetric
+`formatAmount`.** The first version of this fix left `formatAmount` always
+writing a dot, so on a `COMMA` device it prefilled the habit form, the day
+dialog and the number pad with a string its OWN parser then refused — an amount
+with a non-zero integer part and exactly three decimal places (`5.234`,
+`72.125`) matched `GROUP_COMMA`, greyed out Save on every one of the three
+surfaces, and the refusal's own advice ("type it without the thousands
+separator — 10000, not 10.000") then walked the user into typing a target
+1,000x too large. `formatAmount` now takes the same `AmountFormat` `parseAmount`
+does, defaulting to `deviceAmountFormat()`, and never groups under either
+spelling — so what it writes stays inside its own parser's domain, the same
+argument `shared/public/ui/amount.js`'s own `formatAmount` doc comment already
+makes about the web.
+
 

@@ -1601,6 +1601,10 @@ internal fun CountDialog(
         mutableStateOf(initial?.let { formatAmount(it) } ?: formatAmount(habit.targetValue))
     }
     val parsed = parseAmount(text)
+    // Non-blank only: a box mid-typing that happens to be empty is not an
+    // error to shout about, and Save stays gated on `parsed != null` exactly
+    // as before this — matching `HabitFormScreen`'s treatment.
+    val showComplaint = text.isNotBlank() && parsed == null
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1613,6 +1617,15 @@ internal fun CountDialog(
                     onValueChange = { text = it },
                     singleLine = true,
                     label = { Text(habit.unit.ifBlank { "Amount" }) },
+                    isError = showComplaint,
+                    supportingText = if (!showComplaint) null else {
+                        {
+                            Text(
+                                amountComplaint(text),
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    },
                 )
             }
         },

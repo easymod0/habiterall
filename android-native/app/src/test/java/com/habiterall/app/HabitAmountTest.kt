@@ -1,5 +1,6 @@
 package com.habiterall.app
 
+import com.habiterall.app.ui.AmountFormat
 import com.habiterall.app.ui.AmountFormat.COMMA
 import com.habiterall.app.ui.AmountFormat.POINT
 import com.habiterall.app.ui.amountComplaint
@@ -8,6 +9,7 @@ import com.habiterall.app.ui.formatAmount
 import com.habiterall.app.ui.parseAmount
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
@@ -140,12 +142,41 @@ class HabitAmountTest {
         assertEquals("2.5", formatAmount(2.5))
     }
 
+    /**
+     * Format `v` under `format` and parse the result back under the same
+     * convention, asserting NON-NULL first with `v` in the message — so a
+     * broken round trip fails naming the value it broke on, rather than an
+     * unlabelled NPE off a bare `!!`.
+     */
+    private fun assertRoundTrips(v: Double, format: AmountFormat?) {
+        // Deliberately not `format?.let { parseAmount(shown, it) } ?: parseAmount(shown)`:
+        // that elvis fires on ANY null left-hand side, including a legitimate
+        // refusal from `parseAmount(shown, format)` — which would silently
+        // retry under the DEVICE default and hide exactly the mismatch this
+        // test exists to catch.
+        val shown = if (format != null) formatAmount(v, format) else formatAmount(v)
+        val label = format?.name ?: "the device default"
+        val parsed = if (format != null) parseAmount(shown, format) else parseAmount(shown)
+        assertNotNull("formatAmount($v, $label) = \"$shown\", which parseAmount refused", parsed)
+        assertEquals("round trip of $v under $label", v, parsed!!, 0.0)
+    }
+
     @Test
     fun `what is shown is what parses back`() {
         // The round trip the edit form actually makes: read a stored target into
         // the box, save without touching it, and get the same number back.
-        for (v in listOf(0.0, 1.0, 2.5, 8.0, 1000.0, 0.25)) {
-            assertEquals("round trip of $v", v, parseAmount(formatAmount(v))!!, 0.0)
+        //
+        // 2.345, 5.234, 1.005 and 72.125 are the shape that broke this: a
+        // non-zero integer part with exactly three decimal places matches
+        // GROUP_COMMA, so a `formatAmount` that always wrote a dot handed its
+        // own COMMA parser a string it refused. Without these four the property
+        // this test claims to hold was never exercised by a value that could
+        // have broken it.
+        val values = listOf(0.0, 1.0, 2.5, 8.0, 1000.0, 0.25, 2.345, 5.234, 1.005, 72.125)
+        for (v in values) {
+            assertRoundTrips(v, POINT)
+            assertRoundTrips(v, COMMA)
+            assertRoundTrips(v, null)
         }
     }
 
@@ -202,13 +233,53 @@ class HabitAmountTest {
     }
 
     @Test
+    fun `the trigger is the parser, not the anchored group regex`() {
+        // Anchoring GROUP_POINT/GROUP_COMMA (so the parser is not quadratic on
+        // a long run of digits) is right for the PARSE, which already refuses
+        // "1,234,567" — it has more than one separator, so DECIMAL refuses it
+        // a line later regardless of which regex named it. But asking the
+        // anchored regex directly for the ADVICE moved the anchoring where it
+        // does not belong: "1,234,567" is not a GROUP by that regex, so a
+        // build that asked it directly said "Not a number" about an input
+        // that removing every comma from DOES turn into an amount — which is
+        // exactly the sentence's own claim.
+        assertEquals(
+            "Type it without the thousands separator — 10000, not 10,000.",
+            amountComplaint("1,234,567", POINT),
+        )
+        // The parse is unaffected either way: taking the commas out of
+        // "10,000 steps" still leaves a non-digit trailing it, so this is
+        // agreement with the web (`shared/public/ui/amount.js`) rather than a
+        // second regression — the same sentence the web gives the same input.
+        assertEquals("Not a number", amountComplaint("10,000 steps", POINT))
+    }
+
+    @Test
     fun `the round trip holds under a comma reader too`() {
-        // formatAmount always writes a dot — display stays out of scope — and
-        // it never groups, so what it writes always parses back under COMMA
-        // too. This is the case that would catch a comma-only parser breaking
-        // its own prefill.
-        for (v in listOf(0.0, 1.0, 2.5, 8.0, 1000.0, 0.25)) {
-            assertEquals("round trip of $v under COMMA", v, parseAmount(formatAmount(v), COMMA)!!, 0.0)
+        // formatAmount now takes the convention too — it never groups, under
+        // either spelling — so what it writes for a given convention always
+        // parses back under that SAME convention. Before that fix this walked
+        // a list with no value of the breaking shape (a non-zero integer part
+        // with exactly three decimal places, which matches GROUP_COMMA) and
+        // passed against a `formatAmount` that always wrote a dot, which its
+        // own COMMA parser then refused: 2.345, 5.234, 1.005 and 72.125 are
+        // that shape.
+        val values = listOf(0.0, 1.0, 2.5, 8.0, 1000.0, 0.25, 2.345, 5.234, 1.005, 72.125)
+        for (v in values) {
+            assertRoundTrips(v, POINT)
+            assertRoundTrips(v, COMMA)
+            assertRoundTrips(v, null)
         }
+    }
+
+    @Test
+    fun `formatAmount writes the literal string parseAmount reads back, never a group`() {
+        // The direct case beside the round trip: pin the exact strings rather
+        // than `formatAmount(v, f) == formatAmount(v, f)`, which would pass
+        // with the convention parameter dropped entirely.
+        assertEquals("5,234", formatAmount(5.234, COMMA))
+        assertEquals("5.234", formatAmount(5.234, POINT))
+        assertEquals("10000", formatAmount(10000.0, COMMA)) // never grouped, either way
+        assertEquals("10000", formatAmount(10000.0, POINT))
     }
 }

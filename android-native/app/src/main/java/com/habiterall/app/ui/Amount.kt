@@ -30,8 +30,25 @@ internal fun deviceAmountFormat(): AmountFormat =
     if (DecimalFormatSymbols.getInstance(Locale.getDefault()).decimalSeparator == ',')
         AmountFormat.COMMA else AmountFormat.POINT
 
-internal fun formatAmount(v: Double): String =
-    if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
+/**
+ * An amount as a person would write it: `3`, not `3.0` — and spelled the way
+ * [format] reads a decimal point back, or a box that reads "8,5" and then
+ * writes "8.5" back into itself has told its owner they typed it wrong: what
+ * this writes goes straight back into [parseAmount] on the next Save, in the
+ * habit form, the day dialog's [CountDialog] and the notification number pad
+ * alike. See `formatAmount`'s own doc comment in `shared/public/ui/amount.js`
+ * for the same argument made about the web.
+ *
+ * **Grouping stays at no size under either convention** — `10000`, never
+ * `10.000` or `10,000` — which is what keeps the output inside
+ * [parseAmount]'s own domain rather than producing the one form it refuses.
+ * There is no thousands separator to get right here, only which character is
+ * the decimal point.
+ */
+internal fun formatAmount(v: Double, format: AmountFormat = deviceAmountFormat()): String {
+    val text = if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
+    return if (format == AmountFormat.COMMA) text.replace('.', ',') else text
+}
 
 /**
  * A typed amount as a number, or null if it is not one yet.
@@ -134,16 +151,34 @@ private val DECIMAL = Regex("^(\\d+(\\.\\d*)?|\\.\\d+)$")
  * is ambiguous, not because it is nonsense. A refusal the user cannot act on
  * is only half better than the silent ten it replaced.
  *
+ * **The trigger is [parseAmount] itself, twice, and not [isGroup] — the box
+ * was refused, and removing every grouper makes it an amount.** `isGroup`
+ * ANCHORED (`^0*[1-9]\d*[,.]\d{3}$`) so it does not fire on "1,234,567" —
+ * more than one group, past what a thousands separator alone can explain —
+ * so a build that asked it directly told that input "Not a number", where the
+ * PARSE is unaffected by the anchoring: `DECIMAL` still refuses it a line
+ * later regardless of which guard named it. The actionable sentence is still
+ * owed there, because taking every comma out of "1,234,567" DOES leave
+ * something [parseAmount] accepts, and the sentence claims exactly that.
+ * "10,000 steps" answers "Not a number" either way, correctly: taking the
+ * commas out leaves "10000 steps", still not an amount, so the box may not
+ * suggest something it would refuse.
+ *
  * A literal, constant sentence per convention — never a template over the
  * user's input. `shared/test/amount.test.js` regexes the literal out of this
  * source; a template would lose that and the cross-client agreement test
- * would go green while saying nothing.
+ * would go green while saying nothing. Only the TRIGGER above decides which
+ * of the two sentences is shown; neither sentence names what was typed.
  */
-internal fun amountComplaint(text: String, format: AmountFormat = deviceAmountFormat()): String =
-    when {
-        !isGroup(text.trim(), format) -> "Not a number"
+internal fun amountComplaint(text: String, format: AmountFormat = deviceAmountFormat()): String {
+    val grouper = if (format == AmountFormat.COMMA) '.' else ','
+    val plain = text.trim().filter { it != grouper }
+    val ambiguous = parseAmount(text, format) == null && parseAmount(plain, format) != null
+    return when {
+        !ambiguous -> "Not a number"
         format == AmountFormat.COMMA ->
             "Type it without the thousands separator — 10000, not 10.000."
         else ->
             "Type it without the thousands separator — 10000, not 10,000."
     }
+}

@@ -234,6 +234,14 @@ class CountDialogWiringGuard {
                 "invites, and reads `10.000` as ten on a comma device.",
             body.contains("toDoubleOrNull"),
         )
+        assertTrue(
+            "`CountDialog` must show `amountComplaint(...)` when its refusal is " +
+                "non-blank, matching `HabitFormScreen`'s treatment — this is the " +
+                "one of the three amount surfaces that cannot be driven by a " +
+                "behavioural test (see the comment block above), so this guard is " +
+                "the only thing that can pin it.",
+            body.contains("amountComplaint("),
+        )
     }
 
     @Test
