@@ -1886,10 +1886,30 @@ from the day editor (`openCountDialog`'s own comment, `day-strip.js`).
 cell, and its own comment is why the web needed the keyboard path and the
 `title`/`aria-keyshortcuts` rather than treating the mouse gesture as enough on
 its own: a long press is not discoverable to a screen reader, and naming the
-action is what turns a secret into a control. `e.preventDefault()` before
-calling `host.editDay` on the Shift+Enter path is load-bearing rather than
-tidy — a `<button>` synthesises a `click` from Enter, so without it Shift+Enter
-both opened the editor AND cycled the day, two writes from one press.
+action is what turns a secret into a control.
+
+**`e.preventDefault()` on the Shift+Enter path is load-bearing, and it does not
+stop what it looks like it stops — which is the part worth writing down,
+because the plausible version was written first and is false.** The reasoning
+that produced it: a `<button>` runs an Enter activation as the keydown's
+DEFAULT, so without the call the same press would open the editor AND cycle
+the day underneath it — two writes from one press. That does not happen, and
+the mutation says so: remove the call and the day's stored value is still
+exactly what it was. The activation runs *after* the handler returns, by which
+time `openDayDialog` has called `showModal()`, and the cell is behind a modal
+and inert — the cycle can never fire. What actually happens is worse to read
+and better to name. Focus is inside the dialog by then, so the press falls
+THROUGH into the editor it just opened: measured on the unfixed build, with a
+CDP event log, `keydown@BUTTON.check` → `keypress@BUTTON.day-choice` →
+`click@BUTTON.day-choice`, both trusted, and the dialog's `open` attribute
+going on and straight back off in one pair of mutation records. One press
+opens the day editor, answers it with whatever its first button says, saves
+and dismisses it — and `saveDay` states the note on every save, so that unseen
+save writes the note box back too. The suite pins the mechanism rather than
+the symptom: `stripcheck.mjs` records every click reaching a `.day-choice`
+during the press and requires none. Its stored-value check is kept beside it
+and is honest about biting a different regression — `editDay` wired onto the
+plain click path — since it passes with the `preventDefault` removed.
 
 **The notes card is the third way in, and the only one that costs no
 shortcut.** It lists a habit's dated notes, newest first, capped (`NOTES_LIMIT`

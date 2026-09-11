@@ -309,9 +309,23 @@ export function dayCells(host, habit, dates, todayIso, inRun = new Set()) {
     });
     btn.addEventListener('keydown', (e) => {
       if (!e.shiftKey || e.key !== 'Enter') return;
-      // FIRST: a <button> synthesises a `click` from Enter, so without this a
-      // single Shift+Enter both opens the editor and cycles the day underneath
-      // it — two writes from one press.
+      // FIRST — and what it stops is not what it looks like it stops, so this
+      // is written from the measurement rather than from the reasoning. Enter
+      // on a `<button>` is an activation the browser runs as the keydown's
+      // DEFAULT, which is after this handler returns — and by then
+      // `openDayDialog` has called `showModal()` and focus is inside the
+      // dialog. So the activation does not land back on this cell at all: the
+      // keypress lands on the day editor's OWN first button and clicks it.
+      // Measured on the unfixed build (CDP event log, `stripcheck.mjs`):
+      // `keydown@BUTTON.check`, then `keypress@BUTTON.day-choice` and
+      // `click@BUTTON.day-choice`, both trusted, then the dialog's `open`
+      // attribute going on and straight back off. One press opens the editor
+      // and answers it — a save the user never saw, on a dialog they never
+      // read, and `saveDay` states the note on every save. What does NOT
+      // happen is a second write on the day underneath: that cell is behind a
+      // modal by the time the activation runs, so the cycle never fires. This
+      // is the press falling THROUGH into the dialog it just opened, not two
+      // writes from one press.
       e.preventDefault();
       host.editDay?.(habit.id, date);
     });

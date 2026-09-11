@@ -1133,13 +1133,20 @@ try {
     /* ---------- the secondary affordance: Shift+Enter, and it must not steal the cycle ---------- */
 
     // A REAL key event, dispatched by CDP rather than scripted from the page.
-    // A `<button>` synthesises its own `click` from a TRUSTED Enter press, and
-    // suppressing that synthesis is exactly what the handler's
+    // A `<button>`'s Enter activation is the browser's own behaviour on a
+    // TRUSTED press, and suppressing it is exactly what the handler's
     // `preventDefault()` exists for — a `new KeyboardEvent('keydown')` fired
-    // from script never triggers the browser's own implicit-submission
-    // behaviour, so a check built on one would pass against a build with no
-    // `preventDefault()` in it at all. Same trap, same fix, as
-    // `categorycheck.mjs`'s Enter-inside-a-sub-form check.
+    // from script triggers no activation at all, so a check built on one would
+    // pass against a build with no `preventDefault()` in it. Same trap, same
+    // fix, as `categorycheck.mjs`'s Enter-inside-a-sub-form check.
+    //
+    // What the activation actually does, measured rather than reasoned: by the
+    // time it runs, `showModal()` has moved focus into the dialog, so the
+    // keypress lands on the day editor's own first `.day-choice` button and
+    // clicks it — the editor is answered and dismissed by the same press that
+    // opened it. That is what the `.day-choice` recorder below pins. The cell
+    // underneath is behind a modal by then and never cycles, which is why the
+    // stored-value check further down does NOT bite this mutation.
     const pressShiftEnter = async () => {
       for (const type of ['keyDown', 'keyUp']) {
         await send('Input.dispatchKeyEvent', {
@@ -1151,16 +1158,43 @@ try {
     };
 
     const beforeShift = await stored(notesProbe.plain, notesProbe.id);
+    // Record any click that reaches one of the day editor's own answer
+    // buttons. Capture phase and on `document`, so it sees the press whether
+    // or not the dialog is still open by the time anything is read back — the
+    // failure mode is precisely that the dialog is gone again.
+    await ev(`(() => {
+      window.__choiceClicks = [];
+      document.addEventListener('click', (e) => {
+        if (e.target.closest && e.target.closest('.day-choice'))
+          window.__choiceClicks.push(e.target.textContent + ' trusted=' + e.isTrusted);
+      }, true);
+      return true; })()`);
     await ev(`document.querySelector(
       '#view-detail .day-strip .check[data-date="${notesProbe.plain}"]').focus()`);
     await pressShiftEnter();
     await sleep(600);
     const shiftOpened = await ev(`document.getElementById('day-dialog').open`);
     ck('Shift+Enter on a focused cell opens the day editor', shiftOpened === true);
+    // THE mechanism assertion, and the one that names why `preventDefault` is
+    // there. Without it the press falls through into the dialog it just
+    // opened: focus is already inside by the time the browser runs the
+    // button's Enter activation, so the keypress clicks the editor's first
+    // answer button, saves and closes — one press, one unseen save, and
+    // `saveDay` states the note on every save.
+    const choiceClicks = await ev(`window.__choiceClicks`);
+    ck('...and the same press does NOT fall through onto the editor\'s own '
+       + 'answer buttons — no .day-choice was clicked',
+       Array.isArray(choiceClicks) && choiceClicks.length === 0,
+       JSON.stringify(choiceClicks));
     await sleep(800);
     const afterShift = await stored(notesProbe.plain, notesProbe.id);
-    ck("...and the day's stored value is UNCHANGED — the proof it did not also "
-       + 'cycle the day underneath it',
+    // A guard on a DIFFERENT regression from the one above, and it is worth
+    // saying which: this does not bite a missing `preventDefault()`, because
+    // the cell is behind a modal by the time the activation runs and so never
+    // cycles (measured). What it does bite is `editDay` being wired onto the
+    // plain click path, or the handler calling `onCheckClick` as well.
+    ck("...and the day's stored value is UNCHANGED — the proof the secondary "
+       + 'affordance did not also cycle the day underneath it',
        JSON.stringify(afterShift) === JSON.stringify(beforeShift),
        `${JSON.stringify(beforeShift)} -> ${JSON.stringify(afterShift)}`);
     await ev(`document.getElementById('day-cancel').click()`);
