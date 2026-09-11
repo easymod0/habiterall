@@ -508,6 +508,34 @@ test('every id the detail page can draw is one DETAIL_CARDS names, and no other'
     'ui/detail.js\'s CARDS Map and DETAIL_CARDS disagree about which cards exist');
 });
 
+test('buildAwardsCard reads the awards setting (#140)', () => {
+  // A source-text guard, and the behavioural test it is a WEAKER partner to is
+  // `shared/test/browser/awardcheck.mjs`, which drives a real page and watches
+  // the card appear and disappear as the setting is flipped through the real
+  // API. This one only proves the call site exists: it matches the literal
+  // `settings.get('awards')`, which means it CANNOT see a renamed binding
+  // (`const on = settings.get('award')`, a typo one letter off) or an inverted
+  // comparison (`if (settings.get('awards')) return null;`, which hides the
+  // card exactly backwards) — both read as present to a regex that only checks
+  // the call was made. What it does catch, which the browser suite alone
+  // cannot afford to run on every commit, is a call site that reads no
+  // setting at all — a hard-coded `true` that would pass every behavioural
+  // case in a suite that never sets the setting off.
+  //
+  // The inventory is printed on failure so an empty offender list means
+  // something: if `buildAwardsCard` cannot be found at all, that says the
+  // function was renamed or moved, not that the guard passed vacuously.
+  const src = readFileSync(join(root, 'public', 'ui', 'detail.js'), 'utf8');
+  const start = src.indexOf('function buildAwardsCard(');
+  assert.ok(start >= 0, 'buildAwardsCard is not in ui/detail.js — has it been renamed?');
+  const end = src.indexOf('\n}\n', start);
+  assert.ok(end > start, 'buildAwardsCard\'s body does not close as expected');
+  const body = src.slice(start, end);
+
+  assert.match(body, /settings\.get\(\s*'awards'\s*\)/,
+    `buildAwardsCard does not read the "awards" setting — searched:\n${body}`);
+});
+
 /* ---------- server-side validation ---------- */
 
 test('valid settings are accepted', () => {

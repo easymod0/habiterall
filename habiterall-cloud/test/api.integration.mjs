@@ -2813,6 +2813,53 @@ ck('?start, ?end and ?granularity change nothing',
   JSON.stringify(withParams) === JSON.stringify(awardsPayload),
   `plain=${JSON.stringify(awardsPayload)} withParams=${JSON.stringify(withParams)}`);
 
+/* ---------- the `awards` setting is a RENDERING switch (#140) ---------- */
+
+console.log('\n--- the awards off switch changes no API answer ---');
+
+const putAwardsSetting = (patch) => fetch(`${overviewBase}/api/settings`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(patch),
+}).then((r) => r.json());
+const getSettings = () => fetch(`${overviewBase}/api/settings`).then((r) => r.json());
+
+// A value the server does not enumerate is dropped, not stored — the same
+// `SETTING_VALUES` enforcement every other toggle here gets.
+const badAwards = await putAwardsSetting({ awards: 'yes' });
+ck('a non-boolean value is rejected',
+  badAwards.ignored?.includes('awards') && badAwards.settings.awards === undefined,
+  JSON.stringify(badAwards));
+
+await putAwardsSetting({ awards: false });
+ck('a real boolean is stored and comes back from GET /settings',
+  (await getSettings()).awards === false, JSON.stringify(await getSettings()));
+
+// The pinned claim: this is a RENDERING preference, so both routes must go on
+// reporting the identical awards whether the switch is on or off. Reusing
+// `marathon`, which already earned two award families above — the same
+// property the deepEqual check needs, restated here so a route that started
+// reading the setting would have somewhere for the difference to show up.
+const marathonAwards = async () => ({
+  awards: (await getAwards()).habits.find((h) => h.id === marathon.id).awards,
+  stats: (await fetch(`${overviewBase}/api/habits/${marathon.id}/stats`)
+    .then((r) => r.json())).awards,
+});
+const offAwards = await marathonAwards();
+await putAwardsSetting({ awards: true });
+const onAwards = await marathonAwards();
+
+ck('GET /awards is unchanged by the setting',
+  JSON.stringify(offAwards.awards) === JSON.stringify(onAwards.awards),
+  `off=${JSON.stringify(offAwards.awards)} on=${JSON.stringify(onAwards.awards)}`);
+ck('GET /habits/:id/stats is unchanged by the setting',
+  JSON.stringify(offAwards.stats) === JSON.stringify(onAwards.stats),
+  `off=${JSON.stringify(offAwards.stats)} on=${JSON.stringify(onAwards.stats)}`);
+// Worthless unless there is something here to have gone missing.
+ck('  and there is something on both sides for that comparison to mean anything',
+  offAwards.awards.length > 0 && onAwards.awards.length > 0,
+  `off=${JSON.stringify(offAwards.awards)} on=${JSON.stringify(onAwards.awards)}`);
+
 /* ---------- unlogged_is_success ---------- */
 
 console.log('\n--- unlogged_is_success ---');

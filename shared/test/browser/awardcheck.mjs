@@ -127,7 +127,7 @@ try {
 
   console.log('\n--- the card ---');
 
-  let withFresh = null, seen = 0, coverageSeen = 0;
+  let withFresh = null, seen = 0, coverageSeen = 0, firstEarner = null;
 
   for (let i = 0; i < habits.length; i++) {
     if (i > 0) await back();
@@ -146,6 +146,10 @@ try {
     }
 
     seen++;
+    // The first habit that earns anything at all — the off-switch section
+    // below needs one habit whose card can be shown, hidden and shown again,
+    // and it does not matter which.
+    if (firstEarner == null) firstEarner = i;
     ck(`"${r.habit}" shows the card`, r.card === true, r.order.join(' > '));
     if (!r.card) continue;
 
@@ -265,6 +269,70 @@ try {
       narrow.chips.every((c) => c.w >= 120), narrow.chips.map((c) => c.w).join(' '));
   } else {
     console.log('SKIP  the first habit earns nothing at this width');
+  }
+
+  /* ---------- the `awards` off switch is a RENDERING switch (#140) ---------- */
+
+  console.log('\n--- the awards off switch (#140) ---');
+
+  // `awards` (ui/settings.js) turns the card off; it must never turn the
+  // ROUTE off — `shared/test/settings.test.js` pins that behaviourally over
+  // HTTP directly, in both editions. What only a real page can show is the
+  // other half: that the card the setting hides is the SAME card an unrelated
+  // reload draws back, wired to the real registry rather than to a stub.
+  await resize(1440);
+  await sleep(300);
+
+  if (firstEarner != null) {
+    await back();
+    await open(firstEarner);
+    const before = await readCard();
+    const apiBefore = await readApi();
+    ck('before touching the setting: the card is showing (registry default is on)',
+      before.card === true, before.order.join(' > '));
+
+    await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({awards:false})})`);
+    await sleep(400);
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard',
+    });
+    await sleep(500);
+    await open(firstEarner);
+    const off = await readCard();
+    const apiOff = await readApi();
+    ck('off: the card is gone', off.card === false, off.order.join(' > '));
+    // The claim the whole feature rests on: a rendering switch changes no API
+    // answer. Without this the check above could pass for the wrong reason —
+    // the route itself withholding awards rather than the client hiding a card
+    // it still received.
+    ck('  ...while /habits/:id/stats still carries the identical awards',
+      JSON.stringify(apiOff.awards) === JSON.stringify(apiBefore.awards),
+      `before=${JSON.stringify(apiBefore.awards)} off=${JSON.stringify(apiOff.awards)}`);
+
+    await ev(`fetch('/api/settings',{method:'PUT',credentials:'same-origin',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({awards:true})})`);
+    await sleep(400);
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard',
+    });
+    await sleep(500);
+    await open(firstEarner);
+    const on = await readCard();
+    ck('on again: the card is back, with the identical awards',
+      on.card === true
+        && JSON.stringify(on.chips.map((c) => c.id)) === JSON.stringify(apiBefore.awards.map((a) => a.id)),
+      on.order.join(' > '));
+
+    // Leave the account on the default for whatever runs after this suite.
+    await ev(`fetch('/api/settings',{method:'DELETE',credentials:'same-origin'})`);
+    await sleep(300);
+  } else {
+    console.log('SKIP  no fixture habit earned an award to test the switch against');
   }
 
   ck('no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 2).join(' | '));

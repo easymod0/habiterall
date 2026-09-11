@@ -794,10 +794,16 @@ meant a second copy of the streak ladder — a badge at 20 days beside a surviva
 bar at 21. `awards.js` is pure and both editions' `/habits/:id/stats` call it.
 
 **It is called at the `/stats` route, in both editions, and not inside
-`computeStats`**, which is the one place it looks like it belongs:
-`computeStats` has exactly one caller now, and it is this one — `/overview`
-no longer calls `computeStats` at all, it calls `summaryStats` for two
-numbers, and its payload carries no `awards` field to decline.
+`computeStats`**, which is the one place it looks like it belongs. `/overview`
+does not call `computeStats` at all — it calls `summaryStats` for two numbers,
+and its payload carries no `awards` field to decline. `GET /awards` (#140) is a
+second, account-level caller of both `computeStats` and `computeAwards`, in
+each edition, so the count is now two per edition and not one:
+`shared/test/awards.test.js` pins it there, so a third call site — the route a
+future portfolio-awards feature (#63) would add — is a reviewed act rather
+than a silent one. It recomputes rather than reading `/overview`'s payload for
+the same reason `/overview` never grew the field in the first place: that
+response is already the largest this API produces.
 
 **Nothing here is counted a second way.** Every award is a reading of figures
 already on the payload, so an award needing something new gets a stats FIELD

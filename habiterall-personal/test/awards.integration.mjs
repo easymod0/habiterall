@@ -211,6 +211,47 @@ ck('?start, ?end and ?granularity change nothing',
   JSON.stringify(withParams) === JSON.stringify(awardsPayload),
   `plain=${JSON.stringify(awardsPayload)} withParams=${JSON.stringify(withParams)}`);
 
+/* ---------- 4. the `awards` setting is a RENDERING switch (#140) ---------- */
+
+console.log('\n--- the awards off switch changes no API answer ---');
+
+// A value the server does not enumerate is dropped, not stored — the same
+// `SETTING_VALUES` enforcement every other toggle here gets.
+const badAwards = await put('/settings', { awards: 'yes' });
+ck('a non-boolean value is rejected',
+  badAwards.ignored?.includes('awards') && badAwards.settings.awards === undefined,
+  JSON.stringify(badAwards));
+
+await put('/settings', { awards: false });
+ck('a real boolean is stored and comes back from GET /settings',
+  (await get('/settings')).awards === false,
+  JSON.stringify(await get('/settings')));
+
+// The pinned claim: this is a RENDERING preference, so both routes must go on
+// reporting the identical awards whether the switch is on or off. Reusing the
+// `marathon` habit above, which already earned two award families — the same
+// property the deepEqual check needs, restated here so a route that started
+// reading the setting would have somewhere for the difference to show up.
+const withOff = {
+  awards: (await get('/awards')).habits.find((h) => h.id === marathon.id).awards,
+  stats: (await get(`/habits/${marathon.id}/stats`)).awards,
+};
+await put('/settings', { awards: true });
+const withOn = {
+  awards: (await get('/awards')).habits.find((h) => h.id === marathon.id).awards,
+  stats: (await get(`/habits/${marathon.id}/stats`)).awards,
+};
+ck('GET /awards is unchanged by the setting',
+  JSON.stringify(withOff.awards) === JSON.stringify(withOn.awards),
+  `off=${JSON.stringify(withOff.awards)} on=${JSON.stringify(withOn.awards)}`);
+ck('GET /habits/:id/stats is unchanged by the setting',
+  JSON.stringify(withOff.stats) === JSON.stringify(withOn.stats),
+  `off=${JSON.stringify(withOff.stats)} on=${JSON.stringify(withOn.stats)}`);
+// Worthless unless there is something here to have gone missing.
+ck('  and there is something on both sides for that comparison to mean anything',
+  withOff.awards.length > 0 && withOn.awards.length > 0,
+  `off=${JSON.stringify(withOff.awards)} on=${JSON.stringify(withOn.awards)}`);
+
 server.close();
 try { (await import('../src/db.js')).db.close(); } catch { /* already closed */ }
 try { rmSync(workdir, { recursive: true, force: true }); } catch { /* best effort */ }
