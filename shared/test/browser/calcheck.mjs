@@ -886,10 +886,28 @@ try {
    * in-page state the offline block already repainted from would prove
    * nothing about the caller actually threading `notes` through.
    */
+  /*
+   * The one wait in this file with a bound of its own, and the number is the
+   * least interesting thing about it — the PREDICATE is unchanged and still
+   * everything this block depends on, so this is a longer bound and not a
+   * sleep: it still throws naming what it wanted.
+   *
+   * It is the cross-document reload that lands DIRECTLY AFTER the offline
+   * block above, so it is the one boot in this suite that starts while the
+   * reconnect and the outbox flush are still settling, and it then pays a cold
+   * `/stats` + `/entries` and a rebuild of every card on the page. Observed
+   * timing out at 20s on CI (4 cores, 8 workers) in a run where `calcheck`
+   * took 58.1s against 20.0s locally, and passing on the rerun — a tight bound
+   * on the fleet's slowest suite rather than a defect in what it waits for.
+   * Reproduced locally at `taskset -c 0-3` with `HABITERALL_BROWSER_JOBS=8`,
+   * where it passes at 22.4s, which is why the bound and not the predicate is
+   * what moved.
+   */
   await reloadAndWaitFor(ev, `!!document.querySelector('#view-detail .day-strip .check')`, {
     reload: () => send('Page.navigate',
       { url: `${APP}/?open=notemark#/habit/${day.id}` }, sessionId),
     what: 'the detail page, reloaded, to re-fetch the note',
+    timeoutMs: 45_000,
   });
   await sleep(400);
 
