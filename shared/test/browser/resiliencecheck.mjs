@@ -92,6 +92,18 @@ try {
       overflows:[...card.querySelectorAll('svg')].some(s=>s.getBoundingClientRect().width > cw+1),
     };})()`);
 
+  /** Any card, found by its title — the tiles issue #160 added, none of
+   * which is "Bouncing back", so `readCard` above cannot see them. */
+  const readCardByTitle = (title) => ev(`(()=>{
+    const c=[...document.querySelectorAll('#view-detail > .card')]
+      .find(x=>x.querySelector('.card-title')?.textContent.trim()===${JSON.stringify(title)});
+    if(!c) return {card:false};
+    return {card:true,
+      tiles:[...c.querySelectorAll('.stat-tile')].map(t=>({
+        value:t.querySelector('.stat-value').textContent.trim(),
+        label:t.querySelector('.stat-label').textContent.trim()}))};
+  })()`);
+
   const habits = await ev(
     `[...document.querySelectorAll('.habit-row .habit-name, .habit-row .name')].map(n=>n.textContent.trim())`);
   ck('the dashboard has habits to inspect', habits.length > 0, habits.join(', '));
@@ -111,6 +123,52 @@ try {
     first.order.join(' > '));
   ck('the calendar sits directly under habit strength', iCal === iScore + 1,
     first.order.join(' > '));
+
+  /* ---------- the three tiles (issue #160) ---------- */
+
+  console.log('\n--- the three tiles ---');
+
+  // Habit 0 is still open from the block above. `coverageWindow`/`trend` are
+  // never declined by this route, so both tiles are unconditional — unlike
+  // "Since last" on the frequency card, which only shows once a habit has
+  // been completed at least once.
+  const histTile = await readCardByTitle('History');
+  ck('the history card is present', histTile.card === true);
+  const covTile = histTile.tiles?.find(
+    (t) => t.label === 'Days answered' || t.label === 'No window');
+  ck('the history card holds a coverage tile', covTile != null,
+    JSON.stringify(histTile.tiles));
+  ck('its value is a percentage or a dash',
+    /^(\d{1,3}%|—)$/.test(covTile?.value ?? ''), covTile?.value ?? '(missing)');
+
+  const strengthTile = await readCardByTitle('Habit strength');
+  ck('the strength card is present', strengthTile.card === true);
+  const trendTile = strengthTile.tiles?.[0];
+  ck('the strength card holds a trend tile whose label starts "Points, last" or "Needs"',
+    /^(Points, last|Needs)/.test(trendTile?.label ?? ''), trendTile?.label ?? '(missing)');
+
+  // Pinning the DECISION is not pinning the WIRING (root CLAUDE.md) — a
+  // string being right does not make its caller use it. So this fetches the
+  // same `/api/habits/:id/stats` the page itself called, for the habit
+  // actually open (its id read out of the URL), and recomputes the
+  // percentage independently rather than trusting the tile to agree with
+  // itself.
+  const payloadCoverageWindow = await ev(
+    "(async function(){ var id=(location.hash.match(/#\\/habit\\/(\\d+)/)||[])[1];" +
+    " var s=await (await fetch('/api/habits/'+id+'/stats')).json();" +
+    ' return s.coverageWindow; })()'
+  );
+  ck('the payload carries a coverageWindow for this habit',
+    payloadCoverageWindow != null, JSON.stringify(payloadCoverageWindow));
+  if (payloadCoverageWindow) {
+    const expectedPct = payloadCoverageWindow.days
+      ? Math.round(payloadCoverageWindow.answered / payloadCoverageWindow.days * 100) + '%'
+      : '—';
+    ck('the rendered coverage percentage equals answered/days from the payload',
+      covTile?.value === expectedPct,
+      'payload coverageWindow=' + JSON.stringify(payloadCoverageWindow) +
+      ' (expects ' + expectedPct + '), tile shows ' + covTile?.value);
+  }
 
   /* ---------- the card itself ---------- */
 

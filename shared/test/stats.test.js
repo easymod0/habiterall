@@ -9,8 +9,9 @@ const {
   computeCategoryStats, computeMissRuns, computeRecovery, SCORE_WARMUP_DAYS, creditAnchor,
   summariseMembers, summariseByCategory,
   isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, fromISO, MAX_RANGE_DAYS,
-  isRealDay, CANONICAL_DATE_RE,
+  isRealDay, CANONICAL_DATE_RE, TREND_CONVERGED_SCORE,
 } = await import('../src/stats.js');
+const { STRENGTH_BANDS } = await import('../src/awards.js');
 
 const UNSET = 0, YES = 2, SKIP = 3;
 
@@ -1399,6 +1400,465 @@ test('coverage is over the same window every other figure uses', () => {
     { '2026-01': '31/31', '2026-02': '28/28' });
   assert.deepEqual(coverageOf(rows, '2026-02-28', { start: '2026-01-15' }),
     { '2026-02': '28/28' });
+});
+
+/* ---------- coverageWindow: the ratio over the WHOLE window ---------- */
+
+test('the window ratio is not the sum of the monthly buckets', () => {
+  // 2026-01-12 to 2026-03-20: both ends are partial months (January loses its
+  // first 11 days, March loses its last 11), and February alone is entirely
+  // contained. A sum over `coverage` therefore reports on February only —
+  // 28 days — where `coverageWindow` reports on the whole 68-day stretch.
+  const start = '2026-01-12', end = '2026-03-20';
+  // Three missing rows, one inside each month, so `answered` is not simply
+  // `days` a second time and the month boundaries are crossed by a DAY.
+  const missing = new Set(['2026-01-15', '2026-02-10', '2026-03-05']);
+  const rows = dateRange(start, end)
+    .filter((d) => !missing.has(d))
+    .map((date) => ({ date, value: YES, status: '' }));
+
+  const stats = computeStats(boolHabit, rows, { start, end });
+
+  // Literal, hand-counted: Jan 12-31 (20) + Feb 1-28 (28) + Mar 1-20 (20).
+  assert.equal(stats.coverageWindow.days, 68);
+  assert.equal(stats.coverageWindow.answered, 65);
+
+  // Only February is entirely inside [start, end].
+  assert.deepEqual(stats.coverage.map((m) => m.month), ['2026-02']);
+
+  const bucketDays = stats.coverage.reduce((n, m) => n + m.days, 0);
+  const bucketAnswered = stats.coverage.reduce((n, m) => n + m.answered, 0);
+  assert.notEqual(bucketDays, stats.coverageWindow.days);
+  assert.notEqual(bucketAnswered, stats.coverageWindow.answered);
+});
+
+test('the four states, asked directly, over coverageWindow', () => {
+  // One window, four days, one of each state: `done`, a stated `skip`, a
+  // stated lapse (a row holding 0) and a missing row. Three of the four are
+  // rows; only the missing one is not, which is the membership test this
+  // asserts — rewriting it as a VALUE test (truthy `value`, or `!= null`)
+  // would report 2, not 3, because the lapse row holds 0.
+  const rows = [
+    { date: '2026-04-01', value: YES, status: '' },
+    { date: '2026-04-02', value: 0, status: 'skip' },
+    { date: '2026-04-03', value: 0, status: '' },
+    // 2026-04-04 has no row at all.
+  ];
+  const stats = computeStats(boolHabit, rows, { start: '2026-04-01', end: '2026-04-04' });
+  assert.equal(stats.coverageWindow.days, 4);
+  assert.equal(stats.coverageWindow.answered, 3);
+});
+
+test('one ancient imported row collapses coverage, and that is the model working', () => {
+  // A single row 400 days before an otherwise-dense recent cluster opens the
+  // window all the way back to it — `from = firstEntry` — so `days` stretches
+  // to cover the whole gap and the ratio reads as almost entirely unanswered.
+  // This is the same "a stored lapse can move window-derived figures"
+  // property the root CLAUDE.md documents elsewhere, not a bug to close.
+  const end = '2026-09-01';
+  const ancient = addDays(end, -400);
+  const rows = [
+    { date: ancient, value: YES, status: '' },
+    ...dateRange(addDays(end, -9), end).map((date) => ({ date, value: YES, status: '' })),
+  ];
+  const stats = computeStats(boolHabit, rows, { end });
+
+  const expectedDays = daysBetween(ancient, end) + 1;
+  assert.equal(stats.coverageWindow.days, expectedDays);
+  // 1 (the ancient row) + 10 (the recent cluster, inclusive of both ends).
+  assert.equal(stats.coverageWindow.answered, 11);
+  assert.ok(stats.coverageWindow.answered / stats.coverageWindow.days < 0.03,
+    'one imported row over a 400-day gap should read as almost entirely unanswered');
+});
+
+test('a caller that declined coverage gets neither key', () => {
+  const rows = monthRows('2026-01');
+  const stats = computeStats(boolHabit, rows, { end: '2026-01-31', coverage: false });
+  assert.equal(Object.hasOwn(stats, 'coverage'), false);
+  assert.equal(Object.hasOwn(stats, 'coverageWindow'), false);
+});
+
+/* ---------- trend: the score's own momentum, over TREND_LOOKBACK_DAYS ---------- */
+
+test('a perfect daily habit at day 40 reports NO trend', () => {
+  // This is the defect version passing every other assertion: the EWMA
+  // climbs from a cold 0 start regardless of behaviour, so a 40-day-old
+  // perfect habit LOOKS like it is improving fast when it has done nothing
+  // but exist. The floor withholds the figure until the curve has converged
+  // (see `trendOver`), and 87 is that floor for a daily habit — measured,
+  // not re-derived here from the constants (which would pin the name and
+  // nothing else).
+  //
+  // 40 days rather than a shorter window on purpose: it is past the 30-day
+  // lookback itself, so a point dated exactly 30 days before the last one
+  // genuinely EXISTS in `scores` — which is what makes this test able to
+  // catch a dropped `scores.length < minWindow` guard. A window shorter
+  // than the lookback (20 days, say) would report `null` for an unrelated
+  // reason — no such point to compare against — and would pass even with
+  // that guard missing.
+  const end = '2026-05-20';
+  const start = addDays(end, -39); // 40 days inclusive
+  const rows = dateRange(start, end).map((date) => ({ date, value: YES, status: '' }));
+  const stats = computeStats(boolHabit, rows, { end });
+  assert.equal(stats.trend.change, null);
+  assert.equal(stats.trend.minWindow, 87);
+
+  // #160's own named case, kept BESIDE the 40-day one rather than instead of
+  // it, and labelled as the weaker of the two: at 20 days the answer is right
+  // for two reasons at once, so on its own it would pass against a build with
+  // no floor in it at all. It is here because it is the case the issue names.
+  const twenty = dateRange(addDays(end, -19), end)
+    .map((date) => ({ date, value: YES, status: '' }));
+  assert.equal(computeStats(boolHabit, twenty, { end }).trend.change, null);
+});
+
+test('...and at day 87 it does, with the warm-up artefact bounded', () => {
+  // Both sides of the floor, over the same fixture shape: one day short of
+  // 87 withholds, 87 reports — and what it reports is bounded, not zero. The
+  // residual weight still on the EWMA's cold start at day 87 is
+  // `0.05 * (1 - alpha^30)`, measured at ~3.8 points for a daily habit, so a
+  // perfect habit's OWN trend at the floor must not read as a real 20+ point
+  // swing.
+  const end = '2026-05-20';
+
+  const short = addDays(end, -85); // 86 days inclusive
+  const shortRows = dateRange(short, end).map((date) => ({ date, value: YES, status: '' }));
+  assert.equal(computeStats(boolHabit, shortRows, { end }).trend.change, null);
+
+  const full = addDays(end, -86); // 87 days inclusive
+  const fullRows = dateRange(full, end).map((date) => ({ date, value: YES, status: '' }));
+  const trend = computeStats(boolHabit, fullRows, { end }).trend;
+  assert.notEqual(trend.change, null);
+  assert.ok(trend.change > 0, `expected a positive residual, got ${trend.change}`);
+  assert.ok(trend.change * 100 <= 5,
+    `expected the warm-up artefact bounded at 5 points, got ${trend.change * 100}`);
+});
+
+test('a habit that genuinely got worse reports a negative change', () => {
+  // 150 perfect days (well past the 87-day floor, so the curve is fully
+  // converged) followed by 50 stated lapses. The 30-day lookback lands
+  // entirely inside the lapse stretch, so the trend must read as a real,
+  // negative decline rather than the bounded warm-up artefact above.
+  const end = '2026-06-30';
+  const start = addDays(end, -199); // 200 days inclusive
+  const dates = dateRange(start, end);
+  const rows = dates.map((date, i) => ({ date, value: i < 150 ? YES : 0, status: '' }));
+  const stats = computeStats(boolHabit, rows, { end });
+  assert.ok(stats.trend.change < 0, `expected a negative change, got ${stats.trend.change}`);
+  // Rounded to points, as the tile does — pinned as a literal rather than
+  // re-derived, so a change to the decay maths shows up here.
+  assert.equal(Math.round(stats.trend.change * 100), -27);
+});
+
+test('the lookback is indexed by DATE, not by position', () => {
+  // The old version of this test built a CONTIGUOUS `dates` array in both of
+  // its branches, so `scores[scores.length - 1 - 30]` and "the last point
+  // dated <= addDays(last.date, -30)" picked the identical element — the
+  // issue's own named wrong version (`scores.length - 31`) is arithmetically
+  // `scores.length - 1 - 30`, precisely the index neither branch could tell
+  // apart from the right one. This fixture's window SPANS 2011-12-30, which
+  // `Pacific/Apia` deleted from its calendar outright, so under that one zone
+  // `scores` comes back ONE ELEMENT SHORTER than the calendar span — the one
+  // input that actually separates a date-indexed scan from a positional one.
+  // `test/timezones.test.js` already re-runs this whole file under six fixed
+  // zones, Apia among them, so this fixture needs no new infrastructure to
+  // make the sweep bite.
+  const end = '2012-01-20';
+  const start = '2011-10-15'; // 98 calendar days: past the 87-day floor with room
+  const rows = dateRange(start, end).map((date) => ({ date, value: YES, status: '' }));
+  const stats = computeStats(boolHabit, rows, { end });
+
+  // Computed from `stats.scores` itself rather than trusted from the field —
+  // the score at the point with the GREATEST date that is <= 30 days before
+  // the last one. This expression is correct in every zone; only a
+  // positional implementation disagrees with it, and only under Apia.
+  const last = stats.scores.at(-1);
+  const cutoff = addDays(last.date, -30);
+  let found = null;
+  for (let i = stats.scores.length - 1; i >= 0; i--) {
+    if (stats.scores[i].date <= cutoff) { found = stats.scores[i]; break; }
+  }
+  assert.ok(found, `expected a score dated on or before ${cutoff}`);
+  assert.equal(stats.trend.change, last.score - found.score);
+
+  // The `?start=` branch below is kept beside it — it pins a different thing
+  // (that narrowing the window does not move the answer) and is still worth
+  // having, but it CANNOT by itself catch the positional bug: narrowing
+  // moves `scores[0]` forward and leaves the last 31 elements, and so this
+  // comparison, untouched. That is exactly why the Apia fixture above is a
+  // separate case rather than a replacement for this one.
+  const wideEnd = '2026-06-30';
+  const wideStart = addDays(wideEnd, -199); // 200 days
+  const wideRows = dateRange(wideStart, wideEnd).map((date) => ({ date, value: YES, status: '' }));
+  const narrowStart = addDays(wideEnd, -119); // 120 days — still past the 87-day floor
+
+  for (const opts of [{ end: wideEnd }, { start: narrowStart, end: wideEnd }]) {
+    const s = computeStats(boolHabit, wideRows, opts);
+    const target = addDays(wideEnd, -30);
+    const f = s.scores.find((p) => p.date === target);
+    assert.ok(f, `expected a score dated ${target}`);
+    const expected = s.scores.at(-1).score - f.score;
+    assert.equal(s.trend.change, expected);
+  }
+});
+
+test('a non-daily habit gets a LONGER floor, because its curve converges more slowly', () => {
+  // This is the test that fails if anyone replaces the derived floor with a
+  // fixed 87: a 1x/week habit's decay constant is closer to 1, so its curve
+  // takes far longer to shed the weight still on its cold start.
+  const weekly = {
+    type: 'boolean', target_value: 0, target_type: 'at_least',
+    freq_numerator: 1, freq_denominator: 7,
+  };
+  const end = '2026-05-20';
+  const start = addDays(end, -19);
+  const rows = dateRange(start, end).map((date) => ({ date, value: YES, status: '' }));
+  const stats = computeStats(weekly, rows, { end });
+  assert.equal(stats.trend.minWindow, 179);
+});
+
+test('TREND_CONVERGED_SCORE is the top strength band', () => {
+  // Two declarations pinned by a test, the same answer `CHANNELS` and
+  // `SETTING_VALUES` already take — `stats.js` cannot import `awards.js`
+  // (awards.js imports stats.js), so the value is a second literal rather
+  // than a shared import. Asserting the literal on BOTH sides means a
+  // matched drift (someone bumping both to 0.9) still fails.
+  assert.equal(TREND_CONVERGED_SCORE, STRENGTH_BANDS[STRENGTH_BANDS.length - 1]);
+  assert.equal(TREND_CONVERGED_SCORE, 0.95);
+  assert.equal(STRENGTH_BANDS[STRENGTH_BANDS.length - 1], 0.95);
+});
+
+test('a skip-heavy habit does not clear the floor on calendar days alone', () => {
+  // 57 leading skip days then perfect, over an 87-day window: the CALENDAR
+  // day count clears `minWindow` (87), but only 30 of those days ever
+  // applied an EWMA step — far short of the 57 steps convergence needs. The
+  // old gate (`scores.length < minWindow`) let this through and reported
+  // "+80 points this month" on a habit kept perfectly on every day it was
+  // not resting — the exact defect the floor exists to prevent (#160).
+  const end = '2026-06-30';
+  const start = addDays(end, -86); // 87 days inclusive
+  const rows = dateRange(start, end).map((date, i) => (
+    i < 57 ? { date, value: 0, status: 'skip' } : { date, value: YES, status: '' }
+  ));
+  const stats = computeStats(boolHabit, rows, { end });
+  assert.equal(stats.trend.change, null);
+});
+
+test('the weekend-skipper is the ordinary case', () => {
+  // A daily boolean habit, completed every weekday and `status: 'skip'`
+  // every Saturday and Sunday, over the ordinary 87-day floor: this is not a
+  // contrived fixture, it is `skipDays` used exactly as intended by an
+  // account that rests on weekends. The old gate reported "+8 points" here.
+  const end = '2026-06-30';
+  const weekendSkipperRows = (windowDays) => {
+    const start = addDays(end, -(windowDays - 1));
+    return dateRange(start, end).map((date) => {
+      const dow = fromISO(date).getDay(); // 0 = Sunday, 6 = Saturday; fromISO is LOCAL midnight
+      return (dow === 0 || dow === 6)
+        ? { date, value: 0, status: 'skip' }
+        : { date, value: YES, status: '' };
+    });
+  };
+
+  assert.equal(computeStats(boolHabit, weekendSkipperRows(87), { end }).trend.change, null);
+
+  // Widened until it DOES report — 111 is measured by experiment (see the
+  // scratch script in the fix's report), not derived from any constant here,
+  // and is pinned as a literal for exactly that reason. 110 must still
+  // withhold, or this boundary is not the one the test claims to pin.
+  assert.equal(computeStats(boolHabit, weekendSkipperRows(110), { end }).trend.change, null);
+  const wide = computeStats(boolHabit, weekendSkipperRows(111), { end });
+  assert.notEqual(wide.trend.change, null);
+  assert.ok(wide.trend.change * 100 <= 5,
+    `expected the reported change bounded at 5 points, got ${wide.trend.change * 100}`);
+});
+
+/* ---------- regularity: the spread of the gaps between completions ---------- */
+
+const bool = (over = {}) => ({
+  type: 'boolean', target_value: 0, target_type: 'at_least', ...over,
+});
+
+test('same mean, different spread — the whole point of the feature', () => {
+  // Mon/Wed/Fri versus three consecutive days a week, both
+  // freq_numerator: 3, freq_denominator: 7 — same frequency, same number of
+  // completions. A mean-gap tile could not tell these apart, because the mean
+  // gap is denominator/numerator by definition for any habit hitting its
+  // rate. Only the SPREAD does: 2, 2, 3 repeating versus 1, 1, 5 repeating.
+  //
+  // Two full weeks plus a trailing Monday, so the window holds exactly two
+  // full CYCLES of the gap pattern rather than a truncated one — a window
+  // that stopped at the second Friday would still be missing the "3" (or
+  // "5") gap back to a third week, and the two means would not actually be
+  // equal at that truncation. 2026-06-01 is a Monday.
+  const gymHabit = { ...bool(), freq_numerator: 3, freq_denominator: 7 };
+  const end = '2026-06-15'; // the trailing Monday
+  const rows = (dates) => dates.map((date) => ({ date, value: YES, status: '' }));
+
+  const monWedFri = computeStats(gymHabit, rows([
+    '2026-06-01', '2026-06-03', '2026-06-05',
+    '2026-06-08', '2026-06-10', '2026-06-12',
+    '2026-06-15',
+  ]), { end });
+  const threeStraight = computeStats(gymHabit, rows([
+    '2026-06-01', '2026-06-02', '2026-06-03',
+    '2026-06-08', '2026-06-09', '2026-06-10',
+    '2026-06-15',
+  ]), { end });
+
+  assert.equal(monWedFri.regularity.gaps, 6);
+  assert.equal(threeStraight.regularity.gaps, 6);
+
+  assert.ok(
+    Math.abs(monWedFri.regularity.mean - threeStraight.regularity.mean) < 1e-9,
+    `expected equal means, got ${monWedFri.regularity.mean} vs ${threeStraight.regularity.mean}`
+  );
+  assert.ok(Math.abs(monWedFri.regularity.mean - 7 / 3) < 1e-9);
+
+  // Hand-computed population SDs over [2,2,3,2,2,3] and [1,1,5,1,1,5], each
+  // with mean 7/3 — pinned as literals rounded to 3 decimals, so a change to
+  // the arithmetic (a sample SD, say) shows up here even though the means
+  // still agree.
+  assert.equal(Math.round(monWedFri.regularity.spread * 1000) / 1000, 0.471);
+  assert.equal(Math.round(threeStraight.regularity.spread * 1000) / 1000, 1.886);
+  assert.notEqual(monWedFri.regularity.spread, threeStraight.regularity.spread);
+});
+
+test('a skipped day inside a gap is transparent', () => {
+  // Complete Monday, skip Tuesday, complete Wednesday: the skip must not
+  // widen the gap to 2, or a rest day taken through skipDays reports as
+  // irregular for doing the thing skips exist for.
+  const habit = bool();
+  const withSkip = computeStats(habit, [
+    { date: '2026-06-01', value: YES, status: '' },
+    { date: '2026-06-02', value: 0, status: 'skip' },
+    { date: '2026-06-03', value: YES, status: '' },
+  ], { end: '2026-06-03' });
+  assert.equal(withSkip.regularity.gaps, 1);
+  assert.equal(withSkip.regularity.mean, 1);
+
+  // The pair is the assertion: with the Tuesday row removed entirely (an
+  // UNANSWERED day, not a stated skip) the day counts against the gap, so
+  // the same two completions now read as a 2-day gap.
+  const noRow = computeStats(habit, [
+    { date: '2026-06-01', value: YES, status: '' },
+    { date: '2026-06-03', value: YES, status: '' },
+  ], { end: '2026-06-03' });
+  assert.equal(noRow.regularity.gaps, 1);
+  assert.equal(noRow.regularity.mean, 2);
+});
+
+test('the open gap is reported separately and is not counted as a gap', () => {
+  // Three completions (Mon, Wed, Fri — two closed gaps of 2) and then six
+  // silent days to `end`, so the trailing gap since the last completion is
+  // open rather than closed.
+  const habit = bool();
+  const stats = computeStats(habit, [
+    { date: '2026-06-01', value: YES, status: '' },
+    { date: '2026-06-03', value: YES, status: '' },
+    { date: '2026-06-05', value: YES, status: '' },
+  ], { end: '2026-06-11' }); // 6 days after the last completion
+  assert.equal(stats.regularity.openGap, 6);
+  assert.equal(stats.regularity.gaps, 2); // pinned: the open gap is not a third
+  assert.equal(stats.regularity.mean, 2);
+});
+
+test('a skip does not shorten the open gap, though it does shorten a closed one', () => {
+  // Complete 2026-06-01, then `status: 'skip'` every day through 06-07 (the
+  // last day of the window): the habit was last done six CALENDAR days ago
+  // and the tile that reads `openGap` says so as a plain fact — "6d since
+  // last" — so a skip-transparent open gap would render "0d" on a day the
+  // habit was last completed nearly a week earlier, which is false (#160).
+  const habit = bool();
+  const rested = computeStats(habit, [
+    { date: '2026-06-01', value: YES, status: '' },
+    { date: '2026-06-02', value: 0, status: 'skip' },
+    { date: '2026-06-03', value: 0, status: 'skip' },
+    { date: '2026-06-04', value: 0, status: 'skip' },
+    { date: '2026-06-05', value: 0, status: 'skip' },
+    { date: '2026-06-06', value: 0, status: 'skip' },
+    { date: '2026-06-07', value: 0, status: 'skip' },
+  ], { end: '2026-06-07' });
+  assert.equal(rested.regularity.openGap, 6);
+
+  // The pair is the assertion: over the SAME skipped stretch, a CLOSED gap
+  // stays skip-transparent, which is the asymmetry this fix is careful not
+  // to erase in the other direction. Complete 06-01, skip 06-02..06-06,
+  // complete 06-07: the gap the two completions bound must still read 1, not
+  // 6, or a planned rest taken through `skipDays` would report as irregular
+  // for doing the thing skips exist for.
+  const closedAcrossSkips = computeStats(habit, [
+    { date: '2026-06-01', value: YES, status: '' },
+    { date: '2026-06-02', value: 0, status: 'skip' },
+    { date: '2026-06-03', value: 0, status: 'skip' },
+    { date: '2026-06-04', value: 0, status: 'skip' },
+    { date: '2026-06-05', value: 0, status: 'skip' },
+    { date: '2026-06-06', value: 0, status: 'skip' },
+    { date: '2026-06-07', value: YES, status: '' },
+  ], { end: '2026-06-07' });
+  assert.equal(closedAcrossSkips.regularity.gaps, 1);
+  assert.equal(closedAcrossSkips.regularity.mean, 1);
+});
+
+test('one gap yields no spread', () => {
+  // Exactly two completions is exactly one closed gap, and the population SD
+  // of a single sample is 0 — which would claim PERFECT regularity from one
+  // data point. `spread` must withhold rather than report that.
+  const habit = bool();
+  const stats = computeStats(habit, [
+    { date: '2026-06-01', value: YES, status: '' },
+    { date: '2026-06-03', value: YES, status: '' },
+  ], { end: '2026-06-03' });
+  assert.equal(stats.regularity.gaps, 1);
+  assert.equal(stats.regularity.mean, 2);
+  assert.equal(stats.regularity.spread, null);
+});
+
+test('an at-most habit resolved to `success` is withheld', () => {
+  // Every unanswered day reads as a "completion" under that resolution, so a
+  // gap between them measures how often the calendar was silent rather than
+  // anything the user did — the same habit shape the awards gate withholds
+  // its whole card for, and it wants the same answer.
+  const entries = [
+    { date: '2026-06-01', value: 0, status: '' },
+    { date: '2026-06-03', value: 0, status: '' },
+  ];
+  const end = '2026-06-03';
+
+  const withheld = computeStats(atMostHabit, entries, { end, unlogged: 'success' });
+  assert.equal(withheld.regularity.applicable, false);
+  assert.equal(withheld.regularity.gaps, 0);
+  assert.equal(withheld.regularity.mean, null);
+  assert.equal(withheld.regularity.spread, null);
+  assert.equal(withheld.regularity.openGap, null);
+
+  // The pair is the assertion: the SAME habit under `unlogged: 'miss'`
+  // resolves real figures instead.
+  const kept = computeStats(atMostHabit, entries, { end, unlogged: 'miss' });
+  assert.equal(kept.regularity.applicable, true);
+  assert.equal(kept.regularity.gaps, 1);
+  assert.equal(kept.regularity.mean, 2);
+
+  // And the habit's OWN `at_most_unlogged: 'success'` override beats the
+  // account's `unlogged: 'miss'` — proving `unansweredCounts` was asked
+  // rather than the account setting read directly.
+  const overridden = { ...atMostHabit, at_most_unlogged: 'success' };
+  const stillWithheld = computeStats(overridden, entries, { end, unlogged: 'miss' });
+  assert.equal(stillWithheld.regularity.applicable, false);
+});
+
+test('never completed', () => {
+  // Only stated lapses (rows holding 0, not skips) — the habit has never
+  // once been completed, so there is no gap to report at all.
+  const habit = bool();
+  const stats = computeStats(habit, [
+    { date: '2026-06-01', value: 0, status: '' },
+    { date: '2026-06-02', value: 0, status: '' },
+  ], { end: '2026-06-02' });
+  assert.equal(stats.regularity.gaps, 0);
+  assert.equal(stats.regularity.mean, null);
+  assert.equal(stats.regularity.spread, null);
+  assert.equal(stats.regularity.openGap, null);
 });
 
 /* ---------- summaryStats: the two-field entry point /overview uses ---------- */
@@ -3269,6 +3729,15 @@ test('computeStats agrees, field for field, with each pass called independently 
   assert.deepEqual(stats.resilience,
     computeResilience(habit, entryMap, streaks, from, end, opts.unlogged, creditFrom));
   assert.deepEqual(stats.coverage, computeCoverage(entryMap, from, end));
+
+  // `coverageWindow` shares the identical clamped `dates` every other field
+  // here does — independently rebuilt via `boundedRange`, not read back off
+  // `stats` itself — and `answered` is counted here by a second, independent
+  // walk rather than by re-deriving it from `stats.coverage`.
+  const windowDates = boundedRange(from, end);
+  assert.equal(stats.coverageWindow.days, windowDates.length);
+  assert.equal(stats.coverageWindow.answered,
+    windowDates.filter((date) => entryMap.has(date)).length);
 });
 
 test('computeStats and summaryStats each build the shared `dates` array with exactly one boundedRange( call, with its own inventory', () => {

@@ -123,6 +123,11 @@
  * @typedef {object} Stats
  * @property {number} score            latest strength, 0..1
  * @property {ScorePoint[]} scores
+ * @property {Trend} trend             how the score moved over the trailing
+ *   window — see `Trend` for the units and the floor.
+ * @property {Regularity} regularity   the spread of the gaps between
+ *   completions — see `Regularity` for why spread and not mean, and for the
+ *   at-most/`success` shape it is withheld for.
  * @property {Streak[]} streaks
  * @property {number} currentStreak
  * @property {number} bestStreak
@@ -137,6 +142,13 @@
  *   that does not read it — see `computeStats`. `/overview`, in both editions,
  *   no longer calls `computeStats` at all: it calls `summaryStats` once per
  *   habit and keeps `score` and `currentStreak`.
+ * @property {CoverageWindow} [coverageWindow] answered/days over the WHOLE
+ *   window, absent under the same opt-out as `coverage` and for the same
+ *   reason — see `CoverageWindow`. It is NOT the sum of `coverage`'s monthly
+ *   buckets: `coverage` reports only months the window entirely contains, so
+ *   a window with a partial month at either end (or, for a habit under 60
+ *   days old, no whole month at all) sums to a shorter span than the window
+ *   itself.
  */
 
 /**
@@ -250,6 +262,70 @@
  * @property {string} month            'YYYY-MM'
  * @property {number} answered         days holding a row
  * @property {number} days             days in the month
+ */
+
+/**
+ * The same answered/days question `CoverageMonth` asks, but over the WHOLE
+ * window rather than only the months it entirely contains — the figure a
+ * habit under 60 days old still has even though `coverage` may be empty.
+ * @typedef {object} CoverageWindow
+ * @property {number} answered         days in the window holding a row
+ * @property {number} days             days in the window
+ */
+
+/**
+ * How the score moved over the trailing `TREND_LOOKBACK_DAYS`-day window,
+ * in SCORE units (`[-1, 1]`) — the renderer converts to points, since the
+ * score itself renders as a percentage. `null` means WITHHELD, not flat: the
+ * EWMA climbs from a cold 0 start regardless of behaviour, so for any habit
+ * younger than `minWindow` days a real trend cannot yet be told apart from
+ * the curve still filling. `minWindow` is present even when `change` is
+ * null, so a caller can say WHY the figure is withheld ("needs N more days")
+ * rather than merely showing nothing; it is derived from the habit's own
+ * decay constant, not fixed, because a less frequent habit's curve converges
+ * more slowly.
+ * @typedef {object} Trend
+ * @property {number} days             always `TREND_LOOKBACK_DAYS`
+ * @property {number|null} change      unrounded score delta over `days`, or
+ *   null when the habit has not yet reached `minWindow`
+ * @property {number} minWindow        the earliest day count `change` can be
+ *   trusted from, derived from where this habit's own curve converges
+ */
+
+/**
+ * The SPREAD of the gaps between completions, not their mean — a mean gap is
+ * `denominator / numerator` by definition for any habit hitting its rate, so
+ * only the spread says anything the frequency does not. `applicable: false`
+ * is the at-most/`success` shape: under that resolution every unanswered day
+ * reads as a completion, so a gap between them is not a measure of anything,
+ * and the whole awards card is withheld for the identical reason. Every
+ * `null` figure here is the ABSENCE of a claim, not a zero — `mean`/`spread`
+ * null under `applicable: true` still means "not enough data", never "no
+ * gap". `openGap` is the trailing, still-running gap since the last
+ * completion, reported apart from `gaps`/`mean`/`spread` because it has not
+ * closed yet — the same distinction `Resilience`'s `openRun` draws against a
+ * closed lapse.
+ *
+ * **Skips are transparent to `gaps`/`mean`/`spread` only, and not to
+ * `openGap` (#160).** The three CLOSED figures are about rhythm, so a
+ * planned rest day inside a run of completions must not widen the gap either
+ * side of it; `openGap` is read as a plain factual answer to "when did I
+ * last do this", so it counts every CALENDAR day since the last completion,
+ * skips included.
+ * @typedef {object} Regularity
+ * @property {boolean} applicable      false only for an at-most habit
+ *   resolved to `success` (`unansweredCounts`) — `gaps` is 0 and the three
+ *   figures below it are null in that case
+ * @property {number} gaps             count of CLOSED gaps between
+ *   completions; skipped days are transparent and widen nothing
+ * @property {number|null} mean        unrounded mean of the closed gaps, in
+ *   days; null when `gaps < 1`
+ * @property {number|null} spread      unrounded population standard
+ *   deviation of the closed gaps, in days; null when `gaps < 2` — the SD of
+ *   one sample is 0, which would claim perfect regularity from a single gap
+ * @property {number|null} openGap     CALENDAR days since the last
+ *   completion (skips included — see above), not yet a closed gap; null when
+ *   the habit has never been completed at all
  */
 
 /**
