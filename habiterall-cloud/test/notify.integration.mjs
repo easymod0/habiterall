@@ -767,6 +767,16 @@ try {
     notifier.DELIVERY_CONCURRENCY !== 8,
     `pool max ${poolMax} -> ${notifier.DELIVERY_CONCURRENCY}`);
 
+  // The same seam, the same reason, for the flag that decides whether the tick
+  // may hold its process open. Since #194 this edition's `start()` has exactly
+  // one caller — `src/notifier-entry.js`, a process with NO server — so the
+  // tick's own timer is the only thing that refs its event loop, and the
+  // default (`unref`) made it run one tick and exit 0. `test:notifierentry`
+  // pins the consequence against a real spawned process; this pins that the
+  // ctx carries it at all, which is the line a refactor drops silently.
+  check('start() hands startNotifier keepAlive, because this edition has no server to hold the loop',
+    handedOver?.keepAlive === true, `ctx carried ${JSON.stringify(handedOver?.keepAlive)}`);
+
   console.log(fails === 0 ? '\nALL CLOUD NOTIFY CHECKS PASSED' : `\n${fails} CHECK(S) FAILED`);
 } finally {
   await admin.end();

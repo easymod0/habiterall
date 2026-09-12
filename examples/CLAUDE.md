@@ -33,6 +33,13 @@ puts Authentik's database in habiterall's own Postgres. Extending them yields
 were the plausible second blocker and are not one: a service-level `volumes:`
 merges by CONTAINER PATH.
 
+A service can hit the same limit from *inside* one published file, not only
+across the two: `notifier` (#194) is hand-written in
+`examples/docker-compose.cloud.yml` rather than `extends: service: app`,
+because `extends` concatenates sequences and cannot remove a key — extending
+`app` would have inherited its `ports:`, and two containers would have fought
+for the one published port.
+
 **The published Authentik file is the exception and stays standalone**, repeating
 `db` / `migrate` / `app`, because downloading ONE file and running it is the whole
 point of this directory.

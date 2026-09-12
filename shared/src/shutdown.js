@@ -78,6 +78,10 @@ export const DRAIN_DEADLINE_MS = 8000;
  * @param {() => (void | Promise<void>)} [options.cleanup] storage teardown — whatever the module body already opened
  * @param {number} [options.deadlineMs]
  * @param {string[]} [options.signals]
+ * @param {string} [options.reason] what `shutdown.early` says this exit means. Defaults to
+ *   the sentence that is true for an entry point that goes on to install a server — a
+ *   process with no server at all (the notifier) has no OTHER shutdown path, so this
+ *   is its only chance to say something true instead.
  * @param {(code: number) => void} [options.exit] injected for the test only
  * @param {(signal: string, handler: () => void) => void} [options.onSignal] injected for the test only
  * @returns {{adopt: (handler: (signal: string) => void) => boolean}}
@@ -87,6 +91,7 @@ export function armShutdown(options = {}) {
   const cleanup = options.cleanup ?? (() => {});
   const deadlineMs = options.deadlineMs ?? DRAIN_DEADLINE_MS;
   const signals = options.signals ?? ['SIGINT', 'SIGTERM'];
+  const reason = options.reason ?? 'signal arrived before the server was listening';
   const exit = options.exit ?? ((code) => process.exit(code));
   const onSignal = options.onSignal ?? ((signal, handler) => process.on(signal, handler));
 
@@ -130,7 +135,7 @@ export function armShutdown(options = {}) {
           log.info('shutdown.early', {
             signal,
             ms: Date.now() - startedAt,
-            reason: 'signal arrived before the server was listening',
+            reason,
           });
           exit(0);
         })

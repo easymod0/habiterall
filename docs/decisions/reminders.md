@@ -187,4 +187,111 @@ operator has to remember to keep under the pool size they set, and getting that
 relationship right is the one thing this constant exists to do without being
 told.
 
+**Cloud's tick moved out of the web process into its own container (#194),
+because a fleet of `app` replicas was running the tick N times, not once.**
+Measured against the pre-split arrangement (`server.js` calling `startNotifier`
+at boot, same as personal still does): N replicas meant N sequential scans of
+the full `users` table every interval, N sets of per-account transactions
+competing with request traffic for the same `PG_POOL_MAX`-sized pool, and — the
+one that is not a performance argument — **N Discord gateway WebSockets, all
+subscribed to the same bot token, racing to answer one button press.** A
+Postgres advisory lock (`pg_try_advisory_lock`) is the cheap fix for "N
+replicas doing the same job" and was considered and rejected: it would have
+serialised the SCAN across replicas, but every replica would still open its
+own gateway socket, because a lock held around a tick says nothing about a
+long-lived connection opened once at boot and kept for the process's whole
+life. Extraction removes the problem instead of arbitrating it: there is now
+exactly one process that ever calls `startNotifier`, so there is nothing left
+to elect a leader among.
+
+`habiterall-cloud/src/notifier-entry.js` is that process — the tick, the
+Discord gateway and the scheduled dump, and nothing else: no Express, no
+session store, no API routes. It must never run more than one at a time, which
+is a stronger constraint than "don't scale the app": **on Kubernetes,
+`replicas: 1` is not sufficient**, because the default `RollingUpdate`
+strategy starts the new pod before terminating the old one, so every ordinary
+deploy has a window with two gateways open — both able to answer the same
+three-second button press, with Discord showing "This interaction failed" on
+whichever one it did not credit. `strategy: { type: Recreate }` is the fix,
+and it is one line nobody writes unless they already know a rolling update can
+double a singleton. The compose equivalent is smaller but the same shape:
+`restart: on-failure`, never `unless-stopped` — with `HABITERALL_NOTIFY=off`
+and no backup directory configured this container has nothing to run and its
+entry point correctly exits 0, and `unless-stopped` would restart an exit-0
+process forever.
+
+**The split has a cost, and it is stated rather than hidden: `GET
+/api/backup/status` is answered by the app, not the notifier.** The dump now
+runs in a process the dashboard's "Backup and restore" dialog does not talk
+to, and `backupEnabled()` reads `HABITERALL_BACKUP_DIR` /
+`DATABASE_URL_ADMIN` from *that request's own process* — the app's
+environment. An operator who moves the admin credential to `notifier` (the
+correct, least-privilege placement — see `habiterall-cloud/CLAUDE.md`'s
+"Scheduled backups" section) gets backups that run correctly and a dialog that
+reports them as off, because the app was never asked and never dumps. Fixing
+that would mean either the app calling out to the notifier for a status it
+cannot otherwise see, or a shared status table — both rejected for the same
+reasons a status table was rejected for the dump's own "last outcome" (no
+tenant may read instance-level operator state, and a nightly write is not
+worth a migration). The operator-facing answer is to set the credential on
+both: `notifier`, which is what dumps, and `app` as well, purely so the dialog
+agrees with reality.
+
+### Taking the server away took the thing that held the loop open
+
+The first version of the split ran one tick and then exited 0, silently. It is
+worth recording in full, because nothing about it is visible in the diff that
+caused it and the shape recurs: **a line whose correctness depended on a
+property of its only caller, in a change whose whole point was to add a caller
+without that property.**
+
+`startNotifier` (`shared/src/notify-send.js`) ended with `timer.unref?.()` and
+a two-line comment: *"Nothing here should keep a process alive on its own; the
+HTTP server is what does that."* That was true, and right, of every caller it
+had ever had — both editions started the tick inside a process that also
+called `app.listen`, and a ref'd interval there would have kept a drained
+server alive past its own exit, defeating `installShutdown`. `notifier-entry.js`
+has no server.
+
+What makes it worse than an obvious oversight is that it is **configuration-
+dependent**, so half the deployments would have looked fine. A Discord bot
+token opens a gateway WebSocket, and a socket is ref'd — so an instance with
+`DISCORD_BOT_TOKEN` set stays up on the socket's ref and nobody sees anything
+wrong. A webhook-only, ntfy-only or backup-only instance opens nothing that
+outlives a tick: the pg pool's idle clients are gone after
+`idleTimeoutMillis` (30 s), `fetch` closes, `pg_dump` is a child process that
+does not run most minutes. Nothing refs the loop and Node leaves.
+
+Measured against the real entry point and a real Postgres, on the shipped
+defaults (`HABITERALL_NOTIFY_INTERVAL_MS` unset, so a 60 s tick):
+
+| t | state |
+|---|---|
+| 0 s | boot, `notify.starting`, first tick runs cleanly |
+| 5-40 s | alive |
+| ~40-45 s | **exited, code 0, no signal, no log line** |
+| 60 s | the second tick was due here, and never came |
+
+`restart: on-failure` — correctly chosen, for the reason above — does not
+restart an exit 0. So the shipped arrangement was a notifier container that
+went quiet under a minute after every boot, took the nightly backup with it,
+and said nothing in any log about why. Against an *unreachable* database it
+dies in about a second, which is what made it catchable in a suite that needs
+no Postgres.
+
+The fix is `ctx.keepAlive`, **defaulted off**: personal keeps the unref,
+because personal's tick still shares a process with a server, and cloud's
+`start()` (`habiterall-cloud/src/notifier.js`) passes `true` because since
+#194 its only caller is a process with none. It is pinned twice and
+deliberately at two levels, because pinning the decision is not pinning the
+wiring: `shared/test/notify.test.js` starts a notifier in a CHILD process and
+asserts it exits without the flag and survives with it — the property is "did
+the event loop stay open", which is not observable from inside the process
+being kept alive — and `habiterall-cloud/test/notifier-entry.integration.mjs`
+asserts the real entry point is still alive half a second after its first
+tick, which is the half that catches the flag being dropped from the ctx.
+Deleting `keepAlive: true` from `notifier.js` leaves `npm test`, `typecheck`,
+the cloud API suite and the tenancy suite entirely green and fails exactly
+those two.
+
 

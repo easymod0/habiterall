@@ -11,10 +11,7 @@ import { LOCAL_IPS, createHealthProbe, sendHealth } from './health.js';
 import { throttleTouch } from './session-touch.js';
 import { initAuth, beginLogin, completeLogin, logoutUrl, requireAuth } from './auth.js';
 import { api, overviewMemoGauge } from './api.js';
-import { start as startNotifier, ntfyAnswerAdapter } from './notifier.js';
-import {
-  backupConfig, reportBackupConfig, backupTask, preflight as backupPreflight,
-} from './backup.js';
+import { ntfyAnswerAdapter } from './notifier.js';
 import { log } from '@habiterall/shared/log.js';
 import { logStartup, requestLog, watchRuntime } from '@habiterall/shared/observe.js';
 import { armShutdown, installShutdown } from '@habiterall/shared/shutdown.js';
@@ -375,36 +372,38 @@ app.use((err, req, res, next) => {
 
 const server = await start();
 
-// `null` unless `HABITERALL_BACKUP_DIR` is set — the opt-in, and what keeps
-// every existing suite that imports this module from spawning `pg_dump`.
-// Reminders the server delivers itself (Discord today). Started here rather
-// than at import time so the test suites, which import `api.js`, never post to
-// a real webhook. Nothing schedules the Android channel: the phone does that.
-// The backup hook rides the same guard for the same reason — a test importing
-// this module for its routes must not start dumping the real database either.
-const backupCfg = backupConfig(process.env);
-// Once, at boot, whether or not backups end up enabled — never per request.
-// `GET /backup/status` (api.js) calls `backupEnabled()` -> `backupConfig()`
-// on every hit, and `backupConfig` is now PURE (FIX 3, issue #75 fix round):
-// what it found wrong used to be logged as a side effect of that call, so
-// any one of N tenants opening the "Backup and restore" dialog could drive
-// an error-level line into the operator's log at the read limiter's rate —
-// in exactly the state this feature ships deliberately (a backup directory
-// set before `DATABASE_URL_ADMIN` is added). Calling the reporter here,
-// unconditionally, is what still gets that line logged loudly at boot.
-reportBackupConfig(backupCfg);
-const backup = backupTask(process.env);   // null unless HABITERALL_BACKUP_DIR is set
-if (backup) {
-  // dir, schedule and keep are fine in the server's own log — only the
-  // operator reads it, and they are the one who set the directory in their
-  // own compose file in the first place. It is the API response
-  // (`GET /backup/status`, api.js) that must never carry any of them.
-  log.info('backup.starting', {
-    dir: backupCfg.dir, schedule: backupCfg.schedule, keep: backupCfg.keep,
-  });
-  backupPreflight(backupCfg);
-}
-const notifier = startNotifier(process.env, backup ? { onTick: backup } : {});
+// The reminder tick, the Discord gateway and the scheduled backup no longer
+// start here — they moved to `notifier-entry.js`, a second entry point and a
+// second container (`notifier` in the compose files), so a fleet of replicas
+// of THIS process shares no tick, no gateway socket and no extra pg
+// connections between them. The property the old comment here claimed —
+// "started here rather than at import time so the test suites, which import
+// `api.js`, never post to a real webhook" — is now structural rather than a
+// convention: the start is in a module none of those suites import at all.
+
+// One line per boot, at info, and it is a SIGNPOST rather than a status: this
+// process cannot tell whether a notifier container exists, and that is exactly
+// the hole worth leaving a breadcrumb for.
+//
+// An operator upgrading an existing deployment runs `docker compose pull && up
+// -d` against THEIR OWN compose file, which has an `app` and no `notifier`.
+// Nothing then fails: the app boots healthy, every account's settings still
+// show its destinations, `channelConfigured` still says yes, and `POST
+// /api/notify/test` — the one diagnostic anybody reaches for — still works,
+// because a test send runs in THIS process. Only the schedule is gone, and
+// scheduled delivery failing is indistinguishable from a quiet week.
+//
+// Keyed on nothing, deliberately. The obvious version warns when
+// `HABITERALL_NOTIFY` is set here, which is the copied-old-block case — and it
+// misses the worse one, because the variable is opt-OUT: an operator whose
+// compose never named it had reminders working and loses them with no
+// misconfiguration to detect. So this is an unconditional statement of where
+// the job lives, in the log of the process an operator opens first.
+log.info('notify.delivered_elsewhere', {
+  by: 'the notifier container (node src/notifier-entry.js)',
+  consequence: 'this process sends no scheduled reminders and takes no backups; '
+    + 'a deployment with no notifier service delivers none at all',
+});
 
 // One line a minute, and the one to graph: event-loop lag is what turns a heavy
 // dashboard into everybody's latency, and pool exhaustion is what a replica
@@ -431,8 +430,10 @@ async function start() {
       // max × replicas must stay under the server's max_connections.
       pg_pool_max: Number(process.env.PG_POOL_MAX) || 10,
       ...poolTimeouts(),
-      notify: (process.env.HABITERALL_NOTIFY ?? 'on').toLowerCase(),
-      discord_bot: !!process.env.DISCORD_BOT_TOKEN,
+      // `notify` and `discord_bot` moved to the notifier's own `startup` line
+      // (`notifier-entry.js`) along with the tick they describe — this
+      // process no longer runs either, so do not re-add them here looking for
+      // the missing field.
       log_level: log.level,
     });
   });
@@ -446,7 +447,6 @@ installShutdown(server, {
   arm,
   beforeClose: () => {
     runtime.stop();
-    notifier?.stop();
   },
   cleanup: () => closePool(),
 });

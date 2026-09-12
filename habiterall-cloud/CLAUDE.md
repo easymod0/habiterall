@@ -627,10 +627,53 @@ Gotcha: `docker compose run --rm migrate` uses a cached image. After adding a
 migration, `docker compose build migrate` first or it will report "already up
 to date".
 
+## The reminder tick lives in its own process (issue #194)
+
+`src/notifier-entry.js` — not `server.js` — is what calls `start()` in
+`src/notifier.js` now, and it is a second container in the shipped compose
+files (`notifier`, alongside `app`, `db` and `migrate`). Nothing about the
+tick itself changed: it still reads `HABITERALL_NOTIFY` and its own interval,
+it still opens the Discord gateway on `DISCORD_BOT_TOKEN`, and it is still
+what runs the nightly dump (below). What moved is which OS process owns the
+event loop the tick runs on — before this, every `app` replica ran its own
+tick: N sequential scans of the full `users` table an interval, N sets of
+per-account transactions sharing the app's own `PG_POOL_MAX`-sized pool with
+request traffic, and **N Discord gateway sockets, all subscribed to the same
+bot token, racing to answer one button press.** `notifier-entry.js` has no
+Express, no session store, no `./api.js`, no `./auth.js`; `server.js` no
+longer imports `./notifier.js`'s `start` or `./backup.js` at all, which makes
+the old code's own comment — "started here rather than at import time so the
+test suites, which import `api.js`, never post to a real webhook" — structural
+rather than a convention: the start is in a module the suites do not import
+at all (`habiterall-cloud/test/notifier-entry.test.js` pins the import lists
+on both sides of this). A Postgres advisory lock was the cheaper-looking
+alternative and was rejected — it serialises the scan but not the gateway
+socket, which every replica would still open at boot regardless. Extraction
+removes the question instead of arbitrating it: there is exactly one process
+left that ever calls `start()`. `docs/decisions/reminders.md` has the
+measurement and the rejected alternative in full.
+
+Run **exactly one** `notifier`, ever — never `--scale` it. On Kubernetes,
+`replicas: 1` alone is not enough: the default `RollingUpdate` strategy starts
+the new pod before terminating the old one, so an ordinary deploy still has a
+window with two gateways open, each able to answer the same button press —
+Discord shows "This interaction failed" on the one it does not credit.
+`strategy: { type: Recreate }` is the fix. `restart: on-failure`, not
+`unless-stopped`, is the compose-level version of the same "singleton" idea:
+with `HABITERALL_NOTIFY=off` and no backup directory configured this
+container has nothing to run and its entry point correctly exits 0, which
+`unless-stopped` would restart forever. `SESSION_SECRET` on `notifier` must be
+the SAME value `app` has — `signAnswer` (`notifier.js:556`) signs every ntfy
+answer code with it, and the app's own route verifies with its own copy — and
+one cost is stated rather than hidden: `GET /api/backup/status` is answered by
+`app`, from `app`'s own environment, so an admin credential on `notifier`
+alone (the correct, least-privilege placement) runs backups while that dialog
+reports them as off. Set it on `app` too if you want the dialog to agree.
+
 ## Scheduled backups (issue #75)
 
-`src/backup.js` runs a nightly whole-database `pg_dump` on the same tick
-`notifier.js` already ticks on — no `setInterval` of its own. It is deliberately
+`src/backup.js` runs a nightly whole-database `pg_dump` on the tick started in
+`src/notifier-entry.js` (#194) — no `setInterval` of its own. It is deliberately
 **one dump, instance-level**, not a per-account export: this edition holds many
 accounts in one Postgres database, so a per-account loop would mean a
 `withNotifierScope` scan just to enumerate them, an RLS question for every one
@@ -662,27 +705,28 @@ the reason a failed dump's partial bytes must never survive on disk: the
 `.tmp`-then-rename is what stops that 9KB of truncated SQL sitting in the
 backup directory looking like a backup.
 
-**Enabling this hands the app container the OWNER credential
+**Enabling this hands the `notifier` container the OWNER credential
 (`DATABASE_URL_ADMIN`), and that is a deliberate, OPERATOR-MADE widening, not
 something the shipped examples do for them.** Neither
 `examples/docker-compose.cloud.yml` nor `docker-compose.cloud-authentik.yml`
-puts `DATABASE_URL_ADMIN` on the `app` service — only `migrate` holds it,
-which runs once per deploy and never inside the long-lived app process — and
-that is on purpose: the app not being able to change the schema, or read past
-row-level security, is part of this edition's security model, and it stays
-true by default even with `HABITERALL_BACKUP_DIR` set. Turning scheduled
-backups on means an operator adding that credential to the app service
-themselves, in their own compose override, which is the moment the credential
-capable of reading every tenant's rows starts living beside the restricted
+puts `DATABASE_URL_ADMIN` on `notifier` (or on `app` — the app never dumps and
+never held it) — only `migrate` holds it, which runs once per deploy and never
+inside a long-lived process — and that is on purpose: neither long-lived
+container being able to change the schema, or read past row-level security,
+is part of this edition's security model, and it stays true by default even
+with `HABITERALL_BACKUP_DIR` set. Turning scheduled backups on means an
+operator adding that credential to the `notifier` service themselves, in
+their own compose override, which is the moment the credential capable of
+reading every tenant's rows starts living beside the restricted
 `DATABASE_URL` one for as long as backups are on. There is no fallback to
 `DATABASE_URL` in this path — `migrate.js` has one (`DATABASE_URL_ADMIN ??
 DATABASE_URL`) and copying it here would silently dump as the RLS-restricted
-app role, the same wrong-role failure the measured table above shows arriving
+role, the same wrong-role failure the measured table above shows arriving
 loudly instead. A `HABITERALL_BACKUP_DIR` set with no usable admin URL is
 refused loudly (`backup.admin_url_missing`, at error) rather than either
 silently doing nothing or silently dumping nothing useful — which is exactly
 the state an unmodified example is in: `HABITERALL_BACKUP_DIR` can be set, but
-with no `DATABASE_URL_ADMIN` on the app the feature refuses itself at boot
+with no `DATABASE_URL_ADMIN` on `notifier` the feature refuses itself at boot
 until the operator adds it.
 
 **The password reaches the child as `PGPASSWORD`, never in argv.**
@@ -728,19 +772,23 @@ on disk is the crash-safe record that the day succeeded (so a redeploy at
 run being retried every minute for the rest of the day while still trying
 again once, after a restart, if the operator has fixed the problem.
 
-**This edition is multi-replica and nothing here serialises the dump across
-processes — that is a deliberate, stated assumption, not an oversight.** Each
-run's temporary file carries a random, per-run suffix rather than a fixed
-`.tmp` name, so two replicas can no longer interleave their bytes into one
-corrupt file that still gets logged as `backup.ok` on both sides — but that
-fix only removes the CORRUPTION, not the RACE: two replicas both pointed at
-one `HABITERALL_BACKUP_DIR` will still both see `todaysFileExists` false, both
-dump the whole database, and both `renameSync` onto the same final name — one
-wins, one's work is simply thrown away. The no-two-runs-at-once guarantee
-(`inFlight`, `lastAttemptDate`) is **per-process module state**, not a lock
-over the directory, and cannot coordinate a second process by construction.
-Exactly ONE replica may own a backup directory; `examples/cloud.env.example`
-and the README say so in the operator-facing words.
+**The dump used to run inside a multi-replica `app`, with nothing here
+serialising it across processes — that race is now removed by DEPLOYMENT
+SHAPE, not by a lock, and the difference matters.** Since #194 the tick, the
+gateway and this dump all run in the singleton `notifier` container (see
+above), so the no-two-runs-at-once guarantee — `inFlight` and
+`lastAttemptDate`, both **per-process module state**, exactly as before — is
+now sufficient on its own: there is exactly one process left for it to be
+true of. That guarantee still cannot coordinate a SECOND process by
+construction, which is precisely why "run exactly one `notifier`, ever" above
+is a rule and not a suggestion — scaling `notifier` would reopen the same race
+this section used to warn about. Each run's temporary file carries a random,
+per-run suffix rather than a fixed `.tmp` name, so two notifiers can no longer
+interleave their bytes into one corrupt file logged as `backup.ok` on both
+sides, but that fix only ever removed the CORRUPTION, not the RACE: two
+processes both pointed at one `HABITERALL_BACKUP_DIR` would still both see
+`todaysFileExists` false, both dump the whole database, and both `renameSync`
+onto the same final name — one wins, one's work is simply thrown away.
 
 **A crashed run's own `.tmp` is reclaimed at the START of the next run, and
 only because of an age gate.** The per-run UUID suffix above stopped a `.tmp`
@@ -783,19 +831,23 @@ alone:**
 ## Local stack
 
 `docker compose up -d` brings up Postgres, Authentik (server + worker), the
-migrations, the bootstrap and the app. The app listens on **:3100**;
-Authentik's admin UI is on **:9000**. See `SETUP.md`.
+migrations, the bootstrap, the app and the notifier (#194). The app listens on
+**:3100**; Authentik's admin UI is on **:9000**; the notifier listens on
+nothing. See `SETUP.md`.
 
 `cp ../examples/cloud.env.example .env` first — the template moved out of this
 package, because a downloader of `examples/docker-compose.cloud.yml` needs the
 same one and one copy is the point.
 
-`db`, `migrate` and `app` carry no environment block here: they `extends` the
-ones in `examples/docker-compose.cloud.yml` and add the build. That file is the
-one place this edition's variables are written down, and `examples/CLAUDE.md` has
-the whole argument. Only the top-level `volumes:` declarations are restated by
-hand; `depends_on` IS inherited — measured, where this used to hedge — so `app`
-writes just the `authentik-bootstrap` key and the other two merge in beside it.
+`db`, `migrate`, `app` and `notifier` carry no environment block here: they
+`extends` the ones in `examples/docker-compose.cloud.yml` and add the build.
+That file is the one place this edition's variables are written down, and
+`examples/CLAUDE.md` has the whole argument. Only the top-level `volumes:`
+declarations are restated by hand; `depends_on` IS inherited — measured, where
+this used to hedge — so `app` writes just the `authentik-bootstrap` key and
+the other two merge in beside it. `notifier` writes no extra key at all: its
+own `depends_on` (`db` healthy, `migrate` completed) is exactly what it
+inherits.
 
 The topology still differs from `examples/docker-compose.cloud-authentik.yml`
 on purpose: Authentik's database lives in the *same* Postgres server here,
