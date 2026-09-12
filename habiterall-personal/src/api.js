@@ -796,9 +796,9 @@ api.get('/habits/:id/stats', (req, res) => {
  * (which counts years) and `coverage` (which counts perfect months) and break
  * the agreement between the two routes, which is the whole point of this one.
  *
- * `granularity` is pinned to `'day'` and it does not matter: in `stats.js` it
- * reaches only `history`, and `computeAwards` reads no `stats.history` — so
- * the detail view's `?granularity=month` never changes which trophies show.
+ * No `granularity` either: in `stats.js` it reaches only `history`, which
+ * this route declines outright (see the opt-out note below), so there is no
+ * pass left for it to reach.
  *
  * Every habit, archived included, exactly as `/categories/stats` reads them
  * (`q.everyHabit`) — filtering here would be as wrong as it is there.
@@ -822,8 +822,17 @@ api.get('/awards', (req, res) => {
     habits: habits.map((row) => {
       const habit = asHabit(row);
       const entries = /** @type {any} */ (q.entriesFor.all(habit.id));
-      const stats = computeStats(habit, entries,
-        { end, granularity: 'day', weekStart, unlogged });
+      // `computeAwards` (below) reads only `bestStreak`, `score`, `scores`,
+      // `resilience`, `weekdays`, `streaks` and `coverage` off `stats` — see
+      // the opt-out note above `computeStats` (shared/src/stats.js). This
+      // route walks EVERY habit on the account, so `history`, `weekdayByMonth`
+      // and `frequency` are declined: they are built and thrown away on every
+      // call otherwise, measured at 66% of a habit's cost. `coverage` stays
+      // `true` because `computeAwards` reads it for the coverage award.
+      const stats = computeStats(habit, entries, {
+        end, weekStart, unlogged,
+        history: false, weekdayByMonth: false, frequency: false,
+      });
       return {
         id: habit.id,
         name: habit.name,

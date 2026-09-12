@@ -127,10 +127,14 @@
  * @property {number} currentStreak
  * @property {number} bestStreak
  * @property {number} totalCompleted
- * @property {HistoryBucket[]} history
+ * @property {HistoryBucket[]} [history] absent when the caller declined it —
+ *   its own pass over the window, worth declining for a caller (`GET
+ *   /awards`, #140) that reads no history bucket. See `computeStats`.
  * @property {WeekdayBucket[]} weekdays
- * @property {WeekdayMonthBucket[]} weekdayByMonth
- * @property {FrequencyBucket[]} frequency
+ * @property {WeekdayMonthBucket[]} [weekdayByMonth] absent when the caller
+ *   declined it, for the same reason as `history`.
+ * @property {FrequencyBucket[]} [frequency] absent when the caller declined
+ *   it, for the same reason as `history`.
  * @property {Resilience} resilience
  * @property {CoverageMonth[]} [coverage] absent when the caller declined it.
  *   Coverage is its own pass over the window, worth declining for a caller

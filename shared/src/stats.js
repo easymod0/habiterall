@@ -1667,41 +1667,51 @@ function resolveWindow(entries, start, end, creditFrom = undefined) {
 /**
  * Every figure the detail view draws, over one window.
  *
- * **`coverage` is the one field a caller may decline, and the rule is the same
- * one that keeps `computeAwards` out of here.** Awards are computed at
- * `/habits/:id/stats` and nowhere else, because that route is now the only
- * caller of this function at all — `/overview` reads `score` and
- * `currentStreak` off `summaryStats` instead, so the five passes only the
- * detail view reads are no longer run per habit on the dashboard's hot path
- * just to be thrown away. Coverage is the first field to make that cost
- * visible rather than free: it is its own pass over the window, measured at
- * ~10% of a call, where every other field here is either a pass the summary
- * figures already need (`scores`, `streaks`) or a cheap read of one. The
- * parameter is kept as the opt-out for a caller that wants this whole reading
- * without its dearest optional pass — `/overview` no longer is one, but
- * declining it still means the key is ABSENT rather than empty, since an empty
- * array would say "no month is fully answered", which is a claim, and this is
- * the absence of one. `computeAwards` reads `stats.coverage ?? []` and so
- * degrades to withholding the badge, which is the right answer for a caller
- * that did not ask for the figure.
+ * **`coverage` was the first field a caller could decline; `history`,
+ * `weekdayByMonth` and `frequency` are the same opt-out, in the same shape,
+ * added once a second caller needed it.** Awards are computed at
+ * `/habits/:id/stats` and at `GET /awards` (#140), both from this function,
+ * and `computeAwards` reads only `stats.bestStreak`, `.score`, `.scores`,
+ * `.resilience`, `.weekdays`, `.streaks` and `.coverage` — never `.history`,
+ * `.weekdayByMonth` or `.frequency`. `/habits/:id/stats` is the detail view's
+ * whole reading and declines nothing here; `/awards` walks EVERY habit on the
+ * account, so those three passes were being built and discarded once per
+ * habit on every call — measured at 66% of a habit's cost (of 6.82ms: history
+ * 0.84ms, weekdayByMonth 2.96ms, frequency 0.70ms), which at
+ * `MAX_HABITS_PER_USER` (200) is a worst-case 1298ms synchronous block on
+ * cloud's shared, multi-tenant event loop. `/overview` reads `score` and
+ * `currentStreak` off `summaryStats` instead, so it never called this
+ * function to begin with and declines nothing here.
  *
- * A test pins each edition's one remaining call site here — `/stats`, the one
- * that still needs `granularity` — and its one `summaryStats` call site at
- * `/overview`, because a third route added later must not quietly pay for
+ * Each opt-out defaults to `true` and is SPREAD onto the return, so declining
+ * one means the key is ABSENT rather than empty: an empty array would be a
+ * CLAIM ("no month is fully answered", "no history bucket exists"), and this
+ * is the absence of one. `computeAwards` reads `stats.coverage ?? []` and so
+ * degrades to withholding the badge; a caller reading `stats.history` /
+ * `.weekdayByMonth` / `.frequency` directly has none to read once it declined
+ * them, which is why `/habits/:id/stats` — the one caller a browser reads
+ * these three off of — declines nothing.
+ *
+ * A test pins each edition's two call sites here — `/stats`, which carries
+ * `granularity` and takes every pass, and `/awards`, which carries the three
+ * opt-outs beside `coverage: true` — and the one `summaryStats` call site at
+ * `/overview`, because a third shape added later must not quietly pay for
  * passes it discards either way.
  *
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
  * @param {{start?: string, end?: string, granularity?: string,
  *           weekStart?: 'monday'|'sunday', unlogged?: string,
- *           coverage?: boolean}} [opts]
+ *           coverage?: boolean, history?: boolean, weekdayByMonth?: boolean,
+ *           frequency?: boolean}} [opts]
  * @returns {import('./types.js').Stats}
  */
 export function computeStats(habit, entries,
                              { start, end, granularity = 'day',
                                weekStart = 'monday',
                                unlogged = UNLOGGED_DEFAULT,
-                               coverage = true } = {}) {
+                               coverage = true, history = true,
+                               weekdayByMonth = true, frequency = true } = {}) {
   const { entryMap, from, creditFrom } = resolveWindow(entries, start, end);
 
   // One walk shared by every pass below (#219), where master built it once
@@ -1763,10 +1773,22 @@ export function computeStats(habit, entries,
     currentStreak: currentStreak(streaks, end),
     bestStreak: bestStreak(streaks),
     totalCompleted,
-    history: historyOver(habit, entryMap, dates, granularity, weekStart, unlogged, creditFrom),
+    // `history`, `weekdayByMonth` and `frequency` are spread rather than
+    // assigned, same as `coverage` below, so a caller that declines one gets
+    // no key at all rather than an empty array claiming there is nothing to
+    // show. `computeAwards` reads none of the three, which is what makes
+    // `/awards` (#140) — the caller that walks every habit on the account —
+    // able to decline all of them.
+    ...(history ? {
+      history: historyOver(habit, entryMap, dates, granularity, weekStart, unlogged, creditFrom),
+    } : {}),
     weekdays: weekdaysOver(habit, entryMap, dates, unlogged, creditFrom),
-    weekdayByMonth: weekdayByMonthOver(habit, entryMap, dates, unlogged, creditFrom),
-    frequency: frequencyOver(habit, entryMap, dates, weekStart, unlogged, creditFrom),
+    ...(weekdayByMonth ? {
+      weekdayByMonth: weekdayByMonthOver(habit, entryMap, dates, unlogged, creditFrom),
+    } : {}),
+    ...(frequency ? {
+      frequency: frequencyOver(habit, entryMap, dates, weekStart, unlogged, creditFrom),
+    } : {}),
     resilience: resilienceFrom(streaks, missRuns, end),
     // On the payload rather than passed into `computeAwards` as a second data
     // source. `awards.js`'s header states that every award is a reading of the

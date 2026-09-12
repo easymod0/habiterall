@@ -276,10 +276,14 @@ try {
   console.log('\n--- the awards off switch (#140) ---');
 
   // `awards` (ui/settings.js) turns the card off; it must never turn the
-  // ROUTE off — `shared/test/settings.test.js` pins that behaviourally over
-  // HTTP directly, in both editions. What only a real page can show is the
-  // other half: that the card the setting hides is the SAME card an unrelated
-  // reload draws back, wired to the real registry rather than to a stub.
+  // ROUTE off — `habiterall-personal/test/awards.integration.mjs` and the
+  // matching block in `habiterall-cloud/test/api.integration.mjs` pin that
+  // behaviourally, over HTTP directly, in both editions. `settings.test.js`'s
+  // `buildAwardsCard` test is the weaker half on purpose: a source-text regex
+  // over the CLIENT reading the setting, not a request against either route.
+  // What only a real page can show is the other half: that the card the
+  // setting hides is the SAME card an unrelated reload draws back, wired to
+  // the real registry rather than to a stub.
   await resize(1440);
   await sleep(300);
 
