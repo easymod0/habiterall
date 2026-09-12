@@ -1329,60 +1329,6 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * How much, on one day.
-     *
-     * Prefilled with the day's own amount, or the target when there is none —
-     * "20 pages" is nearly always what you are about to record, and a habit
-     * with no entry yet has nothing better to offer.
-     */
-    @Composable
-    private fun CountDialog(
-        habit: Habit,
-        date: String,
-        initial: Double?,
-        onDismiss: () -> Unit,
-        onConfirm: (Double) -> Unit,
-        onClear: () -> Unit,
-    ) {
-        var text by remember(date) {
-            mutableStateOf(initial?.let { trim(it) } ?: trim(habit.targetValue))
-        }
-        val parsed = text.trim().toDoubleOrNull()
-
-        AlertDialog(
-            onDismissRequest = onDismiss,
-            title = { Text(habit.name) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(dayLabel(date), style = MaterialTheme.typography.bodySmall)
-                    OutlinedTextField(
-                        value = text,
-                        onValueChange = { text = it },
-                        singleLine = true,
-                        label = { Text(habit.unit.ifBlank { "Amount" }) },
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = parsed != null && parsed >= 0,
-                    onClick = { parsed?.let(onConfirm) },
-                ) { Text("Save") }
-            },
-            dismissButton = {
-                Row {
-                    // Only when there is something to remove: an empty day
-                    // offering to be emptied is a button that does nothing.
-                    if (initial != null || habit.isSkipped(date)) {
-                        TextButton(onClick = onClear) { Text("Clear") }
-                    }
-                    TextButton(onClick = onDismiss) { Text("Cancel") }
-                }
-            },
-        )
-    }
-
-    /**
      * Everything a day can be, named rather than cycled to.
      *
      * The tap cycle is quicker once you know it, and unreadable until you do —
@@ -1427,9 +1373,9 @@ class MainActivity : ComponentActivity() {
                             // "0 / 0 " is a true sentence nobody wants.
                             habit.isAvoided ->
                                 if (habit.isMet(value, false) == true) "Clean"
-                                else "Slipped (${trim(value ?: 0.0)})"
+                                else "Slipped (${formatAmount(value ?: 0.0)})"
                             habit.isNumerical && value != null ->
-                                "${trim(value)} / ${trim(habit.targetValue)} ${habit.unit}".trim()
+                                "${formatAmount(value)} / ${formatAmount(habit.targetValue)} ${habit.unit}".trim()
                             habit.isMet(value, false) == true -> "Done"
                             else -> "Not done"
                         },
@@ -1594,25 +1540,126 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    /**
-     * `2026-08-13` as "Today", "Yesterday", or "Thu 13 Aug".
-     *
-     * A dialog opened from a grid cell has to say which day it is editing, and
-     * the ISO date is the one form that reads as a serial number rather than a
-     * day — the whole risk of an editable history is fixing the wrong square.
-     */
-    private fun dayLabel(date: String): String = runCatching {
-        val day = LocalDate.parse(date)
-        val today = LocalDate.now()
-        when (day) {
-            today -> "Today"
-            today.minusDays(1) -> "Yesterday"
-            else -> day.format(java.time.format.DateTimeFormatter.ofPattern("EEE d MMM"))
-        }
-    }.getOrElse { date }
+}
 
-    private fun trim(n: Double): String =
-        if (n == n.toLong().toDouble()) n.toLong().toString() else n.toString()
+/**
+ * `2026-08-13` as "Today", "Yesterday", or "Thu 13 Aug".
+ *
+ * A dialog opened from a grid cell has to say which day it is editing, and the
+ * ISO date is the one form that reads as a serial number rather than a day —
+ * the whole risk of an editable history is fixing the wrong square.
+ *
+ * Top-level, same as [CountDialog] below it and [HabiterallTheme] beside it:
+ * `MainActivity`'s own callers reach it as a private top-level function in
+ * this file, and [CountDialog] needs the same seam a Robolectric test can
+ * drive — a private method on the activity has none.
+ */
+private fun dayLabel(date: String): String = runCatching {
+    val day = LocalDate.parse(date)
+    val today = LocalDate.now()
+    when (day) {
+        today -> "Today"
+        today.minusDays(1) -> "Yesterday"
+        else -> day.format(java.time.format.DateTimeFormatter.ofPattern("EEE d MMM"))
+    }
+}.getOrElse { date }
+
+/**
+ * How much, on one day.
+ *
+ * Prefilled with the day's own amount, or the target when there is none — "20
+ * pages" is nearly always what you are about to record, and a habit with no
+ * entry yet has nothing better to offer.
+ *
+ * Top-level `internal`, pulled out of `MainActivity` for the same reason
+ * `HabitList` was: a private method on the activity has no seam a test can
+ * reach at all. Be exact about what that bought here, because it is less than
+ * it was for `HabitList` — driving this composable was tried, twice, under
+ * both compose rule flavours and with a JUnit timeout, and a Compose
+ * `AlertDialog` hangs the rule's idling resource indefinitely (the trap
+ * `android-native/README.md` names, and `ReminderTimeFieldTest` was written
+ * around). So the seam is open and unused: what actually guards this call
+ * site is `CountDialogWiringGuard` in `AmountWiringTest.kt`, a source-text
+ * guard, which can only read a top-level declaration by name — a private
+ * method on the activity is what it could not have found. The other two call
+ * sites have real behavioural tests in the same file.
+ *
+ * That guard fails by NAME if this function is renamed, moved or made private
+ * again. Fix the guard rather than deleting it; it is the only thing standing
+ * between this dialog and the `toDoubleOrNull` it used to read.
+ */
+@Composable
+internal fun CountDialog(
+    habit: Habit,
+    date: String,
+    initial: Double?,
+    onDismiss: () -> Unit,
+    onConfirm: (Double) -> Unit,
+    onClear: () -> Unit,
+) {
+    var text by remember(date) {
+        mutableStateOf(initial?.let { formatAmount(it) } ?: formatAmount(habit.targetValue))
+    }
+    val parsed = parseAmount(text)
+    // Non-blank only: a box mid-typing that happens to be empty is not an error
+    // to shout about, and Save stays gated on `parsed != null` exactly as it was
+    // before this.
+    //
+    // Be exact about what that leaves, because a first version of this comment
+    // claimed parity with `HabitFormScreen` and there is none to claim: there a
+    // blank Target is VALID (`targetOk` admits `draft.target.isBlank()`, and Save
+    // stays enabled — a habit with no target is a real habit), so that screen has
+    // no silent-refusal state to match. Here blank is not a valid amount, so an
+    // emptied box is still a dead Save with nothing said. That is master's own
+    // behaviour and not a regression, and Clear is the control for the thing an
+    // empty box looks like it means; it is left alone rather than grown a
+    // sentence, because "type a number" under an empty box somebody is halfway
+    // through emptying is noise.
+    val showComplaint = text.isNotBlank() && parsed == null
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(habit.name) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(dayLabel(date), style = MaterialTheme.typography.bodySmall)
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    singleLine = true,
+                    label = { Text(habit.unit.ifBlank { "Amount" }) },
+                    isError = showComplaint,
+                    supportingText = if (!showComplaint) null else {
+                        {
+                            Text(
+                                amountComplaint(text),
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    },
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                // `parseAmount` already refuses a negative, so the old
+                // `&& parsed >= 0` clause is unreachable and dropped rather
+                // than left beside it as a dead check.
+                enabled = parsed != null,
+                onClick = { parsed?.let(onConfirm) },
+            ) { Text("Save") }
+        },
+        dismissButton = {
+            Row {
+                // Only when there is something to remove: an empty day
+                // offering to be emptied is a button that does nothing.
+                if (initial != null || habit.isSkipped(date)) {
+                    TextButton(onClick = onClear) { Text("Clear") }
+                }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        },
+    )
 }
 
 @Composable

@@ -51,7 +51,7 @@ class CountEntryActivity : Activity() {
             // decimal, not just number: amounts like 2.5 km are ordinary.
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
             hint = if (unit.isBlank()) getString(R.string.count_hint) else unit
-            setText(if (target > 0) trimNumber(target) else "")
+            setText(if (target > 0) formatAmount(target) else "")
             setSelection(text.length)
         }
 
@@ -67,9 +67,13 @@ class CountEntryActivity : Activity() {
             .setTitle(name)
             .setView(container)
             .setPositiveButton(R.string.save) { _, _ ->
-                val value = input.text.toString().trim().toDoubleOrNull()
-                if (value == null || value < 0) {
-                    Toast.makeText(this, R.string.invalid_amount, Toast.LENGTH_SHORT).show()
+                val typed = input.text.toString()
+                val value = parseAmount(typed)
+                // `parseAmount` already refuses a negative — `DECIMAL` admits no
+                // sign — so the old `value < 0` clause is folded into this null
+                // check rather than left beside it as a second, unreachable one.
+                if (value == null) {
+                    Toast.makeText(this, amountComplaint(typed), Toast.LENGTH_SHORT).show()
                 } else {
                     Outbox.enqueue(this, habitId, date, value, skip = false)
                     Notifications.cancel(this, Notifications.notificationId(habitId))
@@ -99,8 +103,4 @@ class CountEntryActivity : Activity() {
             WidgetSync.noteAnswer(app, habitId, date, value, skip = false)
         }
     }
-
-    /** 8.0 -> "8", 12.5 -> "12.5" — an integer target should not read as a decimal. */
-    private fun trimNumber(n: Double): String =
-        if (n == n.toLong().toDouble()) n.toLong().toString() else n.toString()
 }
