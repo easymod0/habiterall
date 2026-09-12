@@ -498,6 +498,17 @@ export const SETTINGS = {
       { value: 'frequency', label: 'Times per week' },
     ],
   },
+  awards: {
+    section: 'Statistics',
+    label: 'Awards',
+    help: 'The badges on a habit’s page, worked out from its history each ' +
+      'time. This is the account-wide switch — off, they answer no API ' +
+      'differently, they simply are not drawn. The "Awards" entry above, ' +
+      'in Cards on a habit’s page, is a separate, per-view choice; either ' +
+      'one being off hides the card.',
+    type: 'toggle',
+    default: true,
+  },
   historyMode: {
     section: 'Statistics',
     label: 'History shows',

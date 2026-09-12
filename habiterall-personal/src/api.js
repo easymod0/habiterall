@@ -780,6 +780,74 @@ api.get('/habits/:id/stats', (req, res) => {
 });
 
 /**
+ * Every habit's awards, over its full lifetime — the account-level
+ * counterpart to the `awards` field on `GET /habits/:id/stats` (#140).
+ * `docs/decisions/awards.md` already names the reason this exists: "Portfolio
+ * awards read every habit at once and belong to an account-level route." This
+ * route is that account-level route, but it does NOT implement portfolio
+ * awards (#63) itself — `account` below is reserved for them.
+ *
+ * No `start`, no `end` query param, no `granularity`: this route takes none.
+ * `end` is always the caller's today, and `computeStats` is handed no
+ * `start` at all, so `resolveWindow` opens each habit's window at its own
+ * earliest REAL entry, clamped to `MAX_RANGE_DAYS` — the identical treatment
+ * `/habits/:id/stats` gives a request that names no `start`, which is what
+ * the detail view sends. A narrower ceiling here would silently cap `tenure`
+ * (which counts years) and `coverage` (which counts perfect months) and break
+ * the agreement between the two routes, which is the whole point of this one.
+ *
+ * No `granularity` either: in `stats.js` it reaches only `history`, which
+ * this route declines outright (see the opt-out note below), so there is no
+ * pass left for it to reach.
+ *
+ * Every habit, archived included, exactly as `/categories/stats` reads them
+ * (`q.everyHabit`) — filtering here would be as wrong as it is there.
+ *
+ * A pure read: no statement here may touch a write path. Do not call
+ * `clearHabitSummary`/`clearAllSummaries` or anything that writes a summary
+ * cache from this handler.
+ */
+api.get('/awards', (req, res) => {
+  const end = callerToday(req);
+  const weekStart = storedWeekStart();
+  const unlogged = storedUnlogged();
+  // A real read of the stored setting, never a literal — it gates the whole
+  // rest award, and a hard-coded value would hand (or deny) it to every
+  // account regardless of what they asked for.
+  const skipDays = storedSkipDays();
+
+  const habits = /** @type {any[]} */ (q.everyHabit.all());
+
+  res.json({
+    habits: habits.map((row) => {
+      const habit = asHabit(row);
+      const entries = /** @type {any} */ (q.entriesFor.all(habit.id));
+      // `computeAwards` (below) reads only `bestStreak`, `score`, `scores`,
+      // `resilience`, `weekdays`, `streaks` and `coverage` off `stats` — see
+      // the opt-out note above `computeStats` (shared/src/stats.js). This
+      // route walks EVERY habit on the account, so `history`, `weekdayByMonth`
+      // and `frequency` are declined: they are built and thrown away on every
+      // call otherwise, measured at 66% of a habit's cost. `coverage` stays
+      // `true` because `computeAwards` reads it for the coverage award.
+      const stats = computeStats(habit, entries, {
+        end, weekStart, unlogged,
+        history: false, weekdayByMonth: false, frequency: false,
+      });
+      return {
+        id: habit.id,
+        name: habit.name,
+        color: habit.color,
+        awards: computeAwards(stats, end, habit, unlogged, skipDays),
+      };
+    }),
+    // Reserved for #63's portfolio awards, which read every habit at once
+    // rather than one — always empty until that ships. A top-level object
+    // rather than a bare array is what lets them land here additively.
+    account: [],
+  });
+});
+
+/**
  * The main grid: every active habit plus its entries for the last N days,
  * in one round trip so the dashboard renders without a request per habit.
  */

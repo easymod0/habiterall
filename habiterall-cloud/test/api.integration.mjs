@@ -2740,6 +2740,143 @@ ck('  while still carrying the summary figures it is for',
   coverageRow.score === 0.381137 && coverageRow.currentStreak === RECENT_DAYS,
   `${coverageRow.score} / ${coverageRow.currentStreak}`);
 
+/* ---------- GET /awards agrees with /habits/:id/stats (#140) ---------- */
+
+console.log('\n--- GET /awards ---');
+
+const getAwards = () => fetch(`${overviewBase}/api/awards`).then((r) => r.json());
+
+// skipDays back on for this fixture — a skip inside the run below is what
+// makes M2 (dropping `skipDays` from the `/awards` `computeAwards` call)
+// visible in the deepEqual: with the setting off there is no rest award on
+// either side to diverge over. An earlier block above deliberately left it
+// off, so this cannot be assumed still to hold here.
+await setSkipDays(true);
+
+// 100 days, one of them a deliberate skip that BRIDGES rather than breaks the
+// run (skips are transparent to `computeStreaks`): long enough to reach the
+// top streak rung (`SURVIVAL_THRESHOLDS`'s last entry, 100), to fully contain
+// at least one calendar month with an answer on every day (`coverage`), and to
+// earn a `rest` award now that `skipDays` is on — three award FAMILIES, so the
+// fixture is nowhere near the trap of earning exactly one cheap award, which
+// could not see a narrowed window (M1) or a dropped setting (M2) changing
+// anything. Written directly through `withUser` rather than 100 individual
+// `PUT`s, the way `RECENT_DAYS` above is.
+const marathon = await postHabit({ name: 'Marathon', type: 'boolean' });
+await withUser(alice, async (db) => {
+  for (let i = 0; i < 100; i++) {
+    const skip = i === 10;
+    await db.query(
+      `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
+       VALUES ($1,$2,$3,$4,$5,'')
+       ON CONFLICT (habit_id, date) DO UPDATE SET value = excluded.value, status = excluded.status`,
+      [marathon.id, alice, isoDaysAgo(i), skip ? 0 : 2, skip ? 'skip' : '']
+    );
+  }
+});
+
+// A second habit, archived, so the archived-habit assertion below is not
+// vacuous — `/categories/stats` includes archived habits and this route must
+// too (M3).
+const retired = await postHabit({ name: 'Retired', type: 'boolean' });
+await withUser(alice, (db) => db.query(
+  `INSERT INTO entries (habit_id, user_id, date, value, status, notes)
+   VALUES ($1,$2,$3,2,'','')`,
+  [retired.id, alice, isoDaysAgo(0)]
+));
+await putHabit(retired.id, { name: 'Retired', type: 'boolean', archived: true });
+
+const awardsPayload = await getAwards();
+const fromAwardsRoute = awardsPayload.habits.find((h) => h.id === marathon.id).awards;
+const fromStatsRoute = (await fetch(`${overviewBase}/api/habits/${marathon.id}/stats`)
+  .then((r) => r.json())).awards;
+
+// Worthless unless the fixture earned something: `deepEqual([], [])` passes
+// against a route returning nothing at all, or against `computeAwards` never
+// being called.
+ck('the fixture earned at least one award',
+  fromAwardsRoute.length > 0, JSON.stringify(fromAwardsRoute));
+ck('  from at least two different families',
+  new Set(fromAwardsRoute.map((a) => a.family)).size >= 2,
+  JSON.stringify(fromAwardsRoute.map((a) => a.family)));
+// Worthless as a check on M2 (dropping `skipDays` from `/awards`'s
+// `computeAwards` call) unless a `rest` award is actually in the compared
+// array — with `skipDays` off there is nothing here for the two routes to
+// diverge over.
+ck('  a rest award is genuinely in play',
+  fromAwardsRoute.some((a) => a.family === 'rest'),
+  JSON.stringify(fromAwardsRoute.map((a) => a.family)));
+ck('/awards and /habits/:id/stats report the identical award array',
+  JSON.stringify(fromAwardsRoute) === JSON.stringify(fromStatsRoute),
+  `awards=${JSON.stringify(fromAwardsRoute)} stats=${JSON.stringify(fromStatsRoute)}`);
+
+ck('every habit in the account is listed, archived included',
+  [habitId, marathon.id, retired.id].every(
+    (id) => awardsPayload.habits.some((h) => h.id === id)),
+  JSON.stringify(awardsPayload.habits.map((h) => h.id)));
+ck('the archived habit specifically is present',
+  awardsPayload.habits.some((h) => h.id === retired.id),
+  JSON.stringify(awardsPayload.habits.map((h) => h.id)));
+ck('account is present and is an array (reserved for #63)',
+  Array.isArray(awardsPayload.account) && awardsPayload.account.length === 0,
+  JSON.stringify(awardsPayload.account));
+
+// No range parameter has any influence: the route takes none, and a caller
+// sending one anyway (an old bookmark, a copy-pasted URL) must be ignored
+// rather than answered differently or refused.
+const withParams = await fetch(`${overviewBase}/api/awards?start=${isoDaysAgo(10)}`
+  + `&end=${isoDaysAgo(1)}&granularity=month`).then((r) => r.json());
+ck('?start, ?end and ?granularity change nothing',
+  JSON.stringify(withParams) === JSON.stringify(awardsPayload),
+  `plain=${JSON.stringify(awardsPayload)} withParams=${JSON.stringify(withParams)}`);
+
+/* ---------- the `awards` setting is a RENDERING switch (#140) ---------- */
+
+console.log('\n--- the awards off switch changes no API answer ---');
+
+const putAwardsSetting = (patch) => fetch(`${overviewBase}/api/settings`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(patch),
+}).then((r) => r.json());
+const getSettings = () => fetch(`${overviewBase}/api/settings`).then((r) => r.json());
+
+// A value the server does not enumerate is dropped, not stored — the same
+// `SETTING_VALUES` enforcement every other toggle here gets.
+const badAwards = await putAwardsSetting({ awards: 'yes' });
+ck('a non-boolean value is rejected',
+  badAwards.ignored?.includes('awards') && badAwards.settings.awards === undefined,
+  JSON.stringify(badAwards));
+
+await putAwardsSetting({ awards: false });
+ck('a real boolean is stored and comes back from GET /settings',
+  (await getSettings()).awards === false, JSON.stringify(await getSettings()));
+
+// The pinned claim: this is a RENDERING preference, so both routes must go on
+// reporting the identical awards whether the switch is on or off. Reusing
+// `marathon`, which already earned two award families above — the same
+// property the deepEqual check needs, restated here so a route that started
+// reading the setting would have somewhere for the difference to show up.
+const marathonAwards = async () => ({
+  awards: (await getAwards()).habits.find((h) => h.id === marathon.id).awards,
+  stats: (await fetch(`${overviewBase}/api/habits/${marathon.id}/stats`)
+    .then((r) => r.json())).awards,
+});
+const offAwards = await marathonAwards();
+await putAwardsSetting({ awards: true });
+const onAwards = await marathonAwards();
+
+ck('GET /awards is unchanged by the setting',
+  JSON.stringify(offAwards.awards) === JSON.stringify(onAwards.awards),
+  `off=${JSON.stringify(offAwards.awards)} on=${JSON.stringify(onAwards.awards)}`);
+ck('GET /habits/:id/stats is unchanged by the setting',
+  JSON.stringify(offAwards.stats) === JSON.stringify(onAwards.stats),
+  `off=${JSON.stringify(offAwards.stats)} on=${JSON.stringify(onAwards.stats)}`);
+// Worthless unless there is something here to have gone missing.
+ck('  and there is something on both sides for that comparison to mean anything',
+  offAwards.awards.length > 0 && onAwards.awards.length > 0,
+  `off=${JSON.stringify(offAwards.awards)} on=${JSON.stringify(onAwards.awards)}`);
+
 /* ---------- unlogged_is_success ---------- */
 
 console.log('\n--- unlogged_is_success ---');
@@ -3142,6 +3279,10 @@ for (const id of [
   // moment the notes checks were moved off the shared habit.
   noNotesHabit.id,
   notesHabit.id,
+  // #140's `GET /awards` fixture: `marathon` alone carries 100 entries, so
+  // leaving it out failed this same check by exactly that margin.
+  marathon.id,
+  retired.id,
 ]) {
   await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
 }

@@ -343,4 +343,57 @@ or mixes against a theme variable, as `charts.js` does. It takes `--accent` and
 the `#fff` pairing `.btn-primary` already ships in both themes; the habit's
 colour stays on the chip's left edge, where it needs no contrast ratio.
 
+## `GET /awards`, and the off switch (#140)
+
+**The route RECOMPUTES rather than growing `/overview`.** `/overview` is
+already the largest response this API produces (#189), and every habit's
+`awards` array is exactly the kind of thing that inflates it for a request
+nobody making a dashboard load asked for — the dashboard grid draws no badge.
+Recomputing costs one `computeStats` + `computeAwards` pass per habit, the same
+work the per-habit route already does, and it costs it only to a caller that
+actually wants the shape: a future awards page, or a portfolio-awards feature
+(#63) that needs every habit's cards in hand at once to compare across them.
+
+**The per-habit route keeps its own `awards` field, unchanged.** A habit's own
+page must not make a second request for something it already has every input
+for — it already calls `computeStats` and `computeAwards` for the four stat
+tiles and the streak/resilience cards on the same page, so declining to also
+read `awards` off that same reply would trade one request for two.
+
+**No `start`, no `end`, no `granularity` — full history, and no narrower
+ceiling.** Passing no `start` gives `resolveWindow` the identical treatment
+`/habits/:id/stats` gives a request with no `start` (which is what the detail
+view sends): the window opens at the habit's earliest real entry, clamped to
+`MAX_RANGE_DAYS`. That agreement is the whole point — a badge on a habit's own
+page and the same badge read off the account route must say the same thing,
+because a user comparing them has no way to know the account route asked a
+narrower question. `tenure:<years>` counts years lived and `coverage:<n>`
+counts perfect months, so a shorter ceiling invented for this route alone would
+silently cap either award below what the per-habit route reports, for no
+reason a user could discover. Query parameters are accepted and ignored for the
+same reason: a `?granularity=month` on this route must not produce different
+trophies than an unadorned request, because granularity reaches only
+`history`, and `computeAwards` reads no `stats.history` — the two routes
+therefore cannot disagree about awards over the granularity axis, because
+nothing here reaches it in the first place.
+
+**`account` is always `[]` today.** Portfolio awards (#63) are not implemented
+by this route; it only gets the shape that gives them somewhere to live. A
+top-level `{habits, account}` object rather than a bare array is what makes
+adding them later additive instead of a breaking shape change.
+
+**The `awards` setting is a RENDERING switch, and it changes no API answer.**
+Both `GET /awards` and `GET /habits/:id/stats` carry their `awards` field
+whatever the setting says — a setting that suppresses a field on someone
+else's endpoint is the wrong shape, and a display preference silently changing
+what an endpoint returns is a different claim from hiding a badge on one page.
+What it turns off is the awards card in `ui/detail.js` (`buildAwardsCard`), and,
+if an awards page is ever built directly on this route, whether that page draws
+at all. It deliberately does NOT do the thing it might look like it does: it is
+not a second gate beside the at-most/`success` gate in `awards.js` (which
+withholds specific awards because the FIGURES read oddly under that
+resolution), and it is not the same question `detailCards`'s own `awards`
+entry asks (a per-view card order/visibility preference). Either being off
+hides the card; both are rendering decisions, and neither reaches the wire.
+
 

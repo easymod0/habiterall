@@ -921,6 +921,98 @@ api.get('/habits/:id/stats', route(async (req, res) => {
 }));
 
 /**
+ * Every habit's awards, over its full lifetime — the account-level
+ * counterpart to the `awards` field on `GET /habits/:id/stats` (#140).
+ * `docs/decisions/awards.md` already names the reason this exists: "Portfolio
+ * awards read every habit at once and belong to an account-level route." This
+ * route is that account-level route, but it does NOT implement portfolio
+ * awards (#63) itself — `account` below is reserved for them.
+ *
+ * No `start`, no `end` query param, no `granularity`: this route takes none.
+ * `end` is always the caller's today, and `computeStats` is handed no
+ * `start` at all, so `resolveWindow` opens each habit's window at its own
+ * earliest REAL entry, clamped to `MAX_RANGE_DAYS` — the identical treatment
+ * `/habits/:id/stats` gives a request that names no `start`, which is what
+ * the detail view sends. A narrower ceiling here would silently cap `tenure`
+ * (which counts years) and `coverage` (which counts perfect months) and break
+ * the agreement between the two routes, which is the whole point of this one.
+ *
+ * No `granularity` either: in `stats.js` it reaches only `history`, which
+ * this route declines outright (see the opt-out note below), so there is no
+ * pass left for it to reach.
+ *
+ * Every habit, archived included, exactly as `/categories/stats` reads them —
+ * filtering here would be as wrong as it is there.
+ *
+ * A pure read inside one `withUser`, as `/categories/stats` does — no
+ * statement here may touch a write path. Do not call `withUserWrite`, bump
+ * `data_version` or write the per-habit summary cache from this handler.
+ */
+api.get('/awards', route(async (req, res) => {
+  const end = callerToday(req);
+
+  const payload = await withUser(uid(req), async (db) => {
+    const { rows: habits } = await db.query(
+      `SELECT * FROM habits ORDER BY position, id`
+    );
+
+    const { rows: [prefs] } = await db.query(
+      `SELECT settings ->> 'weekStart'      AS week_start,
+              settings ->> 'atMostUnlogged' AS unlogged,
+              settings ->> 'skipDays'       AS skip_days
+         FROM users WHERE id = $1`,
+      [uid(req)]
+    );
+    const weekStart = /** @type {'monday'|'sunday'} */ (
+      prefs?.week_start === 'sunday' ? 'sunday' : 'monday');
+    const unlogged = unloggedFrom(prefs);
+    // A real read of the stored setting, never a literal — it gates the
+    // whole rest award, and a hard-coded value would hand (or deny) it to
+    // every account regardless of what they asked for.
+    const skipDays = prefs?.skip_days === 'true';
+
+    const ids = habits.map((h) => h.id);
+    const { rows: entryRows } = ids.length ? await db.query(
+      `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
+       FROM entries WHERE habit_id = ANY($1) ORDER BY date`,
+      [ids]
+    ) : { rows: [] };
+    const byHabit = new Map(ids.map((id) => [id, []]));
+    for (const r of entryRows) byHabit.get(r.habit_id).push(r);
+
+    return {
+      habits: habits.map((habit) => {
+        const entries = byHabit.get(habit.id) ?? [];
+        // `computeAwards` (below) reads only `bestStreak`, `score`, `scores`,
+        // `resilience`, `weekdays`, `streaks` and `coverage` off `stats` — see
+        // the opt-out note above `computeStats` (shared/src/stats.js). This
+        // route walks EVERY habit on the account, so `history`,
+        // `weekdayByMonth` and `frequency` are declined: they are built and
+        // thrown away on every call otherwise, measured at 66% of a habit's
+        // cost. `coverage` stays `true` because `computeAwards` reads it for
+        // the coverage award.
+        const stats = computeStats(habit, entries, {
+          end, weekStart, unlogged,
+          history: false, weekdayByMonth: false, frequency: false,
+        });
+        return {
+          id: habit.id,
+          name: habit.name,
+          color: habit.color,
+          awards: computeAwards(stats, end, habit, unlogged, skipDays),
+        };
+      }),
+      // Reserved for #63's portfolio awards, which read every habit at once
+      // rather than one — always empty until that ships. A top-level object
+      // rather than a bare array is what lets them land here additively.
+      account: [],
+    };
+  });
+
+  res.json(payload);
+}));
+
+/**
  * How long an `/overview` answer is served from memory before it is rebuilt.
  *
  * The dashboard is not requested once per user action. It is requested on every

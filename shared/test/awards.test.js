@@ -638,21 +638,26 @@ test('both editions hand the gate its inputs, or it silently does nothing', () =
     const calls = awardCallsIn(src);
 
     // EVERY call site, not the first one. Checking only the first let a second,
-    // ungated `computeAwards(...)` ship in the same file — and a route added
-    // later is exactly how that would happen.
-    assert.equal(calls.length, 1,
-      `${edition} has ${calls.length} computeAwards call sites, expected 1: `
-      + calls.join(' | '));
+    // ungated `computeAwards(...)` ship in the same file. `GET /awards` (#140)
+    // is exactly the "route added later" the old comment here predicted, and
+    // this count is what keeps a THIRD one a reviewed act rather than a silent
+    // one: an empty offender list below would mean nothing if this count could
+    // drift upward unnoticed first.
+    assert.equal(calls.length, 2,
+      `${edition} has ${calls.length} computeAwards call sites, expected 2 `
+      + `(/habits/:id/stats and /awards): ${calls.join(' | ')}`);
 
-    const args = calls[0].split(',').map((s) => s.trim());
-    assert.equal(args.length, 5,
-      `${edition} calls computeAwards with ${args.length} arguments: ${calls[0]}`);
-    assert.equal(args[2], 'habit', `${edition} passes ${args[2]} as the habit`);
-    assert.equal(args[3], 'unlogged', `${edition} passes ${args[3]} as the setting`);
-    // The fifth is the same trap one argument further along: `skipDays` is
-    // optional, so dropping it turns the rest award off for every account in
-    // that edition and nothing anywhere else changes.
-    assert.equal(args[4], 'skipDays', `${edition} passes ${args[4]} as skipDays`);
+    for (const call of calls) {
+      const args = call.split(',').map((s) => s.trim());
+      assert.equal(args.length, 5,
+        `${edition} calls computeAwards with ${args.length} arguments: ${call}`);
+      assert.equal(args[2], 'habit', `${edition} passes ${args[2]} as the habit`);
+      assert.equal(args[3], 'unlogged', `${edition} passes ${args[3]} as the setting`);
+      // The fifth is the same trap one argument further along: `skipDays` is
+      // optional, so dropping it turns the rest award off for every account in
+      // that edition and nothing anywhere else changes.
+      assert.equal(args[4], 'skipDays', `${edition} passes ${args[4]} as skipDays`);
+    }
 
     // And it must be the SAME value computeStats was given, or the gate and the
     // arithmetic answer different questions about one habit.
@@ -676,22 +681,54 @@ test('both editions hand the gate its inputs, or it silently does nothing', () =
     assert.match(stripComments(src), /skipDays\s*[:=][^;\n]*(storedSkipDays|skip_days)/,
       `${edition} does not derive skipDays from the account's setting`);
 
-    // `/overview` no longer calls `computeStats` at all: it reads two numbers
-    // per habit and calls `summaryStats` for them instead, so the only
-    // `computeStats` call site left is `/stats`'s whole reading. Pinned by
-    // COUNT as well as by content: a third route added later that paid for
-    // `computeStats` and threw most of it away would otherwise slip in
-    // silently, once per habit.
+    // `/overview` never calls `computeStats` at all: it reads two numbers per
+    // habit and calls `summaryStats` for them instead. `/habits/:id/stats` is
+    // one call site and `GET /awards` (#140) is the second — the account-level
+    // route walks every habit but still asks `computeStats` for each one.
+    // Pinned by COUNT as well as by content: a THIRD route added later doing
+    // that would otherwise slip in silently, once per habit.
     const statsCalls = callsIn(src, 'computeStats');
-    assert.equal(statsCalls.length, 1,
-      `${edition} has ${statsCalls.length} computeStats call sites, expected 1 `
-      + `(/stats only): ${statsCalls.join(' | ')}`);
-    // ...and it must be the one feeding awards — the call with `granularity`,
-    // which `summaryStats` does not take — or the detail view lost a field
-    // nothing replaced.
-    assert.ok(/granularity/.test(statsCalls[0]),
-      `${edition}'s only computeStats call site is missing granularity, so it `
-      + `is not the /stats call: ${statsCalls[0]}`);
+    assert.equal(statsCalls.length, 2,
+      `${edition} has ${statsCalls.length} computeStats call sites, expected 2 `
+      + `(/stats and /awards): ${statsCalls.join(' | ')}`);
+
+    // The two call sites have DIFFERENT correct shapes, and pinning them to
+    // one shape is exactly the mistake a review of #140 found: `/awards`
+    // walks EVERY habit on the account, and `computeAwards` reads only
+    // `bestStreak`, `score`, `scores`, `resilience`, `weekdays`, `streaks` and
+    // `coverage` off the result (see the opt-out note above `computeStats` in
+    // shared/src/stats.js) — never `history`, `weekdayByMonth` or `frequency`.
+    // Those three are therefore declined at `/awards`, which also means it
+    // takes no `granularity`, since nothing is left for that parameter to
+    // reach once `history` is declined. `/habits/:id/stats` is the detail
+    // view's whole reading: it declines nothing and carries `granularity`,
+    // the one knob `history` reads.
+    const declinesAwardsPasses = (call) => /history\s*:\s*false/.test(call)
+      && /weekdayByMonth\s*:\s*false/.test(call)
+      && /frequency\s*:\s*false/.test(call);
+    const fullReadingCalls = statsCalls.filter(
+      (call) => /granularity/.test(call) && !declinesAwardsPasses(call));
+    const awardsShapedCalls = statsCalls.filter(
+      (call) => declinesAwardsPasses(call) && !/granularity/.test(call));
+    // Each shape exactly once — not "at least one of each" — so a third call
+    // site cannot silently take either shape and hide inside this count.
+    assert.equal(fullReadingCalls.length, 1,
+      `${edition} has ${fullReadingCalls.length} computeStats call sites `
+      + `shaped like /stats (carrying granularity, declining nothing), `
+      + `expected 1: ${statsCalls.join(' | ')}`);
+    assert.equal(awardsShapedCalls.length, 1,
+      `${edition} has ${awardsShapedCalls.length} computeStats call sites `
+      + `shaped like /awards (declining history/weekdayByMonth/frequency), `
+      + `expected 1: ${statsCalls.join(' | ')}`);
+    // ...and the awards shape must keep `coverage`: `computeAwards` reads it
+    // for the coverage badge, and a caller silently declining it too would
+    // answer `/awards` and `/habits/:id/stats` with different award arrays
+    // for the identical habit.
+    for (const call of awardsShapedCalls) {
+      assert.ok(!/coverage\s*:\s*false/.test(call),
+        `${edition}'s /awards-shaped computeStats call declines coverage, `
+        + `which computeAwards reads: ${call}`);
+    }
 
     // `/overview`'s replacement, pinned the same way: exactly one call site,
     // so a second one added later pays for the two passes twice per habit
@@ -701,6 +738,59 @@ test('both editions hand the gate its inputs, or it silently does nothing', () =
       `${edition} has ${summaryCalls.length} summaryStats call sites, expected 1 `
       + `(/overview): ${summaryCalls.join(' | ')}`);
   }
+});
+
+test('declining history/weekdayByMonth/frequency changes not one award (#140 review)', () => {
+  // `/awards` (#140) walks every habit on the account and was found paying for
+  // three `computeStats` passes it throws away: `history`, `weekdayByMonth`
+  // and `frequency` are on the payload only because `/habits/:id/stats`, the
+  // OTHER caller, needs them, and `computeAwards` reads none of the three.
+  // The guard above pins that both call sites carry the right SHAPE; this
+  // pins that the cheap shape is actually safe to trust — the two readings
+  // must produce the byte-identical award array for the same inputs.
+  //
+  // The fixture has to earn several families at once, or an empty-array
+  // comparison would pass for a fixture too thin to say anything: 90 days
+  // (three full calendar months, for `coverage`), one skip deep inside the
+  // opening run (for `rest`, `skipDays: true`), and a two-day lapse — long
+  // enough for `computeRecovery`'s `COMEBACK_MIN_DAYS` (2) — that breaks a
+  // 49-day run and leaves a second, shorter one behind it (for `streak` and
+  // `resilience`).
+  const pattern = Array(90).fill('x');
+  pattern[14] = 's';       // 2026-01-15: a rest day inside the opening run
+  pattern[49] = '0';       // 2026-02-19 \ a two-day stated lapse: a closed
+  pattern[50] = '0';       // 2026-02-20 / comeback, and the run that ends it
+  const str = pattern.join('');
+  const end = endOf(str);
+  const rows = entries(str);
+
+  const full = computeStats(DAILY, rows, { end });
+  const declined = computeStats(DAILY, rows, {
+    end, history: false, weekdayByMonth: false, frequency: false,
+  });
+
+  // The opt-out contract itself, checked directly rather than assumed: the
+  // three declined fields are ABSENT (not empty) on the cheap reading and
+  // present on the full one, and `coverage` — which `computeAwards` DOES
+  // read — survives on both, the same way `/awards`'s call site keeps it.
+  for (const field of ['history', 'weekdayByMonth', 'frequency']) {
+    assert.ok(field in full, `fixture setup: full reading is missing ${field}`);
+    assert.ok(!(field in declined), `declining ${field} left it on the payload`);
+  }
+  assert.ok('coverage' in full && 'coverage' in declined,
+    'coverage must survive both readings — computeAwards reads it');
+
+  const fullAwards = computeAwards(full, end, DAILY, 'miss', true);
+  const declinedAwards = computeAwards(declined, end, DAILY, 'miss', true);
+
+  const families = new Set(fullAwards.map((a) => a.family));
+  assert.ok(families.has('coverage'), `fixture earned no coverage award: ${[...families]}`);
+  assert.ok(families.has('rest'), `fixture earned no rest award: ${[...families]}`);
+  assert.ok(families.size >= 4,
+    `fixture is not rich enough to trust this comparison: ${[...families]}`);
+
+  assert.deepEqual(declinedAwards, fullAwards,
+    'declining history/weekdayByMonth/frequency changed the award array');
 });
 
 test('the Award typedef lists every family the file can actually produce', () => {
