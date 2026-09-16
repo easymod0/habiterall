@@ -837,6 +837,20 @@ api.get('/awards', (req, res) => {
         id: habit.id,
         name: habit.name,
         color: habit.color,
+        // On the payload because this route deliberately returns archived
+        // habits, and a client cannot act on that without being told which
+        // ones they are. `/categories/stats` reads them too but aggregates to
+        // the CATEGORY, so it never had to say; `/overview` returns active
+        // habits only. This is the first route to hand back a MIXED per-habit
+        // list, and without this field an awards page draws a retired habit's
+        // badges beside a live one with no way to separate or filter them.
+        //
+        // `Boolean(...)` for the reason `toApiHabit` states one screen up:
+        // SQLite has no boolean type, so this row's `archived` is 0 or 1, and
+        // shipping the integer would make the two editions answer the same
+        // route with two types — which is exactly what Android's
+        // `archived: Boolean` refuses to deserialise.
+        archived: Boolean(row.archived),
         awards: computeAwards(stats, end, habit, unlogged, skipDays),
       };
     }),

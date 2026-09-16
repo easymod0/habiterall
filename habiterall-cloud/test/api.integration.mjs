@@ -2817,6 +2817,19 @@ ck('every habit in the account is listed, archived included',
 ck('the archived habit specifically is present',
   awardsPayload.habits.some((h) => h.id === retired.id),
   JSON.stringify(awardsPayload.habits.map((h) => h.id)));
+// ...and is IDENTIFIABLE as archived, which is the half being present is
+// worthless without: a client that cannot tell them apart renders a retired
+// habit's badges beside a live one's.
+//
+// `=== true` / `=== false`, never truthiness, so that this and the personal
+// edition's identical pair pin the same TYPE as well as the same answer — that
+// edition's rows carry SQLite's 0/1 and have to coerce.
+ck('the archived habit is MARKED archived, as a real boolean',
+  awardsPayload.habits.find((h) => h.id === retired.id)?.archived === true,
+  JSON.stringify(awardsPayload.habits.map((h) => [h.id, h.archived, typeof h.archived])));
+ck('and an active one is marked false rather than left absent',
+  awardsPayload.habits.find((h) => h.id === marathon.id)?.archived === false,
+  JSON.stringify(awardsPayload.habits.map((h) => [h.id, h.archived, typeof h.archived])));
 ck('account is present and is an array (reserved for #63)',
   Array.isArray(awardsPayload.account) && awardsPayload.account.length === 0,
   JSON.stringify(awardsPayload.account));

@@ -972,6 +972,35 @@ api.get('/awards', route(async (req, res) => {
     const skipDays = prefs?.skip_days === 'true';
 
     const ids = habits.map((h) => h.id);
+    // EVERY row, with no date predicate — and it is the only bulk `ANY(...)`
+    // read in this file without one, so it is the odd one out on purpose
+    // rather than by omission. Read this before adding `AND date >= $2`.
+    //
+    // `computeStats` derives BOTH of its anchors from the rows it is handed:
+    // the window's own start (`earliestRealDay`) and, separately,
+    // `creditFrom` (`creditFor(firstStatedAnswer(entryMap), ...)`). The first
+    // survives a bounded slice — `windowStart` clamps to
+    // `end - MAX_RANGE_DAYS` anyway, so trimming rows older than that moves
+    // nothing. The second does NOT, and `creditFor`'s own doc comment carries
+    // the measurement: an at-most habit resolved to `success` whose only
+    // stated row is 500 days old read `score: 1.000` correctly and
+    // `0.051922` with the credit date taken from a 400-day slice. That is a
+    // wrong number presented as fact, and this route's entire reason to exist
+    // is agreeing with `/habits/:id/stats` about the same habit.
+    //
+    // So a bound here is not a one-line change. It is: a second, grouped
+    // `MIN(date)` read for the lifetime first answer, a `creditAnchor`
+    // parameter threaded into `computeStats` (which today takes none — only
+    // `/overview`, which calls the lower-level passes directly, can supply
+    // one), and the identical treatment at `/habits/:id/stats`, or the two
+    // routes disagree and the agreement test goes red. `/overview` is the
+    // worked example of all three if it is ever worth doing.
+    //
+    // What it costs unbounded, stated rather than left to be discovered: at
+    // `MAX_HABITS_PER_USER` with an imported Loop history this materialises
+    // every entry row on the account in one result set. The synchronous
+    // compute beside it is ~2ms per habit (measured, after the three declined
+    // passes below), so ~410ms at 200 habits.
     const { rows: entryRows } = ids.length ? await db.query(
       `SELECT habit_id, to_char(date, 'YYYY-MM-DD') AS date, value, status
        FROM entries WHERE habit_id = ANY($1) ORDER BY date`,
@@ -999,6 +1028,18 @@ api.get('/awards', route(async (req, res) => {
           id: habit.id,
           name: habit.name,
           color: habit.color,
+          // On the payload because this route deliberately returns archived
+          // habits, and a client cannot act on that without being told which
+          // ones they are. `/categories/stats` reads them too but aggregates
+          // to the CATEGORY, so it never had to say; `/overview` returns
+          // active habits only. This is the first route to hand back a MIXED
+          // per-habit list, and without this field an awards page draws a
+          // retired habit's badges beside a live one with no way to separate
+          // or filter them — or pays the `/habits` round trip this route
+          // exists to remove. Already a real boolean here (Postgres); the
+          // personal edition coerces from SQLite's 0/1, the same seam
+          // `toApiHabit` exists for in that edition.
+          archived: habit.archived,
           awards: computeAwards(stats, end, habit, unlogged, skipDays),
         };
       }),

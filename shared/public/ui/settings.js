@@ -451,8 +451,15 @@ export const SETTINGS = {
   detailCards: {
     section: 'Statistics',
     label: 'Cards on a habit’s page',
+    // The `awards` sentence is here as well as on the `awards` setting's own
+    // help, and deliberately: the confusing state is reached from THIS control
+    // — turn the Awards card off here, later find the account-wide Awards
+    // toggle below, turn it on, and nothing happens. A sentence that explains
+    // that only on the other setting is a sentence at the wrong end of it.
     help: 'A card with nothing in it yet is hidden whatever you choose here. ' +
-      'The four figures at the top of the page are always shown.',
+      'The four figures at the top of the page are always shown. ' +
+      'Awards has a second, account-wide switch below; either one being off ' +
+      'hides the card.',
     type: 'ordered-multi',
     // All of them, on: this is a way to make the page shorter and reorder it,
     // not a page you have to assemble before it says anything.
