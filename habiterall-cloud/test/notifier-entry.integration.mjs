@@ -346,9 +346,9 @@ try {
     // compose files leave an operator in the moment they set the directory,
     // and `backupConfig` classifies it rather than half-enabling it: no hook,
     // so with reminders off there is genuinely nothing to run and this
-    // container exits 0 like case 1. The loud error is what the operator gets
+    // container parks like case 1. The loud error is what the operator gets
     // instead of a silently disabled feature — and it is logged BEFORE the
-    // exit, which is the half a `reportBackupConfig` left behind in
+    // park, which is the half a `reportBackupConfig` left behind in
     // `server.js` would have lost.
     state = spawnNotifier({ HABITERALL_NOTIFY: 'off', HABITERALL_BACKUP_DIR: halfDir });
 

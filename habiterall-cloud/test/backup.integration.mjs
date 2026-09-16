@@ -668,9 +668,18 @@ exit 1
         SESSION_SECRET: 'backup-suite-secret',
         // Off, with a directory set and no admin credential: `backupTask`
         // answers `null` (a directory alone is not a backup hook), so there is
-        // genuinely nothing to run and the entry point exits 0 — AFTER the
-        // complaint, which is the ordering this case is about.
+        // genuinely nothing to run — and the entry point PARKS rather than
+        // exiting, because a container that exits 0 here is one the daemon
+        // leaves down after a host reboot. The complaint comes first, which is
+        // the ordering this case is about.
         HABITERALL_NOTIFY: 'off',
+        // `error`, not `warn`: the line this case waits on
+        // (`backup.admin_url_missing`) is an error and is the case's own
+        // subject, and holding the level here is what keeps the wait from
+        // passing on some other, chattier line. It is also why the wait below
+        // is NOT on `notifier.nothing_to_run`, which is a warn and is
+        // suppressed at this level — `test:notifierentry` case 3b is where
+        // that line is pinned, at a level that can see it.
         LOG_LEVEL: 'error',
         HABITERALL_BACKUP_DIR: dir11,
         HABITERALL_PG_DUMP: PG_DUMP,
@@ -686,9 +695,17 @@ exit 1
       child11c.stderr.on('data', (d) => { logs11c += String(d); });
       child11c.on('exit', (code, signal) => { exit11c = { code, signal }; });
 
-      await waitFor(async () => exit11c !== null, {
+      // Wait for the COMPLAINT, never for the exit. This process parks on
+      // purpose, so a wait on `exit11c` cannot be satisfied by anything and
+      // would time out, take this whole suite's remaining cases down with it,
+      // and read as a red X against the entry point rather than against the
+      // wait. The predicate also admits an exit, so an entry point that
+      // regressed to exiting says so through the assertions below rather than
+      // through a 10-second hang.
+      await waitFor(async () => exit11c !== null
+        || logs11c.includes('"msg":"backup.admin_url_missing"'), {
         timeoutMs: 10000,
-        what: 'case 11c: the notifier entry point to exit, having nothing to run',
+        what: 'case 11c: the notifier entry point to name the missing admin credential',
       });
       ck('case11c: the notifier logged backup.admin_url_missing at boot',
         logs11c.includes('"msg":"backup.admin_url_missing"'), logs11c.slice(0, 800));
@@ -700,7 +717,28 @@ exit 1
       const missingCount11c = (logs11c.match(/"msg":"backup\.admin_url_missing"/g) ?? []).length;
       ck('case11c (FIX 3): backup.admin_url_missing is logged EXACTLY ONCE at boot',
         missingCount11c === 1, `count=${missingCount11c}\n${logs11c.slice(0, 800)}`);
-      ck('case11c: and it exits 0 rather than idling — a directory alone is not a backup hook',
+
+      // It PARKS rather than exiting, and the settle is the assertion: there is
+      // no predicate for "it did not exit", so this is one of the few waits in
+      // the repo that is deliberately a duration. An exit-0 notifier is one a
+      // daemon restart never brings back — `restart: unless-stopped` restores
+      // `app` and `db` after a host reboot and leaves a cleanly-exited
+      // container down, because 0 is not a failure — so the whole deployment
+      // loses its reminders with nothing in any log to find.
+      await new Promise((r) => setTimeout(r, 500));
+      ck('case11c: it PARKS rather than exiting — a directory alone is not a backup hook, '
+        + 'and a clean exit here is a container a restart leaves down',
+        exit11c === null, `exit=${JSON.stringify(exit11c)}`);
+
+      // And a signal still ends it, through the `armShutdown` at the top of
+      // `notifier-entry.js` — parking must not mean unkillable, or
+      // `stop_grace_period` is spent waiting for a SIGKILL on every deploy.
+      child11c.kill('SIGTERM');
+      await waitFor(async () => exit11c !== null, {
+        timeoutMs: 10000,
+        what: 'case 11c: the parked notifier to exit on SIGTERM',
+      });
+      ck('case11c: and SIGTERM still ends it cleanly',
         exit11c?.code === 0 && exit11c?.signal === null,
         `code=${exit11c?.code} signal=${exit11c?.signal}`);
     } finally {
