@@ -3,7 +3,6 @@ package com.habiterall.app.ui
 import android.app.Activity
 import android.app.AlertDialog
 import android.os.Bundle
-import android.text.InputType
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.Toast
@@ -48,8 +47,16 @@ class CountEntryActivity : Activity() {
         }
 
         val input = EditText(this).apply {
-            // decimal, not just number: amounts like 2.5 km are ordinary.
-            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            // Decimal, not just number: amounts like 2.5 km are ordinary — and
+            // the key listener rather than `inputType`, which is the fix for
+            // this surface. `setInputType` builds a `DigitsKeyListener` with a
+            // null locale, so a comma is DELETED as it is typed whatever the
+            // phone is set to, and "8,5" arrives here as 85 with nothing said.
+            // [AmountKeyListener] carries the measurement and the reasoning;
+            // it sets the same input type, so the keyboard is unchanged.
+            // Do not add an `inputType =` line back beside this — it would
+            // install a fresh `DigitsKeyListener` and put the bug back.
+            keyListener = AmountKeyListener
             hint = if (unit.isBlank()) getString(R.string.count_hint) else unit
             setText(if (target > 0) formatAmount(target) else "")
             setSelection(text.length)

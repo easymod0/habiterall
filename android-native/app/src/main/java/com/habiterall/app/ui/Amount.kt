@@ -1,5 +1,7 @@
 package com.habiterall.app.ui
 
+import android.text.InputType
+import android.text.method.NumberKeyListener
 import java.math.BigDecimal
 import java.text.DecimalFormatSymbols
 import java.util.Locale
@@ -222,4 +224,66 @@ internal fun amountComplaint(text: String, format: AmountFormat = deviceAmountFo
         else ->
             "Type it without the thousands separator — 10000, not 10,000."
     }
+}
+
+/**
+ * What a platform [android.widget.EditText] may have typed INTO it: digits and
+ * either separator, and nothing else.
+ *
+ * **This exists because `inputType` alone silently deletes the comma, which is
+ * the whole bug this file was written to fix.** `TextView.setInputType` builds
+ * its `DigitsKeyListener` with a NULL locale, so the accepted set is the
+ * legacy, locale-independent `0123456789.` whatever the phone is set to — and
+ * `NumberKeyListener` is an `InputFilter`, which `TextView` installs on the
+ * `Editable`, so it sits between the IME and the box. Measured under
+ * `Locale.GERMANY` against [CountEntryActivity]'s own field:
+ *
+ * ```
+ * acceptedChars = [0123456789.]
+ * filters       = LengthFilter, Editor$UndoInputFilter, DigitsKeyListener
+ * append '8' ',' '5' -> "85"
+ * ```
+ *
+ * Eight and a half glasses recorded as eighty-five, with a "Recorded" toast —
+ * and it is the same measurement `shared/test/amount.test.js` already records
+ * for the web's `<input type="number">`, which is why THAT is now
+ * `inputmode="decimal"`. A `setText` does NOT run the filters, so the prefill
+ * was fine and only real typing lost the character; that is also why a test
+ * driving the box with `setText` cannot see this at all.
+ *
+ * **Both separators, not the locale's one.** The API 26 overload
+ * `DigitsKeyListener.getInstance(Locale, ...)` admits exactly one, which only
+ * moves the deleted character: on a comma device it would swallow the dot, and
+ * "10.000" — the input [amountComplaint]'s comma-convention sentence exists
+ * for — would become untypeable rather than refused. Accepting both keeps
+ * [parseAmount] the one thing that decides what an amount is, which is this
+ * file's whole argument. The set is a superset of [DECIMAL]'s alphabet on
+ * purpose: this only stops characters no amount can contain, and every
+ * question about SHAPE — two separators, a thousands group, a leading sign —
+ * is still answered one layer down, where it can produce a sentence.
+ *
+ * Setting this also sets the field's input type (`TextView.setKeyListener`
+ * reads [getInputType]), so it REPLACES the `inputType` assignment rather than
+ * joining it — assigning `inputType` afterwards would install a fresh
+ * `DigitsKeyListener` and put the bug back.
+ *
+ * Compose needs none of this: `BasicTextField` applies no character filter, so
+ * [HabitFormScreen]'s `KeyboardType.Decimal` field and [CountDialog]'s take
+ * whatever the IME commits. This is a platform-widget problem only, which is
+ * why it has exactly one call site.
+ */
+internal object AmountKeyListener : NumberKeyListener() {
+    // Digits and both separators. Ordered, though `NumberKeyListener.ok` scans
+    // linearly and does not require it.
+    private val ACCEPTED = ",.0123456789".toCharArray()
+
+    override fun getAcceptedChars(): CharArray = ACCEPTED
+
+    /**
+     * The same input type the `inputType` assignment this replaces asked for,
+     * so the numeric-with-decimal keyboard is still what comes up — it is only
+     * the FILTER behind it that changes.
+     */
+    override fun getInputType(): Int =
+        InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
 }

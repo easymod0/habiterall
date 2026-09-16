@@ -3,6 +3,7 @@ package com.habiterall.app
 import android.app.AlertDialog
 import android.app.Application
 import android.content.Intent
+import android.text.method.NumberKeyListener
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
@@ -46,8 +47,17 @@ import java.util.Locale
  * repo's own named defect class, stated in the root CLAUDE.md: "four Android
  * bugs and then two more lived one line below the pure function that pinned
  * them." So every case here asserts the OUTPUT that reached the platform — a
- * captured `HabitInput`, an `onConfirm` argument, a shown `Toast` — never a
- * return value of `parseAmount` itself.
+ * captured `HabitInput`, an `onConfirm` argument, the text a real keypress
+ * leaves in a field, a shown `Toast` — never a return value of `parseAmount`
+ * itself.
+ *
+ * **And "the output that reached the platform" has to be one that can tell the
+ * two worlds apart, which is the correction the review round added.** The
+ * number pad's toast is a platform output and is still the wrong assertion on
+ * its own: with the field's filter deleting a typed comma, "8,5" becomes "85",
+ * parses fine, and toasts `recorded_yes` — the identical observable the correct
+ * reading produces, for a day recorded ten times too large. See
+ * `CountEntryActivityAmountWiringTest`'s KDoc.
  *
  * Every case sets `Locale.GERMANY` before rendering. Under the default JVM
  * test locale (en-US) `deviceAmountFormat()` resolves to `POINT`, where
@@ -299,7 +309,25 @@ class CountDialogWiringGuard {
     }
 }
 
-/** 3. `CountEntryActivity` -> the platform: the shown `Toast`. */
+/**
+ * 3. `CountEntryActivity` -> the platform: what survives being TYPED, and the
+ * shown `Toast`.
+ *
+ * **Typed, not `setText`, and that distinction is the whole of what this class
+ * got wrong the first time.** `TextView.setText` does not run the `Editable`'s
+ * filters; an IME's `commitText` does, and so does `Editable.append`. The
+ * field's key listener is installed as one of those filters, so a
+ * `setText("8,5")` puts a comma in a box that would have deleted it from a
+ * real keypress — the test passed while the app recorded eighty-five.
+ *
+ * **And the toast cannot tell the two worlds apart, which is why the box's own
+ * contents are the assertion here.** With the comma filtered out the box holds
+ * "85", `parseAmount("85")` succeeds, and the toast is `recorded_yes` — the
+ * same toast the correct reading produces. Every other input has the same
+ * problem: "0,5" filters to "05" and both parse; a bare "," filters to "" and
+ * both refuse. There is no toast that distinguishes them, so the observable
+ * that does is the text left in the field after the keypresses.
+ */
 @RunWith(RobolectricTestRunner::class)
 @Config(application = Application::class)
 class CountEntryActivityAmountWiringTest {
@@ -352,37 +380,155 @@ class CountEntryActivityAmountWiringTest {
         return dialog.window?.decorView?.let(::walk)
     }
 
+    /**
+     * Type into the box the way an input method does: through the `Editable`,
+     * one character at a time, so every filter on the field runs on every
+     * keypress. `setText` is deliberately NOT used — see the class KDoc.
+     */
+    private fun type(input: EditText, text: String) {
+        input.setText("")
+        val editable = input.editableText
+        for (c in text) editable.append(c)
+    }
+
     @Test
-    fun `a comma reading is recorded, a dot-grouped one is toasted the thousands complaint`() {
+    fun `the field's filter accepts BOTH separators, so parseAmount is what decides`() {
+        val input = findEditText(launch())
+        assertNotNull("the number pad's EditText could not be found", input)
+
+        // The inventory is part of the assertion, per the root CLAUDE.md: an
+        // accepted-characters set this test could not read at all would make
+        // every claim below vacuous.
+        val listener = input!!.keyListener
+        assertTrue(
+            "the field has no NumberKeyListener at all, so nothing filters it and " +
+                "this test cannot be about what it claims. Found: ${listener?.javaClass?.name}",
+            listener is NumberKeyListener,
+        )
+        val accepted = NumberKeyListener::class.java
+            .getDeclaredMethod("getAcceptedChars")
+            .apply { isAccessible = true }
+            .invoke(listener) as CharArray
+        val set = String(accepted)
+        println("CountEntryActivity EditText acceptedChars = [$set]")
+
+        // The defect, named directly. `inputType = TYPE_CLASS_NUMBER or
+        // TYPE_NUMBER_FLAG_DECIMAL` yields exactly "0123456789" — measured —
+        // whatever the locale, because `TextView.setInputType` passes a NULL
+        // locale to `DigitsKeyListener`.
+        assertTrue(
+            "the field's filter does not accept a comma, so a comma-locale user cannot " +
+                "type a decimal point into the notification number pad at all — " +
+                "\"8,5\" arrives as 85. acceptedChars = [$set]",
+            set.contains(','),
+        )
+        assertTrue(
+            "the field's filter does not accept a dot, so the thousands group " +
+                "`amountComplaint` exists to refuse is untypeable rather than refused. " +
+                "acceptedChars = [$set]",
+            set.contains('.'),
+        )
+    }
+
+    @Test
+    fun `a typed comma survives the field and is recorded, not silently multiplied by ten`() {
         val app = RuntimeEnvironment.getApplication()
 
         val dialog = launch()
         val input = findEditText(dialog)
         assertNotNull("the number pad's EditText could not be found", input)
 
-        // Under the UNFIXED code
-        // (`input.text.toString().trim().toDoubleOrNull()`), "8,5" parses to
-        // null and the toast is the OLD, now-deleted "Enter a number of zero or
-        // more" string — this is the half that fails loudly against master.
-        input!!.setText("8,5")
+        type(input!!, "8,5")
+
+        // THE assertion. Against the pre-fix field this reads "85": the comma
+        // is dropped by the key listener's own `InputFilter` as it is typed,
+        // and every downstream observable — the parse, the enqueued value, the
+        // toast — is then correct about the wrong number. Eight and a half
+        // glasses stored as eighty-five, with a success message.
+        assertEquals(
+            "a typed comma did not survive the field — the key listener deleted it, " +
+                "so parseAmount never sees the number the user typed",
+            "8,5",
+            input.text.toString(),
+        )
+
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
 
+        // And it is accepted rather than refused — the half that already
+        // failed against master, where `toDoubleOrNull("8,5")` was null and the
+        // toast was the old, now-deleted "Enter a number of zero or more".
         assertEquals(
             app.getString(R.string.recorded_yes),
             ShadowToast.getTextOfLatestToast(),
         )
+    }
 
+    @Test
+    fun `a typed dot group survives the field and is refused with the actionable sentence`() {
         val dialog2 = launch()
         val input2 = findEditText(dialog2)
         assertNotNull("the number pad's EditText could not be found", input2)
-        input2!!.setText("10.000")
+
+        type(input2!!, "10.000")
+
+        // The dot has to reach the box for the complaint to be reachable at
+        // all. A locale-derived key listener — `DigitsKeyListener.getInstance(
+        // Locale.getDefault(), false, true)` — would accept the comma and
+        // swallow THIS, which is why the accepted set is both separators and
+        // not the locale's one.
+        assertEquals(
+            "a typed dot did not survive the field, so the thousands group is " +
+                "untypeable rather than refused and the sentence below is unreachable",
+            "10.000",
+            input2.text.toString(),
+        )
+
         dialog2.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
 
         assertEquals(
             "Type it without the thousands separator — 10000, not 10.000.",
             ShadowToast.getTextOfLatestToast(),
+        )
+    }
+
+    /**
+     * The prefill and a real keypress must agree about what the box may hold.
+     *
+     * `setText` bypasses the filters, so before the fix a stored 8.5 prefilled
+     * correctly as "8,5" under a comma locale and then could not be retyped —
+     * the user was looking at a character their own keyboard would not put
+     * back. This is that round trip, and it is the one case where `setText` is
+     * the right way in, because `setText` is what the activity itself does.
+     */
+    @Test
+    fun `the prefill is a string the user can retype`() {
+        val app = RuntimeEnvironment.getApplication()
+        val intent = Intent(app, CountEntryActivity::class.java).apply {
+            putExtra(Notifications.EXTRA_HABIT_ID, 7L)
+            putExtra(Notifications.EXTRA_DATE, "2026-09-10")
+            putExtra(Notifications.EXTRA_HABIT_NAME, "Water")
+            putExtra(Notifications.EXTRA_UNIT, "glasses")
+            // Not a whole number, on purpose: a whole one formats as "8" and
+            // carries no separator, so it could not tell the two worlds apart.
+            putExtra(Notifications.EXTRA_TARGET, 8.5)
+        }
+        Robolectric.buildActivity(CountEntryActivity::class.java, intent).create()
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        val input = findEditText(ShadowAlertDialog.getLatestAlertDialog() as AlertDialog)
+        assertNotNull("the number pad's EditText could not be found", input)
+
+        val prefilled = input!!.text.toString()
+        assertEquals("the prefill is not the device's own spelling", "8,5", prefilled)
+
+        // Now put the same string in through the filters. If they disagree, the
+        // box is showing something it would refuse to take.
+        type(input, prefilled)
+        assertEquals(
+            "the prefill \"$prefilled\" cannot be typed back into the box it came from",
+            prefilled,
+            input.text.toString(),
         )
     }
 }

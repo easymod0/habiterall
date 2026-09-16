@@ -563,6 +563,24 @@ default, and almost everybody's value — already means exactly this: the phone
 resolves its own locale and a browser on the same device would resolve the
 same one, with nothing to carry over the wire.
 
+**One reader is not enough on its own if the platform deletes the character
+before the reader sees it.** `CountEntryActivity` is the only one of the three
+surfaces that is a platform `EditText`, and `inputType = TYPE_CLASS_NUMBER or
+TYPE_NUMBER_FLAG_DECIMAL` installs a `DigitsKeyListener` built with a NULL
+locale — accepted characters `0123456789.` whatever the phone is set to — as an
+`InputFilter` on the field. A typed comma was deleted as it was typed, so `8,5`
+reached `parseAmount` as `85` and a day was recorded ten times too large with a
+"Recorded" toast. `ui/Amount.kt`'s `AmountKeyListener` replaces it and accepts
+digits and BOTH separators, so `parseAmount` stays the one thing that decides;
+the locale-aware `DigitsKeyListener.getInstance(Locale, …)` was rejected because
+it only moves the deleted character. **Do not add an `inputType =` line back
+beside `keyListener =`** — `setInputType` installs a fresh `DigitsKeyListener`
+and puts the bug back. Two testing lessons rode with it: `setText` does not run
+a field's filters and `Editable.append` does, so a test that types with
+`setText` is not testing typing; and the shown toast cannot distinguish `8,5`
+from `85` here, because both parse and both toast `recorded_yes`. See
+`docs/decisions/amounts.md`.
+
 What that leaves open, plainly: an account that has explicitly CHOSEN `point`
 or `comma` is honoured in the browser and not here. **State that cost the way
 the second review round corrected it, not the flatter way it was first

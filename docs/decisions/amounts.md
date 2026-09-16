@@ -443,3 +443,57 @@ argument `shared/public/ui/amount.js`'s own `formatAmount` doc comment already
 makes about the web.
 
 
+
+**A second review round found that on one of the three surfaces the rule could
+not be reached at all, because the platform deleted the character first.**
+`CountEntryActivity` is the only one of the three that is a platform
+`EditText` rather than a Compose field, and it asked for its keyboard with
+`inputType = TYPE_CLASS_NUMBER or TYPE_NUMBER_FLAG_DECIMAL`. `TextView`
+turns that into a `DigitsKeyListener` built with a **null locale**, and
+`NumberKeyListener` is an `InputFilter`, which `TextView` installs on the
+`Editable` — so the filter sits between the IME and the box and does not know
+what locale the phone is in. Measured on Robolectric under `Locale.GERMANY`,
+against the field itself:
+
+```
+acceptedChars = [0123456789.]
+filters       = LengthFilter, Editor$UndoInputFilter, DigitsKeyListener
+append '8' ',' '5' -> "85"
+```
+
+So a German user pressed `8`, `,`, `5` in the reminder's number pad and the box
+read `85`; `parseAmount("85")` succeeded, `Outbox.enqueue` took 85.0, and the
+toast said "Recorded". Eight and a half glasses stored as eighty-five, with a
+success message — and it is the identical measurement this project already
+recorded for the web's `<input type="number">` ("typing 8,5 left 85 in the
+box"), which is why THAT is `inputmode="decimal"` today.
+
+Two things about it are worth keeping written down.
+
+**A `setText` does not run the filters; a keypress does.** That is why the
+prefill was unaffected — a stored 8.5 painted as `8,5` quite happily — and it
+is also why the wiring test for this surface could not see the bug: it drove
+the field with `setText("8,5")` and asserted the shown toast. The toast cannot
+distinguish the two worlds in any case. With the comma filtered the box holds
+`85`, which parses, and the toast is `recorded_yes` — the same toast the
+correct reading produces. `"0,5"` filters to `"05"` and both parse; a bare
+`","` filters to `""` and both refuse. There is no input on this surface whose
+toast tells them apart, so the observable that does is **the text a real
+keypress leaves in the field**, and that is what the test asserts now.
+
+**`AmountKeyListener` accepts BOTH separators, and the locale-aware overload is
+the option that was rejected.** `DigitsKeyListener.getInstance(Locale, sign,
+decimal)` (API 26, and `minSdk` is 26) admits exactly one separator, which only
+moves the deleted character: on a comma device it swallows the dot, and
+`10.000` — the input `amountComplaint`'s comma-convention sentence exists for —
+becomes untypeable rather than refused. Accepting digits and both separators
+keeps `parseAmount` the one thing that decides what an amount is, which is the
+whole argument of this section; the key listener only stops characters no
+amount can contain, and every question about SHAPE is still answered one layer
+down, where it can produce a sentence. Setting `keyListener` also sets the
+field's input type (`TextView.setKeyListener` reads `getInputType()`), so it
+REPLACES the `inputType` assignment rather than joining it — an `inputType =`
+line added back beside it installs a fresh `DigitsKeyListener` and restores the
+bug. Compose needs none of this: `BasicTextField` applies no character filter,
+so `HabitFormScreen`'s `KeyboardType.Decimal` field and `CountDialog`'s take
+whatever the IME commits, which is why this has exactly one call site.
