@@ -1124,18 +1124,32 @@ function buildStrengthCard({ habit, stats, color, chartWidth }) {
     const pts = Math.round(trend.change * 100);
     tiles.append(tile(pts > 0 ? `+${pts}` : String(pts), `Points, last ${trend.days} days`));
   } else if (trend) {
-    // `minWindow` names an honest day count ONLY when it is the reason the
-    // figure is withheld, i.e. the habit has not yet accumulated that many
-    // SCORED days at all (#160: `trendOver`'s floor is now on applied EWMA
-    // steps, not calendar days, so a skip-heavy habit can clear `minWindow`
-    // calendar days and still be withheld — "Needs 87 days" would then be
-    // false, since it already has more than that). `Number.isFinite` guards
-    // `trendOver`'s two defensive returns, which hand back `Infinity` for an
-    // unreachable-today `alpha` — "Needs Infinity days" is not the readable
-    // failure that comment claims it is.
+    // Both branches have to be TRUE of the habit in front of the reader, and
+    // the fallback is the half a review round caught being false.
+    //
+    // `minWindow` names an honest day count only when it is the reason the
+    // figure is withheld — the habit has not accumulated that many days at
+    // all. `Number.isFinite` guards `trendOver`'s two defensive returns, which
+    // hand back `Infinity` for an unreachable-today `alpha`; "Needs Infinity
+    // days" is not a readable failure.
+    //
+    // The other branch is the one #160's own fix created, and it said "Too new
+    // to tell", which is a statement about AGE and is false exactly where it
+    // fires. `trendOver`'s floor is on applied EWMA steps, not calendar days,
+    // so a habit can clear `minWindow` calendar days and still be withheld —
+    // `weekendSkipperRows(110)` in `test/stats.test.js` is that habit, and
+    // that one is 110 days old against a `minWindow` of 87. Telling somebody
+    // who has kept a habit perfectly for four months, resting weekends, that
+    // it is "too new" contradicts every other figure on the page.
+    //
+    // What is true in both cases is that not enough days have been SCORED: a
+    // skip leaves the curve untouched while the calendar day still elapses, so
+    // a scored day and a calendar day are the same count only for a habit that
+    // never skips. That is the quantity the floor is actually about, and it is
+    // the wording both branches can share — the first merely names the number.
     const label = (Number.isFinite(trend.minWindow) && stats.scores.length < trend.minWindow)
-      ? `Needs ${trend.minWindow} days`
-      : 'Too new to tell';
+      ? `Needs ${trend.minWindow} scored days`
+      : 'Not enough scored days';
     tiles.append(tile('—', label));
   } else {
     tiles.append(tile('—', 'No trend yet'));

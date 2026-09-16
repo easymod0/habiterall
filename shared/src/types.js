@@ -123,11 +123,15 @@
  * @typedef {object} Stats
  * @property {number} score            latest strength, 0..1
  * @property {ScorePoint[]} scores
- * @property {Trend} trend             how the score moved over the trailing
- *   window — see `Trend` for the units and the floor.
- * @property {Regularity} regularity   the spread of the gaps between
+ * @property {Trend} [trend]           how the score moved over the trailing
+ *   window — see `Trend` for the units and the floor. Absent when the caller
+ *   declined it: `computeAwards` reads no trend, so a route walking every
+ *   habit on the account (`GET /awards`, #140) has no use for the pass.
+ * @property {Regularity} [regularity] the spread of the gaps between
  *   completions — see `Regularity` for why spread and not mean, and for the
- *   at-most/`success` shape it is withheld for.
+ *   at-most/`success` shape it is withheld for. Absent when the caller
+ *   declined it, for the same reason as `trend`: it is its own walk over the
+ *   window calling `isCompleted` per day, and no award reads it.
  * @property {Streak[]} streaks
  * @property {number} currentStreak
  * @property {number} bestStreak

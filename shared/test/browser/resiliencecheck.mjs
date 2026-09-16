@@ -144,8 +144,14 @@ try {
   const strengthTile = await readCardByTitle('Habit strength');
   ck('the strength card is present', strengthTile.card === true);
   const trendTile = strengthTile.tiles?.[0];
-  ck('the strength card holds a trend tile whose label starts "Points, last" or "Needs"',
-    /^(Points, last|Needs)/.test(trendTile?.label ?? ''), trendTile?.label ?? '(missing)');
+  // All THREE labels the tile can carry, not two: the fallback branch was
+  // excluded by the old alternation, which is part of how it went un-rendered
+  // by any suite while saying something false. See the weekend-rester block
+  // below, which drives that branch on purpose.
+  ck('the strength card holds a trend tile with one of the three labels it can carry',
+    /^(Points, last|Needs \d+ scored days$|Not enough scored days$|No trend yet$)/
+      .test(trendTile?.label ?? ''),
+    trendTile?.label ?? '(missing)');
 
   // Pinning the DECISION is not pinning the WIRING (root CLAUDE.md) — a
   // string being right does not make its caller use it. So this fetches the
@@ -503,6 +509,95 @@ try {
         console.log(where + ' threw :: ' + err.message);
       }
     }
+  }
+
+  /* ---------- the withheld-trend label is true of the habit it is about ---------- */
+
+  console.log('\n--- the withheld trend says something true ---');
+
+  // The one branch no suite had ever rendered, and it said "Too new to tell"
+  // about a habit four months old. `trendOver`'s floor is on applied EWMA
+  // STEPS, not calendar days — a skip applies no step while the calendar day
+  // still elapses — so a weekend-skipper clears `minWindow` calendar days and
+  // is still withheld. That is `skipDays` used exactly as intended, not a
+  // contrived shape.
+  //
+  // 100 days: `stats.test.js` pins the real boundary at 110/111 against a
+  // FIXED end date, and the boundary moves with which weekday `end` falls on,
+  // which a browser suite cannot control. 100 was checked to withhold at all
+  // seven alignments while still clearing the 87-day calendar floor, so it
+  // lands in this branch whatever day the suite runs.
+  //
+  // Dates are built in UTC off today's LOCAL y/m/d, never by subtracting
+  // 86400000 from a local `Date`: a DST boundary inside the window would
+  // otherwise skip or repeat a day and shift every weekday after it.
+  const skipper = await ev(
+    '(async function(){'
+    + " var r = await fetch('/api/habits', { method: 'POST',"
+    + "   headers: { 'Content-Type': 'application/json' },"
+    + "   body: JSON.stringify({ name: 'Weekend rester', type: 'boolean' }) });"
+    + ' var h = await r.json();'
+    + ' var n = new Date();'
+    + ' var base = Date.UTC(n.getFullYear(), n.getMonth(), n.getDate());'
+    + ' for (var i = 99; i >= 0; i--) {'
+    + '   var d = new Date(base - i * 86400000);'
+    + '   var iso = d.toISOString().slice(0, 10);'
+    + '   var weekend = d.getUTCDay() === 0 || d.getUTCDay() === 6;'
+    + "   await fetch('/api/habits/' + h.id + '/entries/' + iso, { method: 'PUT',"
+    + "     headers: { 'Content-Type': 'application/json' },"
+    + '     body: JSON.stringify(weekend ? { value: 0, status: \'skip\' } : { value: 2 }) });'
+    + ' }'
+    + ' return h.id; })()'
+  );
+  ck('a weekend-resting habit was seeded', typeof skipper === 'number', String(skipper));
+
+  // Prove the fixture is IN the branch before asserting what the branch says —
+  // otherwise this passes through the `Needs N scored days` branch, which is a
+  // different sentence and was never the one in question.
+  const skipperTrend = await ev(
+    '(async function(){'
+    + " var s = await (await fetch('/api/habits/' + " + skipper + " + '/stats')).json();"
+    + ' return { scores: s.scores.length, minWindow: s.trend.minWindow, change: s.trend.change };'
+    + ' })()'
+  );
+  ck('the trend is withheld for it', skipperTrend?.change === null,
+    JSON.stringify(skipperTrend));
+  ck('...and NOT because it is short of calendar days — it is past that floor, '
+    + 'which is the branch whose label was false',
+    skipperTrend != null && skipperTrend.scores >= skipperTrend.minWindow,
+    JSON.stringify(skipperTrend));
+
+  // A fragment-only navigation, so `reloadAndWaitFor`'s `window.__doomed`
+  // marker would survive it and the wait would hang its full timeout — see the
+  // root CLAUDE.md. Poll the rendered tile instead.
+  await ev('location.hash = ' + JSON.stringify('#/habit/' + skipper));
+  let skipperTile = null;
+  for (let k = 0; k < 40; k++) {
+    const strength = await readCardByTitle('Habit strength');
+    skipperTile = strength.tiles?.[0] ?? null;
+    if (skipperTile && skipperTile.label !== trendTile?.label) break;
+    await sleep(200);
+  }
+
+  ck('the withheld trend renders a dash', skipperTile?.value === '—',
+    JSON.stringify(skipperTile));
+  // The assertion, and it is a LITERAL rather than a regex: the defect was a
+  // label that parsed fine and was untrue. "Too new to tell" about a habit
+  // with 100 days of history contradicts every other figure on the page.
+  ck('and says it is short of SCORED days rather than calling a 100-day habit new',
+    skipperTile?.label === 'Not enough scored days',
+    JSON.stringify(skipperTile));
+
+  // Its own cleanup, reported rather than asserted, exactly as the two seeded
+  // habits above are — this block sits after that `finally`, so it is not
+  // covered by the loop there.
+  try {
+    const gone = await ev(
+      "fetch('/api/habits/" + skipper + "', { method: 'DELETE' })"
+      + '.then(function(r){ return r.ok; })');
+    if (!gone) console.log('cleanup: DELETE /api/habits/' + skipper + ' (weekend rester) did not come back ok');
+  } catch (err) {
+    console.log('cleanup: DELETE /api/habits/' + skipper + ' (weekend rester) threw :: ' + err.message);
   }
 
   ck('no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 2).join(' | '));

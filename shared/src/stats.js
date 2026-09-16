@@ -810,10 +810,22 @@ function trendOver(scores, alpha, steps) {
  * point. `mean` needs only one.
  *
  * A second walk over `dates`, calling `isCompleted` per day — roughly the
- * cost of the coverage pass. `computeStats` has exactly one caller
- * (`/habits/:id/stats`, one habit at a time), so that cost is accepted
- * outright rather than hidden behind an opt-out the way `coverage` is: this
- * is not paid per habit on the dashboard's hot path.
+ * cost of the coverage pass, and it is behind an opt-out for that reason.
+ *
+ * **The first version of this said `computeStats` had exactly one caller and
+ * accepted the cost outright. Do not restore that sentence.** #140 adds `GET
+ * /awards`, an account-level route that calls `computeStats` for EVERY habit
+ * on the account — and it exists partly to stop three other passes being built
+ * and discarded per habit. `computeAwards` reads neither this figure nor
+ * `trend`, so a route walking every habit must be able to decline both, the
+ * same way it declines `history`, `weekdayByMonth` and `frequency`. Measured
+ * before the opt-out existed: ~2% of an awards-shaped call at a 1830-day
+ * window, which is small — the point is not the milliseconds, it is that the
+ * per-habit caller now exists and nothing in the call-site guard can see a
+ * pass added unconditionally INSIDE this function.
+ *
+ * `/habits/:id/stats` declines neither: it is the detail view's whole reading
+ * and the tiles are rendered from both.
  *
  * @param {import('./types.js').Habit} habit
  * @param {Map<string, any>} entryMap
@@ -1961,14 +1973,15 @@ function resolveWindow(entries, start, end, creditFrom = undefined) {
  * @param {import('./types.js').Entry[]} entries
  * @param {{start?: string, end?: string, granularity?: string,
  *           weekStart?: 'monday'|'sunday', unlogged?: string,
- *           coverage?: boolean}} [opts]
+ *           coverage?: boolean, trend?: boolean, regularity?: boolean}} [opts]
  * @returns {import('./types.js').Stats}
  */
 export function computeStats(habit, entries,
                              { start, end, granularity = 'day',
                                weekStart = 'monday',
                                unlogged = UNLOGGED_DEFAULT,
-                               coverage = true } = {}) {
+                               coverage = true, trend = true,
+                               regularity = true } = {}) {
   const { entryMap, from, creditFrom } = resolveWindow(entries, start, end);
 
   // One walk shared by every pass below (#219), where master built it once
@@ -2031,8 +2044,18 @@ export function computeStats(habit, entries,
   return {
     score: scores.length ? scores[scores.length - 1].score : 0,
     scores,
-    trend: trendOver(scores, alpha, steps),
-    regularity: regularityOver(habit, entryMap, dates, unlogged, creditFrom),
+    // Spread rather than assigned, the same shape `coverage` already had and
+    // for the same reason: a caller that declines one gets NO KEY, because an
+    // empty object here would be a claim (`applicable: false` says the gaps
+    // are not a measure of anything about this habit; `change: null` says the
+    // floor is not cleared) and this is the absence of one. The renderer's
+    // guards are already written this way — `if (trend && ...)` and
+    // `if (reg && reg.applicable)` — so a declined field falls through to the
+    // "no trend yet" tile rather than throwing.
+    ...(trend ? { trend: trendOver(scores, alpha, steps) } : {}),
+    ...(regularity ? {
+      regularity: regularityOver(habit, entryMap, dates, unlogged, creditFrom),
+    } : {}),
     streaks,
     currentStreak: currentStreak(streaks, end),
     bestStreak: bestStreak(streaks),

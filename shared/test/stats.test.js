@@ -11,7 +11,7 @@ const {
   isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, fromISO, MAX_RANGE_DAYS,
   isRealDay, CANONICAL_DATE_RE, TREND_CONVERGED_SCORE,
 } = await import('../src/stats.js');
-const { STRENGTH_BANDS } = await import('../src/awards.js');
+const { STRENGTH_BANDS, computeAwards } = await import('../src/awards.js');
 
 const UNSET = 0, YES = 2, SKIP = 3;
 
@@ -1476,6 +1476,53 @@ test('a caller that declined coverage gets neither key', () => {
   const stats = computeStats(boolHabit, rows, { end: '2026-01-31', coverage: false });
   assert.equal(Object.hasOwn(stats, 'coverage'), false);
   assert.equal(Object.hasOwn(stats, 'coverageWindow'), false);
+});
+
+test('trend and regularity are the same opt-out, and declining them costs no other field', () => {
+  // `computeStats` is not a one-caller function any more: #140's `GET /awards`
+  // walks EVERY habit on the account through it, and `computeAwards` reads
+  // neither of these two — so a caller that pays for both per habit is paying
+  // for passes it discards, which is the exact shape #140 exists to remove.
+  //
+  // Both are their own work: `regularityOver` is a full walk over the window
+  // calling `isCompleted` per day, and `trendOver` a backward scan over the
+  // scores. `/habits/:id/stats` declines neither; it renders both as tiles.
+  const end = '2026-06-30';
+  const rows = dateRange(addDays(end, -119), end)
+    .map((date) => ({ date, value: YES, status: '' }));
+
+  const full = computeStats(boolHabit, rows, { end });
+  const declined = computeStats(boolHabit, rows, { end, trend: false, regularity: false });
+
+  // ABSENT, not empty — an empty object here would be a claim. `trend.change:
+  // null` says the floor is not cleared and `regularity.applicable: false`
+  // says the gaps measure nothing about this habit; a declined field says
+  // neither, and `Object.hasOwn` is what tells the two apart.
+  assert.ok(Object.hasOwn(full, 'trend') && Object.hasOwn(full, 'regularity'),
+    'fixture setup: the full reading is missing one of the two');
+  assert.equal(Object.hasOwn(declined, 'trend'), false);
+  assert.equal(Object.hasOwn(declined, 'regularity'), false);
+
+  // The fixture has to have something to lose, or "declining changed nothing"
+  // is true of a payload that never carried anything worth declining.
+  assert.notEqual(full.trend.change, null,
+    'fixture setup: 120 perfect days should clear the trend floor');
+  assert.equal(full.regularity.applicable, true,
+    'fixture setup: a daily at-least habit must have an applicable regularity');
+
+  // And nothing ELSE moves. Both are reads over the same window every other
+  // pass already walks, so declining them must not disturb a single figure
+  // beside them — which is what makes an awards-shaped call safe to trust.
+  const { trend: _t, regularity: _r, ...rest } = full;
+  assert.deepEqual(declined, rest,
+    'declining trend/regularity changed a figure other than those two');
+
+  // The award array in particular, since that is the caller doing the
+  // declining and the whole point is that its answer is unchanged.
+  assert.deepEqual(
+    computeAwards(declined, end, boolHabit, 'miss', true),
+    computeAwards(full, end, boolHabit, 'miss', true),
+    'declining trend/regularity changed the award array');
 });
 
 /* ---------- trend: the score's own momentum, over TREND_LOOKBACK_DAYS ---------- */
