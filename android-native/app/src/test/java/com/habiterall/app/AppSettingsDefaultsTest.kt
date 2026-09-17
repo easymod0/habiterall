@@ -254,23 +254,38 @@ class AppSettingsDefaultsTest {
         // The one entry here that records a COST rather than an absence of one,
         // and it is written down as such deliberately.
         //
-        // This decides which character a decimal point is where an amount is
-        // TYPED, and this client has three places that read one: `parseAmount`
-        // in HabitFormScreen, and a bare `toDoubleOrNull` in both
-        // CountEntryActivity and MainActivity's day dialog — which already
-        // disagree with each other about "8,5", never mind with the web. So the
-        // honest statement is not "the phone does not read this", it is "the
-        // phone has no single reader to give it to", and handing an account's
-        // answer to three rules that differ would make it mean three things.
+        // #157 unified the three readers into one, `parseAmount` in
+        // `ui/Amount.kt`, called from the habit form, the notification number
+        // pad (`CountEntryActivity`) and the day dialog (`CountDialog`) alike —
+        // so this is no longer "no single reader to give it to". It is a
+        // DELIBERATE device-tier decision: `deviceAmountFormat()` reads
+        // `Locale.getDefault()` at parse time, and nothing about the account's
+        // `numberFormat` setting crosses the wire. That is exactly what `auto`
+        // — the setting's own default, and almost everybody's value — already
+        // means, so under it the phone and a browser on the same device resolve
+        // the same convention with nothing to mirror.
         //
-        // What that costs: an account that has CHOSEN a convention is followed
-        // in the browser and not here, where the notification's number pad goes
-        // on reading a dot as a decimal point whatever the account says. Under
-        // `auto` — the default, and almost everybody — the phone would resolve
-        // its own locale and there would be nothing to carry. Issue #157 is the
-        // whole of it: unify the three readers, then choose between the device
-        // tier and a real mirror.
-        "numberFormat" to "three Kotlin readers that do not yet agree — see #157",
+        // What that still costs, plainly: an account that has explicitly CHOSEN
+        // `point` or `comma` is honoured in the browser and not here. That half
+        // is knowingly unfixed.
+        //
+        // What that costs is a ROW and not merely a message, and this comment
+        // said otherwise until the second review round. It claimed a wrong
+        // guess at the convention "can only ever refuse a spelling loudly,
+        // never store a row out by a thousand", and that is false for exactly
+        // the input the issue is named for: `point` chosen, phone locale
+        // German, user types `10,000` meaning ten thousand. The web refuses it
+        // as ambiguous. Here `deviceAmountFormat()` says COMMA, so it is not a
+        // group, and it reads as TEN and is stored. A mirror would buy that
+        // account a correct row.
+        //
+        // What is still true, and is why the device tier was nonetheless the
+        // right call: under `auto` the convention comes from the same device
+        // the typing happens on, so reader and typist agree by construction and
+        // the mismatch is unreachable. The exposure is explicit-choice accounts
+        // whose phone disagrees with what they chose — #157's deliberately open
+        // half, not an accident. Do not restate the flatter claim.
+        "numberFormat" to "device tier by design (#157): one reader, nothing crosses the wire",
     )
 
     /**
