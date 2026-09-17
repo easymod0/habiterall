@@ -2350,10 +2350,29 @@ export function computeStats(habit, entries,
  * when the account's sort needs it, so the dashboard's hot path — `manual`,
  * which is almost everybody — pays nothing extra for it.
  *
+ * **`runs` is a fourth, opt-in field, for the dashboard's in-run ghost tick
+ * (#247).** Declined — the default — the key is ABSENT from the return, the
+ * same convention `lastMiss` sets above and `coverage` sets in `computeStats`.
+ * Asking for it (`{runs: {start, end}}`) folds the `streaks` array this
+ * function has already built (`clipRuns`, module-private, right below) into
+ * the window named by `start`/`end` — which a bounded caller must make the
+ * GRID window it is about to answer, never `summaryEnd`: both editions'
+ * `/overview` derive those two from different things and using the wrong one
+ * would ship run ranges for a window the grid is not showing. Every run that
+ * intersects the window comes back clipped into it, but with its TRUE,
+ * unclipped `length` — a 40-day run showing two days at the edge of a 14-day
+ * window still reports `length: 40`, because reporting the clipped span
+ * instead is exactly what makes `streakDates(runs, MIN_STREAK)`
+ * (`shared/public/charts.js`) drop it as a 2-day run, right at the left edge
+ * of the grid, which is where the ghost ticks matter most and where nobody
+ * looks. No minimum length is applied here: `MIN_STREAK` lives in a
+ * presentation module this file cannot import, so the gate is the client's.
+ *
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
  * @param {{start?: string, end?: string, unlogged?: string,
- *          creditFrom?: string, birth?: string|null, lastMiss?: boolean}} [opts]
+ *          creditFrom?: string, birth?: string|null, lastMiss?: boolean,
+ *          runs?: {start: string, end: string}}} [opts]
  *   `birth: null` and `birth: undefined` are NOT the same instruction to
  *   `onPaceSeries` — see its own doc comment for why a lookup miss (`null`)
  *   stays strict where an absent override (`undefined`) does not.
@@ -2362,7 +2381,7 @@ export function computeStats(habit, entries,
 export function summaryStats(habit, entries,
                              { start, end, unlogged = UNLOGGED_DEFAULT,
                                creditFrom: creditGiven, birth: birthGiven,
-                               lastMiss = false } = {}) {
+                               lastMiss = false, runs: runsWindow } = {}) {
   const { entryMap, from, creditFrom, birth: derivedBirth } =
     resolveWindow(entries, start, end, creditGiven);
   // **`!== undefined` and NOT `??`, which is the opposite of the line
@@ -2408,7 +2427,44 @@ export function summaryStats(habit, entries,
     // Spread rather than assigned, so a caller that did not ask for this
     // gets no key at all — see the note above on why absent and not null.
     ...(lastMiss ? { lastMiss: runs.length ? runs[runs.length - 1].end : null } : {}),
+    // Same reasoning, same spread: a caller that passed no `runs` window
+    // gets no `runs` key, not `null` and not `[]`.
+    ...(runsWindow ? { runs: clipRuns(streaks, runsWindow.start, runsWindow.end) } : {}),
   };
+}
+
+/**
+ * Folds a habit's `streaks` (`streaksFrom`, already in hand at the call
+ * site — see the `runs` paragraph on `summaryStats` above) into the window
+ * `[from, to]`: drops any run that does not intersect it, clips the reported
+ * `start`/`end` into it, and keeps `length` as the run's TRUE, unclipped
+ * length. That third part is the one that matters — see `summaryStats`'s own
+ * doc comment for what reporting the clipped span instead would break.
+ *
+ * String comparison, not `daysBetween`: every date here is already
+ * canonical, the same trust `totalCompleted`'s `date >= from && date <= end`
+ * filter puts in its own `from`/`end` above — a streak's `start`/`end` were
+ * spelled by `boundedRange`'s walk, and `from`/`to` here are a route's own
+ * grid window rather than a raw, possibly-phantom one out of storage.
+ *
+ * No minimum length is applied — that gate (`MIN_STREAK`) is the client's.
+ *
+ * @param {import('./types.js').Streak[]} streaks
+ * @param {string} from
+ * @param {string} to
+ * @returns {{start: string, end: string, length: number}[]}
+ */
+function clipRuns(streaks, from, to) {
+  const out = [];
+  for (const streak of streaks) {
+    if (streak.end < from || streak.start > to) continue; // no intersection
+    out.push({
+      start: streak.start < from ? from : streak.start,
+      end: streak.end > to ? to : streak.end,
+      length: streak.length,
+    });
+  }
+  return out;
 }
 
 /* ---------- comparing categories ---------- */

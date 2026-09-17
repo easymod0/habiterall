@@ -1681,6 +1681,10 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
 
     const stats = summaryStats(h, recent, {
       end: summaryEnd, unlogged, creditFrom, birth, lastMiss: wantsLastMiss,
+      // The GRID window, never `summaryEnd`: this is what the dashboard is
+      // actually showing, and the two are deliberately different dates (see
+      // the comment above `const summaryEnd = now;`).
+      runs: { start, end },
     });
     // Collected while each row is built rather than in a second pass over
     // `habitPayloads`: `stats.lastMiss` is absent unless `wantsLastMiss` asked
@@ -1728,6 +1732,12 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
       // server-side because no renderer can import `unansweredCounts`, and
       // derived rather than stored.
       unlogged_is_success: unansweredCounts(h, unlogged),
+      // The dashboard's in-run ghost tick (#247): every run that intersects
+      // the grid window, clipped into it, with its TRUE unclipped length —
+      // see `summaryStats`'s own doc comment. Derived every request, never
+      // served from the memoised `/overview` payload's own cache key
+      // (`windowKey` already carries `start`/`end`/`summaryEnd`, unchanged).
+      runs: stats.runs,
     };
   });
 

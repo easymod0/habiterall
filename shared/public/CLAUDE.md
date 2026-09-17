@@ -849,12 +849,40 @@ doing that a deliberate act rather than a silent one.
 **Still open, on purpose.** Streak connectors drawn over an empty cell was
 issue #176, addressed above — a different route (`inStreak`) from anything
 else in this section, and it left `unlogged_is_success`'s own fill untouched.
-It reaches the calendar and the detail page's own strip only: the dashboard's
-day squares and both Android grids (`DayGrid`, the widget) still draw these
-days blank, and stay that way until a follow-up ships the `/overview` streak
-ranges either would need. The credit window's missing far end is still issue
-#223, and it is not this one's to fix either. `docs/decisions/day-states.md`
-has the long form.
+It reached the calendar and the detail page's own strip first; #247 (below)
+extends it to the dashboard's own day squares. Both Android grids (`DayGrid`,
+the widget) still draw these days blank, and stay that way until a follow-up
+ships them the same `/overview` streak ranges. The credit window's missing far
+end is still issue #223, and it is not this one's to fix either.
+`docs/decisions/day-states.md` has the long form.
+
+**#247 threads the same run set into the dashboard's own day squares.**
+`ui/dashboard.js`'s `habitRow` passes `streakDates(habit.runs, MIN_STREAK)` as
+`dayCells`'s fifth argument — the same call `ui/detail.js`'s strip already
+makes over `stats.streaks` — so the ghost tick above reaches a third grid with
+no new renderer, only a caller that had been passing the `new Set()` default.
+`habit.runs` rides on `/overview`: `summaryStats` already reads its `score`
+and `currentStreak` off entries the route bounded to a fixed ~400-day window
+anchored to today (`SUMMARY_WINDOW_DAYS`, not to the grid's own `end`), and
+`runs` is that same `streaksFrom` array, clipped into the GRID window the
+route is about to answer (its own `start`/`end`, never `summaryEnd`) instead
+of the 1830-day scan `recomputeBestStreak` runs on a stale summary cache —
+that scan would make the marks flicker between two loads of one page
+depending on cache freshness, and a second, narrower entries read plus a
+second `onPaceSeries` pass for a paged-back grid window was rejected too,
+since a narrower window moves `onPaceSeries`'s own birth-gated leniency and
+would put the dashboard at odds with the detail page about the same run. So a
+grid paged back past the 400-day entries window shows no run marks for those
+days, accepted rather than coded around, and each run's `length` on the wire
+is the TRUE unclipped length, never the span visible in whatever grid window
+clipped it.
+
+**The run set is exactly as stale as the rest of the row it draws.** It is the
+one `/overview` last answered with, so an offline tap that turns a day into a
+stored 0 keeps drawing that cell's in-run tick until the next load corrects
+it — the same acceptance `ui/detail.js`'s `stripRuns` already states for the
+strip. `shared/test/browser/gridcheck.mjs`'s "clearing a skip while offline
+repaints the cell" case is the worked example.
 
 ## Amounts
 

@@ -563,3 +563,56 @@ test('#340 review 3: at a SLICE EDGE a shut gate really does reproduce master', 
     'a slice edge is not a birth — withholding the leniency here is the ' +
     'whole difference the gate exists to make');
 });
+
+/* ---------- #247: summaryStats' opt-in `runs`, clipped and true-length ---------- */
+
+// A daily boolean habit over 60 days: a 5-day run entirely BEFORE the window
+// every case below asks for, a 40-day run straddling its left edge, and a
+// 2-day run entirely INSIDE it. `runsDay(n)` is the habit's own day `n`, with
+// `runsDay(60) === runsEnd`, so every literal below is a day count rather
+// than a calendar date nobody could check by eye.
+const runsEnd = '2026-03-01';
+const runsDay = (n) => addDays(runsEnd, n - 60);
+const runsEntries = [];
+for (let n = 1; n <= 5; n++) runsEntries.push({ date: runsDay(n), value: YES });   // run A
+for (let n = 11; n <= 50; n++) runsEntries.push({ date: runsDay(n), value: YES }); // run B
+for (let n = 53; n <= 54; n++) runsEntries.push({ date: runsDay(n), value: YES }); // run C
+// The window every case asks for: day 40 through the end — inside run B,
+// past run A entirely, and containing run C whole.
+const runsWindow = { start: runsDay(40), end: runsEnd };
+
+test('#247 case 1: a run longer than the window clips its dates but reports ' +
+     'its TRUE, unclipped length', () => {
+  const stats = summaryStats(boolHabit, runsEntries, { end: runsEnd, runs: runsWindow });
+  const clippedB = stats.runs.find((r) => r.length === 40);
+  assert.ok(clippedB, 'the 40-day run must still be reported');
+  assert.equal(clippedB.start, runsDay(40),
+    'clipped to the window\'s start, not to the run\'s own start (day 11)');
+  assert.equal(clippedB.end, runsDay(50));
+  assert.equal(clippedB.length, 40,
+    'the TRUE length — reporting the clipped 11-day span instead is the trap: ' +
+    'a 2-day-reading run is exactly what a client-side MIN_STREAK gate drops');
+});
+
+test('#247 case 2: a run entirely outside the window is absent from `runs`', () => {
+  const stats = summaryStats(boolHabit, runsEntries, { end: runsEnd, runs: runsWindow });
+  assert.equal(stats.runs.length, 2,
+    'run A (days 1-5, entirely before the window) must not be one of them');
+  assert.ok(!stats.runs.some((r) => r.length === 5),
+    'run A specifically must be absent, not merely outnumbered');
+});
+
+test('#247 case 3: a 2-day run is still returned — the length gate is the ' +
+     'client\'s, not summaryStats\'', () => {
+  const stats = summaryStats(boolHabit, runsEntries, { end: runsEnd, runs: runsWindow });
+  const clippedC = stats.runs.find((r) => r.length === 2);
+  assert.ok(clippedC, 'a 2-day run must still be reported here, unfiltered');
+  assert.equal(clippedC.start, runsDay(53));
+  assert.equal(clippedC.end, runsDay(54));
+});
+
+test('#247 case 4: a caller that passes no `runs` option gets no key at all', () => {
+  const stats = summaryStats(boolHabit, runsEntries, { end: runsEnd });
+  assert.equal('runs' in stats, false,
+    'absent, not `undefined` and not `[]` — the same convention `lastMiss` sets');
+});

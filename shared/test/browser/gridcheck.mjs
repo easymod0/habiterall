@@ -232,7 +232,22 @@ try{
     const el = document.querySelector('[data-focus-key="check:${seeded.yesno}:${seeded.clearMe}"] .check-box');
     return el ? (el.textContent || '').trim() : null;
   })()`);
-  ck('clearing a skip while offline repaints the cell', cleared === '',
+  // Not blank, since #247 threaded the dashboard's `inRun` set through — and
+  // the reason is worth stating exactly, because it is TRANSIENT and reads
+  // like a durable fact. The tap moves a skip on to a stored 0 (`no`), never a
+  // delete (`nextDayState`, ui/toggle.js). A skip is transparent to
+  // `onPaceSeries`, so while this day WAS one the server's run bridged it and
+  // `d(3)` is in the `runs` this page last loaded; a stored 0 on a DAILY habit
+  // is not on pace and breaks that run, so the next `/overview` drops the date
+  // and the tick with it. Offline there is no next `/overview` — which is the
+  // whole reason this block emulates it — so what is drawn here is the
+  // pre-tap run set over a post-tap value, exactly as `ui/detail.js`'s strip
+  // holds `stripRuns` until its own next load.
+  //
+  // What this check pins is unchanged: a version that forgot to update
+  // `habit.skips` alongside `habit.entries` would still be painting the stale
+  // skip dash ('–'), which any expectation but '–' catches.
+  ck('clearing a skip while offline repaints the cell', cleared === '✓',
      `cell reads "${cleared}" after the tap`);
 
   await send('Network.emulateNetworkConditions',
@@ -957,6 +972,106 @@ try{
        cellAfterSave?.dot === true, JSON.stringify(cellAfterSave));
 
     ck('the setting is put back', await setTap('cycle') === 'cycle');
+  }
+
+  /* ---------- the dashboard's own day squares thread the run set too
+     (#247 step 3) — the same assertion `stripcheck.mjs`'s "a kept run reads
+     as one band" block makes for the habit's own page, one surface over. ---------- */
+  console.log('\n--- dashboard in-run ticks ---');
+
+  // Desktop width, so the grid draws all 14 columns `gridColumns` allows at
+  // this width — the notes/habitSort/dayTap blocks above leave the viewport
+  // at phone size, where only 7 columns are drawn and Gym's Mon/Wed/Fri
+  // schedule may not leave an unlogged day inside the visible window at all.
+  await send('Emulation.setDeviceMetricsOverride',
+    { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId);
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate',{url:APP},sessionId),
+    what: 'the dashboard, at desktop width, for the run-tick probe',
+  });
+  await sleep(600);
+
+  const gym = await ev(`(async () => {
+    const habits = await (await fetch('/api/habits')).json();
+    return habits.find(h => h.name === 'Gym') ?? null;
+  })()`);
+  ck('the Gym fixture habit is present', !!gym, JSON.stringify(gym));
+
+  if (gym) {
+    const cellSel = (date) => `.habit-row[data-habit-id="${gym.id}"] .check[data-date="${date}"] .check-box`;
+    // The box's colour and background are CSS values — a hex habit colour,
+    // `var(--grid-empty)` — so only the browser's OWN resolution of them is
+    // safe to compare against; a literal rgb string is "a constant" the two
+    // marks are not compared to (mirrors `stripcheck.mjs`'s helper).
+    const cellStyle = (date) => ev(`(() => {
+      const b = document.querySelector(${JSON.stringify(cellSel(date))});
+      if (!b) return null;
+      const s = getComputedStyle(b);
+      return { text: b.textContent.trim(), opacity: s.opacity, color: s.color,
+               background: s.backgroundColor };
+    })()`);
+    const resolved = (cssValue) => ev(`(() => {
+      const d = document.createElement('div');
+      d.style.color = ${JSON.stringify(cssValue)};
+      document.body.append(d);
+      const c = getComputedStyle(d).color;
+      d.remove();
+      return c;
+    })()`);
+    const gymColor = await resolved(gym.color);
+    const emptyColor = await resolved('var(--grid-empty)');
+
+    const visible = await ev(`[...document.querySelectorAll(
+      '.habit-row[data-habit-id="${gym.id}"] .check[data-date]')].map(el => el.dataset.date)`);
+    const classified = visible.map((date) => (
+      { date, dow: new Date(`${date}T12:00:00`).getDay() }));
+    const loggedDow = new Set([1, 3, 5]); // Mon/Wed/Fri — fixtures.mjs's Gym schedule
+    const logged = classified.filter((d) => loggedDow.has(d.dow));
+    const unlogged = classified.filter((d) => !loggedDow.has(d.dow));
+    ck('the visible dashboard row holds both logged and unlogged Gym days to compare',
+       logged.length >= 1 && unlogged.length >= 1,
+       `logged=${logged.length} unlogged=${unlogged.length} (visible=${JSON.stringify(visible)})`);
+
+    const unloggedInRun = unlogged[0]?.date;
+    const loggedDay = logged[0]?.date;
+
+    if (unloggedInRun) {
+      const ghost = await cellStyle(unloggedInRun);
+      ck('an unlogged in-run day on the DASHBOARD grid reads the faint tick, not a blank cell',
+         ghost?.text === '✓', JSON.stringify(ghost));
+      ck('...at ghost opacity (0.45)',
+         Math.abs(parseFloat(ghost?.opacity ?? '0') - 0.45) < 0.01, JSON.stringify(ghost));
+      ck("...in the habit's own colour", ghost?.color === gymColor,
+         `${ghost?.color} vs ${gymColor}`);
+      ck('...but its background is still the empty cell, not a filled one',
+         ghost?.background === emptyColor, `${ghost?.background} vs ${emptyColor}`);
+
+      if (loggedDay) {
+        const filled = await cellStyle(loggedDay);
+        ck('a logged Mon/Wed/Fri cell in the same row is a solid tick',
+           filled?.text === '✓', JSON.stringify(filled));
+        ck('...compared to the GHOST cell, not to a constant',
+           filled?.background === gymColor && filled?.background !== ghost?.background,
+           `filled=${filled?.background} ghost=${ghost?.background} habit=${gymColor}`);
+      }
+
+      // `questionMarks` restored afterward — a suite that leaks a setting
+      // poisons the next one run against the same instance.
+      await ev(`fetch('/api/settings', { method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ questionMarks: true }) })`);
+      await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+        reload: () => send('Page.navigate',{url:APP},sessionId),
+        what: 'the dashboard, with questionMarks on',
+      });
+      await sleep(600);
+      const withMarks = await cellStyle(unloggedInRun);
+      ck('with questionMarks on, that same in-run day still reads the tick, not ?',
+         withMarks?.text === '✓', JSON.stringify(withMarks));
+      await ev(`fetch('/api/settings', { method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ questionMarks: false }) })`);
+    }
   }
 
   console.log(fails===0?'\nALL GRID CHECKS PASSED':`\n${fails} FAILED`);

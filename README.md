@@ -191,7 +191,8 @@ days**, each in its own vocabulary. The days inside a run that you never
 logged, including a day you logged as a miss, are outlined in the habit's
 colour on the heatmap; **Recent days** is a row of checkboxes, so there it is
 a faint checkmark instead, the same faint mark a kept-unlogged day already
-draws there. The dashboard's own day squares do not do this yet.
+draws there. The dashboard's own day squares now read the run too, from the
+same faint mark; the Android grid and home-screen widget do not yet.
 
 Every chart with a time axis pages through history rather than cramming years
 into one screen, and the number of columns follows the width you have.
