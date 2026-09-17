@@ -888,9 +888,17 @@ services:
 
       # This process's OWN pool, interpolated from a separate knob
       # (NOTIFIER_PG_POOL_MAX) rather than PG_POOL_MAX: it competes with no
-      # request traffic, so 2-3 is plenty, where the app's 10 is sized against
+      # request traffic, so 3 is plenty, where the app's 10 is sized against
       # /healthz's memo.
-      PG_POOL_MAX: ${NOTIFIER_PG_POOL_MAX:-}
+      #
+      # The `:-3` is the one interpolation here that supplies a value rather
+      # than an empty string, and it has to: `db/pool.js` reads
+      # `Number(PG_POOL_MAX) || 10`, so an empty string lands on the APP's
+      # default and the notifier would ship with 10. An operator budgeting
+      # `max x replicas` under the server's max_connections (server.js) reads
+      # that budget off this file, so the figure here has to be the figure the
+      # container gets.
+      PG_POOL_MAX: ${NOTIFIER_PG_POOL_MAX:-3}
       PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}
       PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}
       PGSSL: ${PGSSL:-}
@@ -1524,9 +1532,17 @@ services:
 
       # This process's OWN pool, interpolated from a separate knob
       # (NOTIFIER_PG_POOL_MAX) rather than PG_POOL_MAX: it competes with no
-      # request traffic, so 2-3 is plenty, where the app's 10 is sized against
+      # request traffic, so 3 is plenty, where the app's 10 is sized against
       # /healthz's memo.
-      PG_POOL_MAX: ${NOTIFIER_PG_POOL_MAX:-}
+      #
+      # The `:-3` is the one interpolation here that supplies a value rather
+      # than an empty string, and it has to: `db/pool.js` reads
+      # `Number(PG_POOL_MAX) || 10`, so an empty string lands on the APP's
+      # default and the notifier would ship with 10. An operator budgeting
+      # `max x replicas` under the server's max_connections (server.js) reads
+      # that budget off this file, so the figure here has to be the figure the
+      # container gets.
+      PG_POOL_MAX: ${NOTIFIER_PG_POOL_MAX:-3}
       PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}
       PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}
       PGSSL: ${PGSSL:-}

@@ -55,9 +55,21 @@ nothing since they were written. Both halves individually looked right.
 `ENV_TEMPLATES` in `shared/test/compose.test.js` runs both ways: every `${NAME}`
 in a stack's compose files must be offered by its template, and nothing in a
 template may go uninterpolated. A commented `#LOG_LEVEL=info` counts as offered —
-the tuning block ships that way and uncommenting is the intended path. Everything
-named is `${NAME:-}`, and empty is safe for every one, since each reader is
-`Number(x) || default` or an equality test.
+the tuning block ships that way and uncommenting is the intended path. Almost
+everything named is `${NAME:-}`, and empty is safe for those, since each reader
+is `Number(x) || default` or an equality test.
+
+**The notifier's `PG_POOL_MAX: ${NOTIFIER_PG_POOL_MAX:-3}` is the one exception,
+and the reason it has to be one is worth keeping.** Two processes read the same
+variable name out of the same `db/pool.js`, whose reader is
+`Number(PG_POOL_MAX) || 10` — so an empty string does not mean "the notifier's
+own default", it means the APP's. Left as `${NOTIFIER_PG_POOL_MAX:-}` the
+notifier shipped with a pool of 10 while the tuning block documented 3 under a
+*Defaults shown* header, and an operator keeping `max × replicas` under the
+server's `max_connections` (the budget `server.js` states and nothing else
+does) budgeted seven connections short. A default that is documented in the env
+template and supplied by the code can disagree silently; one supplied by the
+compose file cannot.
 
 **Templates ship the limits at their CODE defaults**, so repairing the inertness
 does not silently change what a running instance enforces —
