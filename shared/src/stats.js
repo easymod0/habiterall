@@ -1706,10 +1706,9 @@ function resolveWindow(entries, start, end, creditFrom = undefined) {
  * So a new opt-out fails that test by name until it is either declined at
  * `/awards` or written down as one an award needs. The version that named
  * `history`/`weekdayByMonth`/`frequency` as literals could not have seen a
- * fourth, which mattered immediately: #160 adds `trend` and `regularity`
- * here, neither of them read by `computeAwards`, and it conflicts with this
- * PR on this exact destructuring — so the merge is a hand edit either way,
- * and the only question was whether getting it wrong was silent.
+ * fourth, and a fourth was already being written on another branch — so the
+ * question was never whether one would arrive, only whether arriving wrongly
+ * would be silent.
  *
  * **One constraint that falls out of that, and it is on the code rather than
  * on the test: an opt-out's default must be the literal `true`.** The reader
