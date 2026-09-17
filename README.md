@@ -936,6 +936,25 @@ services:
     # exiting when it has nothing to do, and this policy is the ordinary one.
     restart: unless-stopped
     stop_grace_period: 10s
+    # OFF, and not because a health probe is unwanted — because the one baked
+    # into the image is unanswerable here. It is
+    # `fetch('http://127.0.0.1:3000/healthz')`, which is right for `app` and a
+    # question this process cannot answer: it listens on NOTHING by design
+    # (see habiterall-cloud/src/notifier-entry.js, and the suite that asserts a
+    # connect to that port is refused). Inherited unchanged, the probe fails
+    # every 30s for ever and Docker reports a container that is ticking,
+    # delivering and draining correctly as `unhealthy` — which `docker ps`
+    # shows, `up -d --wait` blocks on, and a restart-on-unhealthy sidecar acts
+    # on. `command:` overrides the image's CMD; nothing overrides its
+    # HEALTHCHECK, so it has to be turned off here.
+    #
+    # A real one would have to ask "has a tick completed recently?", which
+    # needs a heartbeat this process does not yet write anywhere a probe can
+    # read. Until it does, no answer is better than an answer that is always
+    # wrong. The startup line and `notify.tick` in the log are what tell an
+    # operator this process is alive.
+    healthcheck:
+      disable: true
 
 volumes:
   db-data:
@@ -1589,6 +1608,25 @@ services:
     # exiting when it has nothing to do, and this policy is the ordinary one.
     restart: unless-stopped
     stop_grace_period: 10s
+    # OFF, and not because a health probe is unwanted — because the one baked
+    # into the image is unanswerable here. It is
+    # `fetch('http://127.0.0.1:3000/healthz')`, which is right for `app` and a
+    # question this process cannot answer: it listens on NOTHING by design
+    # (see habiterall-cloud/src/notifier-entry.js, and the suite that asserts a
+    # connect to that port is refused). Inherited unchanged, the probe fails
+    # every 30s for ever and Docker reports a container that is ticking,
+    # delivering and draining correctly as `unhealthy` — which `docker ps`
+    # shows, `up -d --wait` blocks on, and a restart-on-unhealthy sidecar acts
+    # on. `command:` overrides the image's CMD; nothing overrides its
+    # HEALTHCHECK, so it has to be turned off here.
+    #
+    # A real one would have to ask "has a tick completed recently?", which
+    # needs a heartbeat this process does not yet write anywhere a probe can
+    # read. Until it does, no answer is better than an answer that is always
+    # wrong. The startup line and `notify.tick` in the log are what tell an
+    # operator this process is alive.
+    healthcheck:
+      disable: true
 
 volumes:
   db-data:
