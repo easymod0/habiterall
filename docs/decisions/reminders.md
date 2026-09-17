@@ -214,11 +214,21 @@ deploy has a window with two gateways open — both able to answer the same
 three-second button press, with Discord showing "This interaction failed" on
 whichever one it did not credit. `strategy: { type: Recreate }` is the fix,
 and it is one line nobody writes unless they already know a rolling update can
-double a singleton. The compose equivalent is smaller but the same shape:
-`restart: on-failure`, never `unless-stopped` — with `HABITERALL_NOTIFY=off`
-and no backup directory configured this container has nothing to run and its
-entry point correctly exits 0, and `unless-stopped` would restart an exit-0
-process forever.
+double a singleton. **There is no compose equivalent, and reaching for one is
+how this went wrong the first time.** The draft paired `restart: on-failure`
+with a nothing-to-run case that exited 0, presenting it as the same singleton
+idea one layer down. It is not: the restart policy answers "should the daemon
+bring this back", and the singleton rule answers "may two of these run at
+once" — different questions, and the first one has an answer that made the
+second irrelevant. A host reboot or a `systemctl restart docker` SIGTERMs
+every container; this one drains and exits 0; the daemon returns, restores the
+`unless-stopped` services and leaves the `on-failure` one down, because 0 is
+not a failure. The deployment keeps its dashboards and silently loses every
+reminder and the nightly dump, with a correct, clean `shutdown.early` as the
+last thing in its log. So the shipped policy is `restart: unless-stopped`, the
+same as `app`, and the entry point **parks** rather than exiting when it has
+nothing to run — an idle container is the cheaper half of that trade by a
+wide margin.
 
 **The split has a cost, and it is stated rather than hidden: `GET
 /api/backup/status` is answered by the app, not the notifier.** The dump now
@@ -272,8 +282,10 @@ defaults (`HABITERALL_NOTIFY_INTERVAL_MS` unset, so a 60 s tick):
 | ~40-45 s | **exited, code 0, no signal, no log line** |
 | 60 s | the second tick was due here, and never came |
 
-`restart: on-failure` — correctly chosen, for the reason above — does not
-restart an exit 0. So the shipped arrangement was a notifier container that
+`restart: on-failure`, which the draft carried at the time, does not restart an
+exit 0 — and note this measurement is what put the policy itself under review
+one section up, where it became `unless-stopped`. So the draft arrangement was
+a notifier container that
 went quiet under a minute after every boot, took the nightly backup with it,
 and said nothing in any log about why. Against an *unreachable* database it
 dies in about a second, which is what made it catchable in a suite that needs

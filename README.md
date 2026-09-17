@@ -2431,10 +2431,16 @@ gateways open, and Discord shows "This interaction failed" on the press the
 other one actually handled. `SESSION_SECRET` on `notifier` must be the **same
 value** the app has — this process signs the codes on ntfy's reminder buttons
 and the app's route verifies them, so a mismatch fails every ntfy button,
-silently. Its `restart: on-failure` (not `unless-stopped`) is deliberate too:
-with `HABITERALL_NOTIFY=off` and no backup directory configured, this
-container has nothing to run and its entry point exits 0 having said so, and
-`unless-stopped` would restart that forever. Personal has no equivalent
+silently. Its `restart: unless-stopped` is the same policy `app` gets, and that
+is deliberate: with `HABITERALL_NOTIFY=off` and no backup directory configured
+this container has nothing to run, so it says so and then **parks** rather than
+exiting. An earlier version exited 0 there and paired it with
+`restart: on-failure`; what that missed is the case that actually happens — a
+host reboot or a `systemctl restart docker` SIGTERMs every container, this one
+drains and exits 0, and when the daemon returns it restarts the
+`unless-stopped` services and leaves the `on-failure` one down, because 0 is
+not a failure. The site comes back, every account's settings still say
+reminders are on, and none is ever delivered again. Personal has no equivalent
 container — one process, one user, no replicas to protect it from — so its
 tick stays exactly where it always was, inside `npm run start:personal`.
 

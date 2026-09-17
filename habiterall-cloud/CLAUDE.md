@@ -658,11 +658,17 @@ Run **exactly one** `notifier`, ever — never `--scale` it. On Kubernetes,
 the new pod before terminating the old one, so an ordinary deploy still has a
 window with two gateways open, each able to answer the same button press —
 Discord shows "This interaction failed" on the one it does not credit.
-`strategy: { type: Recreate }` is the fix. `restart: on-failure`, not
-`unless-stopped`, is the compose-level version of the same "singleton" idea:
-with `HABITERALL_NOTIFY=off` and no backup directory configured this
-container has nothing to run and its entry point correctly exits 0, which
-`unless-stopped` would restart forever. `SESSION_SECRET` on `notifier` must be
+`strategy: { type: Recreate }` is the fix. **The compose-level policy is
+`restart: unless-stopped`, the same as `app`, and that is NOT the singleton
+idea restated** — it was `on-failure` in a first draft, on the reasoning that
+the nothing-to-run case (`HABITERALL_NOTIFY=off` with no backup directory)
+should exit 0 and stay down. What that missed is the case that happens: a host
+reboot SIGTERMs every container, this one drains and exits 0, and the daemon
+then restores the `unless-stopped` services and leaves the `on-failure` one
+down, because 0 is not a failure — reminders and the nightly dump gone for
+good, with a clean `shutdown.early` as the last line in the log. So nothing in
+`notifier-entry.js` may exit on its own: it PARKS when it has nothing to run,
+and the policy is the ordinary one. `SESSION_SECRET` on `notifier` must be
 the SAME value `app` has — `signAnswer` (`notifier.js:556`) signs every ntfy
 answer code with it, and the app's own route verifies with its own copy — and
 one cost is stated rather than hidden: `GET /api/backup/status` is answered by
