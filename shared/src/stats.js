@@ -1965,13 +1965,13 @@ function resolveWindow(entries, start, end, creditFrom = undefined) {
  * degrades to withholding the badge, which is the right answer for a caller
  * that did not ask for the figure.
  *
- * **`trend` and `regularity` are declinable with no decliner on this branch,
- * and that is deliberate rather than dead code.** `computeAwards` reads
- * neither, and the one caller here is the detail view's own route, which
- * reads both — so nothing on this branch declines either. The caller they are
- * shaped for is an account-level one that walks EVERY habit (`GET /awards`,
- * #140): the opt-out is cheap while the passes are being written and dear to
- * retrofit onto a route already paying for them per habit.
+ * **`trend` and `regularity` are declinable although the detail view declines
+ * neither, and that is deliberate rather than dead code.** `computeAwards`
+ * reads neither field; `/habits/:id/stats` reads both and so declines
+ * neither. The caller the opt-out is shaped for is an account-level one that
+ * walks EVERY habit (`GET /awards`, #140): it is cheap to add while the
+ * passes are being written and dear to retrofit onto a route already paying
+ * for them per habit.
  *
  * **What the opt-out is FOR is which fields a caller is answerable for, not
  * what each one costs — and `trend` is the reason to say so.** See
