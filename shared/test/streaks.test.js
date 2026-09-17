@@ -402,6 +402,35 @@ test('#340 review: summaryStats withholding birth is a stated contract, not a bu
     'exactly as creditFrom already documents — this is the pre-#340 number');
 });
 
+// ...and the other half of that contract, which the sentence above only names:
+// an explicit `null` is NOT a withheld one. `summaryStats` folded the two with
+// `??` for two review rounds — the exact collapse its own JSDoc, and
+// `onPaceSeries`'s, warn against — so a caller that obeyed the documented
+// contract got the lenient branch it was explicitly declining. Unreachable
+// through either route today (a `null` there means the habit has no rows at
+// all, and then the slice is empty and the derived birth is independently
+// `null`), which is why only a test at this boundary can hold it.
+test('#340: summaryStats treats an explicit birth of null as a stated answer, ' +
+     'never as an absent one', () => {
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const start = '2026-01-05', end = '2026-04-05'; // Monday .. Sunday, 91 days
+  const entries = [];
+  for (const d of dateRange(start, end)) {
+    const dow = new Date(d + 'T12:00:00').getDay(); // Sat=6, Sun=0, Mon=1
+    if (dow === 6 || dow === 0 || dow === 1) entries.push({ date: d, value: YES });
+  }
+
+  // Absent: "no override — treat the range as opening at the habit's birth."
+  assert.equal(summaryStats(habit, entries, { end }).currentStreak, 91);
+  // Explicit null: "`MIN(date)` returned no row at all" — a stated answer, so
+  // the strict branch, exactly as a real date that differs from `dates[0]`.
+  assert.equal(summaryStats(habit, entries, { end, birth: null }).currentStreak, 85,
+    'an explicit null must not fall back to the derived birth — `??` here ' +
+    'hands back the leniency the caller just declined');
+  assert.equal(summaryStats(habit, entries, { end, birth: '2025-01-01' }).currentStreak, 85,
+    'and it must land on the same branch a real, non-matching birth does');
+});
+
 // The other half: a habit whose range genuinely DOES open at its own birth
 // must be entirely unaffected by this review round — reuses the Sat+Sun+Mon
 // fixture from #340's own fix above, but passes `birth` explicitly (equal to

@@ -2637,6 +2637,51 @@ test('a member that has never missed is excluded from recoveryRate, and counted'
   assert.equal(result.categories[1].recoveryExcluded, 1);
 });
 
+test('#340: a member\'s recovery axis gets the member\'s LIFETIME birth, so a ' +
+     'comparison window\'s own edge is not mistaken for it', () => {
+  // The third `birth` call site (`computeCategoryStats`'s `memberBirth`), and
+  // the one #340's own review rounds left unpinned: both routes' mutation
+  // checks covered `summaryStats` and `recomputeBestStreak`, and dropping this
+  // wiring outright — `const memberBirth = undefined` — left all 1224 shared
+  // tests passing. A later edit could have deleted it in silence.
+  //
+  // `dates` here is the COMPARISON axis, a window this route was ASKED for, so
+  // `dates[0]` is `start` and has nothing to do with when the member began.
+  // Without the lifetime `birth` the leniency fires at that edge as if the
+  // member were newborn there, which is round 1's defect on a third surface.
+  //
+  // The member is 3x/7, alive since a year before the window, and kept
+  // LATE-CLUSTERED in each 7-day cycle — never Mon/Wed/Fri, the one layout that
+  // clears the unfloored ratio at every step and so cannot tell the two
+  // treatments apart (the same blindness `streaks.test.js` names).
+  const lifetime = '2025-06-01';
+  const clustered = { ...boolHabit, id: 17, name: 'Row', category_id: 1,
+    freq_numerator: 3, freq_denominator: 7 };
+  const entries = [{ date: lifetime, value: YES, status: '' }];
+  for (const d of dateRange('2026-04-01', CAT_END)) {
+    entries.push({ date: d, value: daysBetween('2026-04-01', d) % 7 >= 4 ? YES : 0,
+      status: '' });
+  }
+
+  const health = computeCategoryStats(CATS,
+    [{ habit: clustered, entries, firstEntry: lifetime }], CAT_WINDOW).categories[0];
+
+  // Measured both ways. WIRED: the window's opening days are judged by the
+  // plain unfloored ratio — a slice edge, not a birth — so the member carries
+  // a closed lapse there and is IN the rate, at 0 (it never recovered inside
+  // the window). UNWIRED: the leniency bridges that edge, the lapse never
+  // forms, and the member is excluded as "has never missed" — `null` beside a
+  // `recoveryExcluded` of 1. Those are two different sentences on the
+  // categories comparison, not two roundings of one number, which is why this
+  // is worth a case of its own.
+  assert.equal(health.recoveryRate, 0,
+    'the member is IN the rate: its lapse at the window edge is real, because ' +
+    'the days the trailing window reaches back into genuinely happened');
+  assert.equal(health.recoveryExcluded, 0,
+    'dropping memberBirth excludes this member as never-missed (null / 1) — ' +
+    'the #340 leniency firing at a comparison edge that is not a birth');
+});
+
 test('a category of one is its own best and worst member', () => {
   const result = computeCategoryStats(CATS, [
     { habit: readHabit, entries: readRows },

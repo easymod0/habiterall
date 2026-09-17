@@ -2365,7 +2365,22 @@ export function summaryStats(habit, entries,
                                lastMiss = false } = {}) {
   const { entryMap, from, creditFrom, birth: derivedBirth } =
     resolveWindow(entries, start, end, creditGiven);
-  const birth = birthGiven ?? derivedBirth;
+  // **`!== undefined` and NOT `??`, which is the opposite of the line
+  // `resolveWindow` uses for `creditFrom` one screen up — and the difference is
+  // the whole contract this parameter has.** There, a nullish `creditFrom`
+  // falls back to a derived one because `null` and `undefined` mean the same
+  // thing for that date and the derived value is merely narrower. Here they
+  // mean OPPOSITE things: `undefined` is "no override, treat the range as
+  // opening at the habit's birth" (lenient) while an explicit `null` is both
+  // routes' spelling for "`MIN(date)` returned no row at all" (strict), which
+  // is a stated answer and not an absent one. `??` collapsed the two for two
+  // review rounds, so a caller obeying the documented contract got the lenient
+  // branch it was explicitly declining — the same fold this function's own
+  // JSDoc, and `onPaceSeries`'s, exist to warn against. Not reachable through
+  // either route today (a `null` there means the habit has no rows, and then
+  // the slice is empty and `derivedBirth` is independently `null`), which is
+  // why only a test at this boundary can hold it.
+  const birth = birthGiven !== undefined ? birthGiven : derivedBirth;
 
   // Same one-walk, one-series sharing as `computeStats` — see the comment
   // there for why threading rather than a memo, and why the private `*Over`

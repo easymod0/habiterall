@@ -489,7 +489,10 @@ habit's own BIRTH** —
 `required = max(1, floor(min(activeDays, num*activeDays/den)))` — so a habit is
 not judged against history it does not have yet. It FLOORS rather than rounds
 up: `>=` against the raw ratio silently demanded the next whole day, which made
-a pro-rated window ask MORE than the habit's own rate. The leniency fires only
+a pro-rated window ask MORE than the habit's own rate. **The FLOOR itself is
+unconditional** — a FILLED window is floored wherever it is read from, birth or
+no birth, which is what fixes the skip case further down — and only the
+PARTIAL-window leniency is gated. The leniency fires only
 while the range being walked opens at the habit's own LIFETIME first row
 (`birth`); once it opens somewhere else — a bounded slice (`/overview`'s
 400-day window, `recomputeBestStreak`'s 1830-day one, a narrowed `?start=`) —
@@ -568,13 +571,17 @@ the window, the streak called three days a lapse while the score kept
 climbing across them — measured, not hypothetical: 0.466383 on the last day
 both agreed on, then rising through 0.507831, 0.522427 and 0.550135 on the
 three days they disagreed about. `docs/decisions/on-pace-and-frequency.md`
-(#340) closes it by flooring the requirement instead of rounding it up. That
-leniency is birth-gated: it applies only where the range being walked opens at
-the habit's own LIFETIME first row, because a bounded caller's range often
-opens somewhere else and the days before THAT edge already happened — a
-review round found the dashboard and the detail view disagreeing about one
-habit's streak for exactly this reason (`docs/decisions/
-on-pace-and-frequency.md`, review round 1).
+(#340) closes it by flooring the requirement instead of rounding it up. **The
+FLOOR is not birth-gated and the UNFILLED-WINDOW leniency is** — say it that
+way round, because the paragraph above is itself a full-window case and an
+earlier draft of this sentence gated both. A window that has FILLED
+(`windowDays === den`) is floored wherever it is read from, which is what fixes
+the two skip days above; skips pull `activeDays` below `den`, so the floor is
+no no-op there. Only a still-PARTIAL window is gated, and it is gated because a
+bounded caller's range often opens somewhere the habit was already alive and
+the days before THAT edge already happened — a review round found the dashboard
+and the detail view disagreeing about one habit's streak for exactly this
+reason (`docs/decisions/on-pace-and-frequency.md`, review rounds 1 and 3).
 
 Consequences worth knowing. A streak counts CALENDAR days, so a 3×/week habit
 kept for a month is a 30-day streak rather than a 12-day one — that is what
