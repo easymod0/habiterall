@@ -36,7 +36,6 @@
          yesterday. One sentence covers both: the day's own reminder is
          untouched either way. -->
     <string name="snooze_too_late">Too late to snooze that day</string>
-    <string name="invalid_amount">Enter a number of zero or more</string>
 
     <!-- The home-screen widget. -->
     <string name="widget_description">One habit, today. Tap to record it.</string>

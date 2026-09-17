@@ -35,7 +35,7 @@ test('a comma is a decimal point, as it is on the phone', () => {
   // `inputmode="decimal"` shows whatever separator the keyboard's locale uses,
   // which across most of Europe is a comma. `<input type="number">` silently
   // DROPPED it — measured: typing "8,5" left "85" in the box — so eight and a
-  // half was recorded as eighty-five. HabitFormScreen.parseAmount on Android
+  // half was recorded as eighty-five. Amount.kt's parseAmount on Android
   // has the same rule for the same reason.
   assert.equal(parseAmount('8,5'), 8.5);
   assert.equal(parseAmount('0,25'), 0.25);
@@ -472,7 +472,7 @@ test('the advice is the phone\'s advice, read from the phone', () => {
   // agree is exactly the thing that goes stale.
   const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
   const kotlin = readFileSync(join(root, 'android-native', 'app', 'src', 'main',
-    'java', 'com', 'habiterall', 'app', 'ui', 'HabitFormScreen.kt'), 'utf8');
+    'java', 'com', 'habiterall', 'app', 'ui', 'Amount.kt'), 'utf8');
 
   const advice = /"(Type it without the thousands separator[^"]*)"/.exec(kotlin);
   assert.ok(advice, 'the Kotlin complaint has moved or been reworded');

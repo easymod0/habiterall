@@ -2072,6 +2072,49 @@ test('the 0999-12-31 and 2016-07-9999 fixtures are pinned to literals, not only 
     ...dailyRun], opts), { score: 0.381137, currentStreak: 9 });
 });
 
+test('neither window anchor survives a date-bounded slice of a habit\'s entries', () => {
+  // This is not a property of `computeStats` anybody wants — it is the reason
+  // `GET /awards` (#140) reads every entry row with no date predicate, which
+  // makes it the one bulk `ANY(...)` read in cloud's api.js without one. That
+  // looks like an omission, so the route carries a long comment saying it is
+  // not; this is what stops the comment going stale in silence, since a reader
+  // who bounds the query gets a green suite and two wrong figures.
+  //
+  // The tempting bound is `AND date >= end - MAX_RANGE_DAYS`, on the grounds
+  // that `windowStart` clamps there anyway. It does not follow: the clamp fires
+  // only when the anchor is EARLIER than the cutoff, so once the query has
+  // removed every row before it the clamp is a no-op and `from` lands on
+  // whatever real row is earliest among the survivors.
+  const end = '2026-06-30';
+  const cutoff = addDays(end, -MAX_RANGE_DAYS);
+  // One row well before the cutoff, then a long gap, then a short live tail.
+  // The gap is the whole fixture: with it, the two readings disagree about
+  // where the window opens by the width of the gap. A habit whose rows are
+  // contiguous cannot show this and would pass either way.
+  const ancient = addDays(cutoff, -500);
+  const resume = addDays(end, -39);
+  const rows = [{ date: ancient, value: YES, status: '' },
+    ...dateRange(resume, end).map((date) => ({ date, value: YES, status: '' }))];
+
+  const full = computeStats(boolHabit, rows, { end });
+  const sliced = computeStats(boolHabit, rows.filter((r) => r.date >= cutoff), { end });
+
+  // Literals, not a comparison of the two against each other: `notEqual` alone
+  // passes for a fixture where both readings are garbage, and the point is
+  // which specific figures move and by how much.
+  assert.equal(full.coverage.length, 120);
+  assert.equal(sliced.coverage.length, 1);
+
+  // The sharper half, and the reason this is a correctness question rather
+  // than a cosmetic one. `null` and `0` are deliberately different claims for
+  // a recovery rate — `shared/CLAUDE.md`: "a rate of `null` means 'nothing has
+  // ever been missed', which is a different claim from 100% and must not
+  // render as a number" — so the bound turns "recovered from none of your
+  // lapses" into "never lapsed".
+  assert.equal(full.resilience.recovery.rate, 0);
+  assert.equal(sliced.resilience.recovery.rate, null);
+});
+
 test('the current-vs-best-streak fixture is pinned to a literal, not only to computeStats', () => {
   // Parity alone cannot see this bug: `bestStreak(streaks)` and
   // `currentStreak(streaks, end)` are both derived from the same `streaks`

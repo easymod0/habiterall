@@ -1946,63 +1946,91 @@ function resolveWindow(entries, start, end, creditFrom = undefined) {
 /**
  * Every figure the detail view draws, over one window.
  *
- * **`coverage` was the first field a caller could decline; `trend` and
- * `regularity` are the same opt-out, in the same shape, added by this change.**
- * The rule behind all three is the one that keeps `computeAwards` out of here.
- * Awards are computed at `/habits/:id/stats`, because that route is the only
- * caller of this function on this branch — `/overview` reads `score` and
- * `currentStreak` off `summaryStats` instead, so the five passes only the
- * detail view reads are no longer run per habit on the dashboard's hot path
- * just to be thrown away. Coverage is the first field to make that cost
- * visible rather than free: it is its own pass over the window, measured at
- * ~10% of a call, where every other field here is either a pass the summary
- * figures already need (`scores`, `streaks`) or a cheap read of one. The
- * parameter is kept as the opt-out for a caller that wants this whole reading
- * without its dearest optional pass — `/overview` no longer is one, but
- * declining it still means the key is ABSENT rather than empty, since an empty
- * array would say "no month is fully answered", which is a claim, and this is
- * the absence of one. `computeAwards` reads `stats.coverage ?? []` and so
- * degrades to withholding the badge, which is the right answer for a caller
- * that did not ask for the figure.
+ * **`coverage` was the first field a caller could decline; `history`,
+ * `weekdayByMonth`, `frequency`, `trend` and `regularity` are the same
+ * opt-out, in the same shape, added as the passes and the callers arrived.**
+ * Awards are computed at `/habits/:id/stats` and at `GET /awards` (#140),
+ * both from this function, and `computeAwards` reads only
+ * `stats.bestStreak`, `.score`, `.scores`, `.resilience`, `.weekdays`,
+ * `.streaks` and `.coverage` — none of the other five.
+ * `/habits/:id/stats` is the detail view's whole reading and declines nothing
+ * here; `/awards` walks EVERY habit on the account, so every pass it does not
+ * read was being built and discarded once per habit, on every call.
  *
- * **`trend` and `regularity` are declinable although the detail view declines
- * neither, and that is deliberate rather than dead code.** `computeAwards`
- * reads neither field; `/habits/:id/stats` reads both and so declines
- * neither. The caller the opt-out is shaped for is an account-level one that
- * walks EVERY habit (`GET /awards`, #140): it is cheap to add while the
- * passes are being written and dear to retrofit onto a route already paying
- * for them per habit.
+ * **What that is worth differs per pass, and the opt-out is not really about
+ * the milliseconds.** `history`, `weekdayByMonth` and `frequency` are the
+ * expensive three — measured at 66% of a habit's cost (of 6.82ms: history
+ * 0.84ms, weekdayByMonth 2.96ms, frequency 0.70ms), which at
+ * `MAX_HABITS_PER_USER` (200) is a worst-case 1298ms synchronous block on
+ * cloud's shared, multi-tenant event loop. `coverage` is its own pass at
+ * ~10% of a call. `regularityOver` is a second walk over `dates` calling
+ * `isCompleted` per day, ~2% of an awards-shaped call over an 1830-day
+ * window. And `trendOver` is not a walk at all: it reads the `scores`,
+ * `alpha` and `steps` that `scoresOver` has already computed
+ * unconditionally, and scans backward at most `TREND_LOOKBACK_DAYS` (30) for
+ * one date, so its cost does not grow with the window and declining it saves
+ * next to nothing. It takes the opt-out because no award reads it and NOT
+ * because it is a pass worth skipping — the question the opt-out answers is
+ * which FIELDS a caller is answerable for. Do not cite `trend` as a pass
+ * worth declining.
  *
- * **What the opt-out is FOR is which fields a caller is answerable for, not
- * what each one costs — and `trend` is the reason to say so.** See
- * `regularityOver`: a second walk over `dates` calling `isCompleted` per day,
- * measured at ~2% of an awards-shaped call over an 1830-day window, "the
- * point is not the milliseconds". `trendOver` is weaker still, and differently
- * so — it is not a walk at all. It reads the `scores`, `alpha` and `steps`
- * that `scoresOver` has already computed unconditionally, and scans backward
- * at most `TREND_LOOKBACK_DAYS` (30) for one date, so its cost does not grow
- * with the window and declining it saves next to nothing. It takes the opt-out
- * for consistency with the field beside it and because no award reads it, and
- * NOT because it is a pass worth skipping. Do not cite it as one.
+ * `/overview` reads `score` and `currentStreak` off `summaryStats` instead,
+ * so it never called this function to begin with and declines nothing here.
  *
- * A test pins each edition's one remaining call site here — `/stats`, the one
- * that still needs `granularity` — and its one `summaryStats` call site at
- * `/overview`, because a third route added later must not quietly pay for
+ * Each opt-out defaults to `true` and is SPREAD onto the return, so declining
+ * one means the key is ABSENT rather than empty: an empty array would be a
+ * CLAIM ("no month is fully answered", "no history bucket exists"), and this
+ * is the absence of one. `computeAwards` reads `stats.coverage ?? []` and so
+ * degrades to withholding the badge; a caller reading any of the other five
+ * directly has none to read once it declined them, which is why
+ * `/habits/:id/stats` — the one caller a browser reads them off of —
+ * declines nothing.
+ *
+ * A test pins each edition's two call sites here — `/stats`, which carries
+ * `granularity` and takes every pass, and `/awards`, which declines every
+ * opt-out no award reads — and the one `summaryStats` call site at
+ * `/overview`, because a third shape added later must not quietly pay for
  * passes it discards either way.
+ *
+ * **Adding an opt-out to the destructuring below is therefore a change to
+ * `/awards` as well, and the guard is what says so.** It does not name
+ * today's opt-outs: `statsOptOuts` (`shared/test/awards.test.js`) reads them
+ * off this signature and requires `/awards` to decline each one that is not
+ * in `READ_BY_AWARDS` — a map carrying, per pass, the award that reads it.
+ * So a new opt-out fails that test by name until it is either declined at
+ * `/awards` or written down as one an award needs. The version that named
+ * `history`/`weekdayByMonth`/`frequency` as literals could not have seen a
+ * fourth, and a fourth was already being written on another branch — so the
+ * question was never whether one would arrive, only whether arriving wrongly
+ * would be silent.
+ *
+ * **One constraint that falls out of that, and it is on the code rather than
+ * on the test: an opt-out's default must be the literal `true`.** The reader
+ * classifies EVERY option here — an opt-out defaults to `true`, everything
+ * else is named in its `NOT_OPT_OUTS` map with what it is instead — and an
+ * option in neither fails by name. That is deliberate and was not free: the
+ * first version of it matched `= true` and returned what it found, so a pass
+ * spelled `trend = TREND_DEFAULT`, the way `unlogged = UNLOGGED_DEFAULT` is
+ * spelled three lines below this comment, was not a recognised opt-out but an
+ * INVISIBLE one — `/awards` paying for it per habit, per request, with the
+ * guard green. A review round found that by mutation rather than by reading.
+ * Spell the default `true`, or the test will tell you to.
  *
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
  * @param {{start?: string, end?: string, granularity?: string,
  *           weekStart?: 'monday'|'sunday', unlogged?: string,
- *           coverage?: boolean, trend?: boolean, regularity?: boolean}} [opts]
+ *           coverage?: boolean, history?: boolean, weekdayByMonth?: boolean,
+ *           frequency?: boolean, trend?: boolean, regularity?: boolean}} [opts]
  * @returns {import('./types.js').Stats}
  */
 export function computeStats(habit, entries,
                              { start, end, granularity = 'day',
                                weekStart = 'monday',
                                unlogged = UNLOGGED_DEFAULT,
-                               coverage = true, trend = true,
-                               regularity = true } = {}) {
+                               coverage = true, history = true,
+                               weekdayByMonth = true, frequency = true,
+                               trend = true, regularity = true } = {}) {
   const { entryMap, from, creditFrom } = resolveWindow(entries, start, end);
 
   // One walk shared by every pass below (#219), where master built it once
@@ -2081,10 +2109,22 @@ export function computeStats(habit, entries,
     currentStreak: currentStreak(streaks, end),
     bestStreak: bestStreak(streaks),
     totalCompleted,
-    history: historyOver(habit, entryMap, dates, granularity, weekStart, unlogged, creditFrom),
+    // `history`, `weekdayByMonth` and `frequency` are spread rather than
+    // assigned, same as `coverage` below, so a caller that declines one gets
+    // no key at all rather than an empty array claiming there is nothing to
+    // show. `computeAwards` reads none of the three, which is what makes
+    // `/awards` (#140) — the caller that walks every habit on the account —
+    // able to decline all of them.
+    ...(history ? {
+      history: historyOver(habit, entryMap, dates, granularity, weekStart, unlogged, creditFrom),
+    } : {}),
     weekdays: weekdaysOver(habit, entryMap, dates, unlogged, creditFrom),
-    weekdayByMonth: weekdayByMonthOver(habit, entryMap, dates, unlogged, creditFrom),
-    frequency: frequencyOver(habit, entryMap, dates, weekStart, unlogged, creditFrom),
+    ...(weekdayByMonth ? {
+      weekdayByMonth: weekdayByMonthOver(habit, entryMap, dates, unlogged, creditFrom),
+    } : {}),
+    ...(frequency ? {
+      frequency: frequencyOver(habit, entryMap, dates, weekStart, unlogged, creditFrom),
+    } : {}),
     resilience: resilienceFrom(streaks, missRuns, end),
     // On the payload rather than passed into `computeAwards` as a second data
     // source. `awards.js`'s header states that every award is a reading of the
