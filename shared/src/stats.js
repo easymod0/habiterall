@@ -1966,25 +1966,29 @@ function resolveWindow(entries, start, end, creditFrom = undefined) {
  * that did not ask for the figure.
  *
  * **`trend` and `regularity` are declinable with no decliner on this branch,
- * and that is deliberate rather than dead code.** Both are their own pass and
- * both are read by the detail view alone; `computeAwards` reads neither. The
- * caller they exist for is `GET /awards` (#140), which walks EVERY habit on
- * the account and is open on another branch at the time of writing — so the
- * shape is here rather than added later, because adding an opt-out is the
- * cheap half and finding out a route has been paying for a discarded pass per
- * habit is the dear one.
+ * and that is deliberate rather than dead code.** `computeAwards` reads
+ * neither, and the one caller here is the detail view's own route, which
+ * reads both — so nothing on this branch declines either. The caller they are
+ * shaped for is an account-level one that walks EVERY habit (`GET /awards`,
+ * #140): the opt-out is cheap while the passes are being written and dear to
+ * retrofit onto a route already paying for them per habit.
+ *
+ * **What the opt-out is FOR is which fields a caller is answerable for, not
+ * what each one costs — and `trend` is the reason to say so.** See
+ * `regularityOver`: a second walk over `dates` calling `isCompleted` per day,
+ * measured at ~2% of an awards-shaped call over an 1830-day window, "the
+ * point is not the milliseconds". `trendOver` is weaker still, and differently
+ * so — it is not a walk at all. It reads the `scores`, `alpha` and `steps`
+ * that `scoresOver` has already computed unconditionally, and scans backward
+ * at most `TREND_LOOKBACK_DAYS` (30) for one date, so its cost does not grow
+ * with the window and declining it saves next to nothing. It takes the opt-out
+ * for consistency with the field beside it and because no award reads it, and
+ * NOT because it is a pass worth skipping. Do not cite it as one.
  *
  * A test pins each edition's one remaining call site here — `/stats`, the one
  * that still needs `granularity` — and its one `summaryStats` call site at
  * `/overview`, because a third route added later must not quietly pay for
- * passes it discards either way. **That count is one on this branch and two
- * after #140 merges**, and #140 carries the guard that makes the difference
- * safe: it derives the opt-out list from the destructuring below rather than
- * naming today's opt-outs, and fails until `/awards` declines each pass no
- * award reads — these two included. The two branches conflict on this
- * signature and on the `@param` above it, so resolving by union is the whole
- * merge; that guard is what then says, by name, that `/awards` must decline
- * `trend` and `regularity` too.
+ * passes it discards either way.
  *
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
