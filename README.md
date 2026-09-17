@@ -888,17 +888,26 @@ services:
 
       # This process's OWN pool, interpolated from a separate knob
       # (NOTIFIER_PG_POOL_MAX) rather than PG_POOL_MAX: it competes with no
-      # request traffic, so 3 is plenty, where the app's 10 is sized against
-      # /healthz's memo.
+      # request traffic, where the app's 10 is sized against /healthz's memo.
       #
-      # The `:-3` is the one interpolation here that supplies a value rather
-      # than an empty string, and it has to: `db/pool.js` reads
-      # `Number(PG_POOL_MAX) || 10`, so an empty string lands on the APP's
-      # default and the notifier would ship with 10. An operator budgeting
-      # `max x replicas` under the server's max_connections (server.js) reads
-      # that budget off this file, so the figure here has to be the figure the
-      # container gets.
-      PG_POOL_MAX: ${NOTIFIER_PG_POOL_MAX:-3}
+      # 6 and not the 2-3 a connection count alone would suggest, because this
+      # number is not only a connection budget: notifier.js DERIVES the tick's
+      # width from it. Collect and delivery concurrency are each
+      # `floor(max / 2)`, floored at 1 and capped at 6/8, so the pool size IS
+      # the fan-out. At 3 the tick would collect and deliver one account at a
+      # time; at 6 it runs three of each, and still leaves three connections
+      # for the Discord gateway, whose button presses take a checkout of their
+      # own and give up after 5s (`connectionTimeoutMillis`). The notifier
+      # logs both derived numbers on its startup line, so what a given pool
+      # bought is readable without this comment.
+      #
+      # The `:-6` supplies a value rather than an empty string, and has to:
+      # `db/pool.js` reads `Number(PG_POOL_MAX) || 10`, so an empty string
+      # lands on the APP's default and the notifier would ship with 10 — the
+      # figure an operator budgeting `max x replicas` under the server's
+      # max_connections (server.js) reads off this file has to be the figure
+      # the container gets.
+      PG_POOL_MAX: ${NOTIFIER_PG_POOL_MAX:-6}
       PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}
       PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}
       PGSSL: ${PGSSL:-}
@@ -1281,7 +1290,7 @@ MAX_UPLOAD_MB=16
 #LOG_RUNTIME_MS=60000
 #LOG_LAG_WARN_MS=200
 #PG_POOL_MAX=10                 # what the /healthz memo is sized against
-#NOTIFIER_PG_POOL_MAX=3         # the notifier's own pool; it competes with nobody
+#NOTIFIER_PG_POOL_MAX=6         # the notifier's own pool AND its tick width: floor(n/2) each for collect and delivery
 #PG_STATEMENT_TIMEOUT_MS=15000  # a query past this is cancelled; raise for a very long export, 0 to disable
 #PG_IDLE_TX_TIMEOUT_MS=30000    # idle-in-transaction for this long is a bug, not a slow query; 0 disables
 #PGSSL=                         # `require` for a managed Postgres reached over TLS
@@ -1532,17 +1541,26 @@ services:
 
       # This process's OWN pool, interpolated from a separate knob
       # (NOTIFIER_PG_POOL_MAX) rather than PG_POOL_MAX: it competes with no
-      # request traffic, so 3 is plenty, where the app's 10 is sized against
-      # /healthz's memo.
+      # request traffic, where the app's 10 is sized against /healthz's memo.
       #
-      # The `:-3` is the one interpolation here that supplies a value rather
-      # than an empty string, and it has to: `db/pool.js` reads
-      # `Number(PG_POOL_MAX) || 10`, so an empty string lands on the APP's
-      # default and the notifier would ship with 10. An operator budgeting
-      # `max x replicas` under the server's max_connections (server.js) reads
-      # that budget off this file, so the figure here has to be the figure the
-      # container gets.
-      PG_POOL_MAX: ${NOTIFIER_PG_POOL_MAX:-3}
+      # 6 and not the 2-3 a connection count alone would suggest, because this
+      # number is not only a connection budget: notifier.js DERIVES the tick's
+      # width from it. Collect and delivery concurrency are each
+      # `floor(max / 2)`, floored at 1 and capped at 6/8, so the pool size IS
+      # the fan-out. At 3 the tick would collect and deliver one account at a
+      # time; at 6 it runs three of each, and still leaves three connections
+      # for the Discord gateway, whose button presses take a checkout of their
+      # own and give up after 5s (`connectionTimeoutMillis`). The notifier
+      # logs both derived numbers on its startup line, so what a given pool
+      # bought is readable without this comment.
+      #
+      # The `:-6` supplies a value rather than an empty string, and has to:
+      # `db/pool.js` reads `Number(PG_POOL_MAX) || 10`, so an empty string
+      # lands on the APP's default and the notifier would ship with 10 — the
+      # figure an operator budgeting `max x replicas` under the server's
+      # max_connections (server.js) reads off this file has to be the figure
+      # the container gets.
+      PG_POOL_MAX: ${NOTIFIER_PG_POOL_MAX:-6}
       PG_STATEMENT_TIMEOUT_MS: ${PG_STATEMENT_TIMEOUT_MS:-}
       PG_IDLE_TX_TIMEOUT_MS: ${PG_IDLE_TX_TIMEOUT_MS:-}
       PGSSL: ${PGSSL:-}
