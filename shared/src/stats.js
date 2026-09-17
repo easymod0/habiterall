@@ -945,9 +945,18 @@ function regularityOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
  * test, `computeStats`) that has already opened its window at the habit's own
  * first row and wrong for a caller holding a bounded slice, which must supply
  * the real one (see `summaryStats`'s own JSDoc for what happens if it does
- * not). The property this buys: outside a habit's genuine birth, this rule
- * alters no streak, no miss run, no resilience figure and no `lastMiss`
- * anywhere.
+ * not). The property this buys is about the PARTIAL window ONLY: outside a
+ * habit's genuine birth, a day whose window has not FILLED is judged by
+ * master's own expression, so nothing moves at a SLICE EDGE. It is NOT a
+ * property of this change as a whole, and an earlier draft of this comment
+ * claimed it was — the floor above applies at every FULL window whatever the
+ * gate says, so any non-daily habit whose window holds a SKIP moves wherever
+ * it is read from, birth or no birth. That follows from the paragraph above
+ * and contradicted the sentence that used to stand here. Measured on this
+ * rule's own headline fixture (3×/7 Mon/Wed/Fri, two skips, a `birth` earlier
+ * than `dates[0]` so the gate is shut): master gives runs of 1 / 14 / 5 where
+ * this gives 1 / 26, and `streaks.test.js` pins that second pair so the wider
+ * claim cannot be restated without a test failing.
  *
  * For a habit asking for something every day (`num >= den`) the window is one
  * day and the requirement clamps to it, so this reduces exactly to
@@ -1232,12 +1241,29 @@ function missRunsFrom(series) {
   return runs;
 }
 
+/**
+ * **`birth` is threaded here for the same reason `computeStreaks` takes one
+ * (#340), even though no production caller reaches this wrapper today.** The
+ * two are siblings over one series — `computeStats` folds a single
+ * `onPaceSeries` into `streaksFrom` and `missRunsFrom` (#219), `/overview`'s
+ * `lastMiss` comes off `summaryStats`'s own series, and `computeResilience`
+ * reads `resilienceFrom`, so the live callers of THIS function are the test
+ * suites and `scripts/bench-overview.mjs`. Omitting the parameter would have
+ * left the one exported entry point that silently means "the range opens at
+ * the habit's birth" whatever slice it was handed, which is exactly the
+ * mistake round 1 found at two route call sites — and the first bounded caller
+ * to reach for it would have inherited the pre-#340 leniency with nothing to
+ * catch it. See `onPaceSeries`'s doc comment for what `undefined`, `null` and
+ * a non-real day each mean.
+ *
+ * @param {string|null} [birth] the habit's LIFETIME earliest real row.
+ */
 export function computeMissRuns(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
-                                creditFrom = undefined) {
+                                creditFrom = undefined, birth = undefined) {
   // Same clamp as `computeStreaks`, above — see the comment on its `dates`
   // line for why it is built here rather than inside `onPaceSeries`.
   const dates = boundedRange(start, end);
-  return missRunsFrom(onPaceSeries(habit, entryMap, dates, unlogged, creditFrom));
+  return missRunsFrom(onPaceSeries(habit, entryMap, dates, unlogged, creditFrom, birth));
 }
 
 /**

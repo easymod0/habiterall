@@ -241,9 +241,11 @@ genuinely opens at this habit's own start, and the days before it did not
 happen. Once the range opens somewhere else, a short window is merely a
 SLICE edge, not missing history, and every such day is judged by MASTER's
 own expression instead, unfloored and unclaused: **outside a habit's genuine
-birth, this fix alters no streak, no miss run, no resilience figure and no
-`lastMiss` anywhere** — the property the shape above is chosen to hold, and
-the property the 296/296/296 row confirms. `birth` is threaded the same way
+birth, the PARTIAL-window treatment is unchanged, so no streak, miss run,
+resilience figure or `lastMiss` moves at a slice EDGE** — the property the
+shape above is chosen to hold, and the property the 296/296/296 row confirms.
+That is narrower than what this record claimed at first, and the wider claim
+was false; see "The claim that was too wide" below. `birth` is threaded the same way
 `creditFrom` already is (`resolveWindow`'s own JSDoc states the same
 reasoning for that date): a caller holding the whole history gets it for
 free, since the range does open at the habit's birth there; a caller holding
@@ -298,6 +300,51 @@ The existing `PhantomAnchor` route fixture (`overview.integration.mjs`) is a
 structurally cannot see this — the blindness `shared/CLAUDE.md` already names,
 landing again on the same shape of test. The fixture this round adds beside it
 is 3×/7 for exactly that reason.
+
+## Review round 3: the claim that was too wide
+
+Round 1 bought a real property and then stated a wider one than it bought.
+The sentence — *"outside a habit's genuine birth, this fix alters no streak,
+no miss run, no resilience figure and no `lastMiss` anywhere"* — stood in the
+PR body, in this record, and in `onPaceSeries`'s own doc comment, and it is
+false. No code changed to fix it; the three sentences did.
+
+The gate reads `windowDays < den && !opensAtBirth`, so it governs the
+**partial** window and nothing else. A **full** window (`windowDays === den`)
+takes the floored branch whatever `opensAtBirth` says — which is deliberate
+and is what round 2 already corrected the *neighbouring* sentence to say — and
+at a full window the floor is not a no-op the moment skips have pulled
+`activeDays` below `den`. That is this record's own headline fixture. So the
+two sentences sat ten lines apart in one doc comment contradicting each other:
+the first said the branches disagree under skips, the second said nothing
+outside a birth moves.
+
+Measured, on the two-skip fixture from "The skip inversion" above (3×/7
+Mon/Wed/Fri, `2026-01-01` → `2026-02-01`, skips on the 21st and 22nd), with
+`birth` supplied as `2025-01-01` so the range does **not** open at the habit's
+birth and the gate is shut:
+
+| | streaks |
+|---|---|
+| master | `01-02` (1), `01-07`–`01-20` (14), `01-28`–`02-01` (5) |
+| this branch, gate shut | `01-02` (1), `01-07`–`02-01` (26) |
+
+A streak changed, two miss runs became one, and `lastMiss` moved — with no
+birth anywhere near it. The true off-birth blast radius is *every non-daily
+habit that has ever used a skip day, at every point in its history*, which on
+the dashboard is any such habit older than the 400-day slice. That is a wider
+and more visible change than "only at a birth", and it is the right change —
+narrowing the floor to births would re-break the skip inversion this record
+exists to close.
+
+What makes this worth a section rather than a silent edit is the shape of the
+mistake, which is one `shared/CLAUDE.md` already names in another form:
+**round 1's property was reasoned, not measured.** Every other figure in this
+record was run before it was written down; this one was derived from the gate's
+shape and never executed against master. The narrowed claim is now pinned by a
+test (`streaks.test.js`, "the floor applies at a FULL window off-birth too"),
+so the wide version cannot be restated without something failing — which is
+what the claim should have had in the first place.
 
 ## What this does not fix
 

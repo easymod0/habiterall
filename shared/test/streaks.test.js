@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 
 
 const { computeStreaks, dateRange, bestStreak, currentStreak, computeScores,
-  computeStats, summaryStats, addDays, UNLOGGED_DEFAULT } = await import('../src/stats.js');
+  computeStats, summaryStats, addDays, UNLOGGED_DEFAULT,
+  computeMissRuns } = await import('../src/stats.js');
 
 const YES = 2, SKIP = 3, UNSET = 0;
 const boolHabit = {
@@ -419,4 +420,117 @@ test('#340 review: a habit whose range opens at its own birth is unaffected', ()
   const streaks = computeStreaks(habit, entries, start, end, UNLOGGED_DEFAULT, undefined, start);
   assert.deepEqual(streaks, [{ start, end, length: 91, skips: 0 }],
     'unchanged by the birth gate — the range opens at this habit\'s own first row');
+});
+
+/* ---------- #340 review round 3: how far "unaffected off-birth" reaches ---------- */
+
+// The PR body, this file's own fix and `onPaceSeries`'s doc comment all once
+// claimed that outside a habit's genuine birth this change "alters no streak,
+// no miss run, no resilience figure and no `lastMiss` anywhere". That is too
+// wide, and this pins the true boundary so it cannot be restated.
+//
+// The gate is `windowDays < den && !opensAtBirth`, so it governs the PARTIAL
+// window and nothing else. A FULL window always takes the floored branch
+// whatever the gate says — and there the floor is not a no-op once skips have
+// pulled `activeDays` below `den`, which is this branch's own headline
+// fixture. So the honest claim is about the SLICE EDGE, not about everything
+// off-birth.
+//
+// Reuses the two-skip fixture above verbatim, with `birth` set a year before
+// `start` so the gate is SHUT for every partial-window day. Master splits this
+// into runs of 1 / 14 / 5; this splits it 1 / 26 — measured against
+// `origin/master`, not reasoned from the branch condition, which is how the
+// wide claim came to be written in the first place.
+test('#340 review 3: the floor applies at a FULL window off-birth too, so the ' +
+     '"unaffected outside a birth" property is about the SLICE EDGE only', () => {
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const start = '2026-01-01', end = '2026-02-01';
+  const entries = new Map();
+  for (const d of dateRange(start, end)) {
+    const dow = new Date(d + 'T12:00:00').getDay();
+    if ([1, 3, 5].includes(dow)) entries.set(d, YES); // Mon, Wed, Fri
+  }
+  entries.set('2026-01-21', SKIP);
+  entries.set('2026-01-22', SKIP);
+
+  const offBirth = '2025-01-01'; // a year before `start`: the gate is shut
+  const streaks = computeStreaks(
+    habit, entries, start, end, UNLOGGED_DEFAULT, undefined, offBirth);
+
+  // Not the 31-day single run the birth-opening case gives (the leniency at
+  // the slice edge is correctly withheld), and NOT master's 1 / 14 / 5 either:
+  // the two skips sit inside a window that has long since filled, so the floor
+  // bridges them here exactly as it does at a birth.
+  assert.deepEqual(streaks, [
+    { start: '2026-01-02', end: '2026-01-02', length: 1, skips: 0 },
+    { start: '2026-01-07', end: '2026-02-01', length: 26, skips: 2 },
+  ], 'the skip inversion is fixed everywhere, not only at a habit\'s birth — ' +
+     'master gives 1 / 14 / 5 here');
+
+  // The days the skips made master call a lapse are inside the long run, with
+  // the gate shut. This is the assertion that fails if anyone re-narrows the
+  // floor to births, or "simplifies" the branch condition to `!opensAtBirth`.
+  const [, run] = streaks;
+  for (const d of ['2026-01-23', '2026-01-24', '2026-01-26']) {
+    assert.ok(d >= run.start && d <= run.end,
+      `${d} must sit inside the off-birth run, not be split out of it`);
+  }
+
+  // The miss-run half of the same claim, through the sibling wrapper: master
+  // reports THREE lapses over this fixture and this reports two, so `lastMiss`
+  // — which both editions' `/overview` sorts by — moves off-birth as well.
+  // The one that goes is `2026-01-23`..`2026-01-27`, the lapse the two skips
+  // manufactured. `computeMissRuns` takes `birth` for exactly this reason.
+  const missRuns = computeMissRuns(
+    habit, entries, start, end, UNLOGGED_DEFAULT, undefined, offBirth);
+  assert.deepEqual(missRuns.map((r) => ({ start: r.start, end: r.end })), [
+    { start: '2026-01-01', end: '2026-01-01' },
+    { start: '2026-01-03', end: '2026-01-06' },
+  ], 'two miss runs off-birth where master has three — the skip-bridged lapse ' +
+     'of 2026-01-23..27 is gone, with no birth anywhere near it');
+});
+
+// And the property that IS true, stated as its own case so the corrected
+// sentence has something behind it: at a SLICE EDGE — a day whose window has
+// not filled — a shut gate reproduces master's plain unfloored ratio exactly.
+//
+// This needs the Sat+Sun+Mon layout rather than Mon/Wed/Fri, and that choice
+// is the same one the fix's own tests document: Mon/Wed/Fri meets the
+// rounded-up requirement at every step because it is FRONT-LOADED, so it
+// cannot tell the two treatments apart at a slice edge at all. Kept Sat+Sun+Mon
+// from a range opening on a Monday, the next two completions do not arrive
+// until days 6 and 7, so the unfloored ratio calls day 3 a lapse (it demands
+// `3 × 3 / 7 = 1.29`, which an integer count of 1 cannot clear) where the
+// floored one demands 1 and is satisfied.
+//
+// The two literals below are master's own output over this fixture, measured
+// against `origin/master`, so this asserts "unchanged" against the real thing
+// rather than against a second copy of the branch's reasoning.
+test('#340 review 3: at a SLICE EDGE a shut gate really does reproduce master', () => {
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const start = '2026-01-05', end = '2026-04-05'; // Monday .. Sunday, 91 days
+  const entries = new Map();
+  for (const d of dateRange(start, end)) {
+    const dow = new Date(d + 'T12:00:00').getDay(); // Sat=6, Sun=0, Mon=1
+    if (dow === 6 || dow === 0 || dow === 1) entries.set(d, YES);
+  }
+
+  const offBirth = computeStreaks(
+    habit, entries, start, end, UNLOGGED_DEFAULT, undefined, '2025-01-01');
+  assert.deepEqual(offBirth, [
+    { start: '2026-01-05', end: '2026-01-06', length: 2, skips: 0 },
+    { start: '2026-01-11', end: '2026-04-05', length: 85, skips: 0 },
+  ], 'master\'s own answer over this fixture, byte for byte — a slice edge ' +
+     'gets no leniency, so the opening days stay split exactly as they were');
+
+  // The same fixture opening at the habit's own birth is the fix's headline
+  // case (91 days, one run — the test near the top of this block). Asserted
+  // here beside its off-birth twin so the gate's whole job is one comparison:
+  // these two must NOT be equal, or the gate is doing nothing.
+  const atBirth = computeStreaks(
+    habit, entries, start, end, UNLOGGED_DEFAULT, undefined, start);
+  assert.deepEqual(atBirth, [{ start, end, length: 91, skips: 0 }]);
+  assert.notDeepEqual(offBirth, atBirth,
+    'a slice edge is not a birth — withholding the leniency here is the ' +
+    'whole difference the gate exists to make');
 });
