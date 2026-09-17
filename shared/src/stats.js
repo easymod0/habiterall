@@ -1946,10 +1946,11 @@ function resolveWindow(entries, start, end, creditFrom = undefined) {
 /**
  * Every figure the detail view draws, over one window.
  *
- * **`coverage` is the one field a caller may decline, and the rule is the same
- * one that keeps `computeAwards` out of here.** Awards are computed at
- * `/habits/:id/stats` and nowhere else, because that route is now the only
- * caller of this function at all — `/overview` reads `score` and
+ * **`coverage` was the first field a caller could decline; `trend` and
+ * `regularity` are the same opt-out, in the same shape, added by this change.**
+ * The rule behind all three is the one that keeps `computeAwards` out of here.
+ * Awards are computed at `/habits/:id/stats`, because that route is the only
+ * caller of this function on this branch — `/overview` reads `score` and
  * `currentStreak` off `summaryStats` instead, so the five passes only the
  * detail view reads are no longer run per habit on the dashboard's hot path
  * just to be thrown away. Coverage is the first field to make that cost
@@ -1964,10 +1965,26 @@ function resolveWindow(entries, start, end, creditFrom = undefined) {
  * degrades to withholding the badge, which is the right answer for a caller
  * that did not ask for the figure.
  *
+ * **`trend` and `regularity` are declinable with no decliner on this branch,
+ * and that is deliberate rather than dead code.** Both are their own pass and
+ * both are read by the detail view alone; `computeAwards` reads neither. The
+ * caller they exist for is `GET /awards` (#140), which walks EVERY habit on
+ * the account and is open on another branch at the time of writing — so the
+ * shape is here rather than added later, because adding an opt-out is the
+ * cheap half and finding out a route has been paying for a discarded pass per
+ * habit is the dear one.
+ *
  * A test pins each edition's one remaining call site here — `/stats`, the one
  * that still needs `granularity` — and its one `summaryStats` call site at
  * `/overview`, because a third route added later must not quietly pay for
- * passes it discards either way.
+ * passes it discards either way. **That count is one on this branch and two
+ * after #140 merges**, and #140 carries the guard that makes the difference
+ * safe: it derives the opt-out list from the destructuring below rather than
+ * naming today's opt-outs, and fails until `/awards` declines each pass no
+ * award reads — these two included. The two branches conflict on this
+ * signature and on the `@param` above it, so resolving by union is the whole
+ * merge; that guard is what then says, by name, that `/awards` must decline
+ * `trend` and `regularity` too.
  *
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
