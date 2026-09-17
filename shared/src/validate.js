@@ -890,6 +890,17 @@ export const SETTING_VALUES = {
   // than as a plain miss — which is only meaningful because a lapse is now a
   // row of its own; see `entryWrite` above.
   questionMarks: [true, false],
+  // The account-wide off switch for the awards feature (#140). Default true.
+  // It is a RENDERING preference and changes no API answer: `GET
+  // /habits/:id/stats` still carries its `awards` field and `GET /awards`
+  // still answers truthfully with it off — a display preference must not
+  // silently change what an endpoint returns, which is a different claim
+  // from hiding a badge. What it turns off is the awards card in the detail
+  // view (and, once an awards page ships, whether that page draws at all).
+  // It is not the same question `detailCards`'s `awards` entry asks — that
+  // one is a per-view card order/visibility preference — but either being
+  // off hides the card.
+  awards: [true, false],
   // What a plain tap on a day square DOES, on both strips (`dayCells`,
   // public/ui/day-strip.js). `'cycle'` is what this app has always done and is
   // the default: a boolean day walks Loop's cycle in place and a measurable one
@@ -1042,6 +1053,10 @@ export const PORTABLE_SETTINGS = Object.freeze([
   // keystrokes a different number. It carries no capability — it is a
   // preference, like `theme` — so nothing about it belongs with the webhook.
   'numberFormat',
+  // A display preference carrying no capability, exactly like `theme` and
+  // `skipDays` above — restoring it moves no figure and grants nothing, it
+  // only says whether the awards card is drawn.
+  'awards',
 ]);
 
 /**

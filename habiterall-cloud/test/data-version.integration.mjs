@@ -336,20 +336,24 @@ try {
   // above — while making the counter count requests, turning every dashboard
   // fetch into a write, and leaving no memo entry ever reachable twice.
   //
-  // Four reads, not one: the same shapes a client actually issues between two
+  // Five reads, not one: the same shapes a client actually issues between two
   // writes, and `/overview` in particular is the route whose own memo is what
-  // the version is for.
+  // the version is for. `/awards` (#140) is the other account-level read that
+  // walks every habit — the same shape `/categories/stats` already is, and a
+  // route with that much work behind it is exactly where a stray write would
+  // hide.
   const beforeReads = await version();
   const reads = [
     await call('/overview'),
     await call('/habits'),
     await call('/categories'),
     await call('/settings'),
+    await call('/awards'),
   ];
   const afterReads = await version();
-  ck('control: all four reads answered', reads.every((r) => r.status === 200),
+  ck('control: all five reads answered', reads.every((r) => r.status === 200),
     reads.map((r) => r.status).join(','));
-  ck('four reads leave data_version exactly where it was',
+  ck('five reads leave data_version exactly where it was',
     afterReads === beforeReads, `${beforeReads} -> ${afterReads}`);
 
   await admin.query(`DELETE FROM session WHERE sid = $1`, [SID]);

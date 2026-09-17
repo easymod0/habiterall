@@ -479,6 +479,90 @@ check('every habit the payload counts is one alice owns',
 
 tenancyServer.close();
 
+/* ---------- attack: read another account through GET /awards (#140) -------
+ *
+ * The account-level counterpart to the `/categories/stats` attack above, and
+ * the same shape of query: `SELECT * FROM habits` with no `WHERE` clause at
+ * all, so RLS is the whole of what scopes it — see the route's own comment in
+ * `src/api.js`. Driven over the real router for BOTH accounts this time, one
+ * request each, so a habit or an award leaking the wrong way shows up on
+ * whichever side it lands.
+ */
+
+console.log('--- attack: another account through GET /awards ---');
+
+// A two-day streak is the cheapest rung `SURVIVAL_THRESHOLDS` has, so both
+// accounts genuinely earn a `streak` award rather than the isolation check
+// below passing against a route that returns an empty list on both sides.
+const mkAwardHabit = async (userId, name) => withUser(userId, async (db) => {
+  const { rows: [h] } = await db.query(
+    `INSERT INTO habits (user_id, name, type) VALUES ($1,$2,'boolean') RETURNING id`,
+    [userId, name]);
+  for (const date of ['2026-03-01', '2026-03-02']) {
+    await db.query(
+      `INSERT INTO entries (habit_id, user_id, date, value) VALUES ($1,$2,$3,2)`,
+      [h.id, userId, date]);
+  }
+  return h.id;
+});
+const aliceAwardHabit = await mkAwardHabit(alice.id, 'Alice Award Habit');
+const bobAwardHabit = await mkAwardHabit(bob.id, 'Bob Award Habit');
+
+// One small app per account rather than one shared session, since this block
+// (unlike the one above) needs to ask the router as EACH account and compare
+// the two answers.
+const appAs = (userId) => {
+  const a = express();
+  a.use(express.json());
+  a.use((req, _res, next) => { req.session = { user: { id: userId } }; next(); });
+  a.use('/api', api);
+  return a;
+};
+const listenOn = (a) => new Promise((resolve) => {
+  const s = a.listen(0, '127.0.0.1', () => resolve(s));
+});
+const aliceAwardsServer = await listenOn(appAs(alice.id));
+const bobAwardsServer = await listenOn(appAs(bob.id));
+const aliceAwardsBase = `http://127.0.0.1:${aliceAwardsServer.address().port}`;
+const bobAwardsBase = `http://127.0.0.1:${bobAwardsServer.address().port}`;
+
+const aliceAwards = await fetch(`${aliceAwardsBase}/api/awards`).then((r) => r.json());
+const bobAwards = await fetch(`${bobAwardsBase}/api/awards`).then((r) => r.json());
+const aliceAwardsText = JSON.stringify(aliceAwards);
+const bobAwardsText = JSON.stringify(bobAwards);
+
+// The control, first: each account really does see its own habit, with an
+// award actually on it. Without this, "the other account's habit is absent"
+// is satisfied by a route that reads nothing at all — which is what a query
+// left outside `withUser` would do here, since RLS fails closed.
+const aliceOwn = aliceAwards.habits.find((h) => h.id === aliceAwardHabit);
+check("alice's own habit is on her /awards payload, with an award earned",
+  aliceOwn?.name === 'Alice Award Habit' && aliceOwn.awards.length > 0,
+  aliceAwardsText);
+const bobOwn = bobAwards.habits.find((h) => h.id === bobAwardHabit);
+check("bob's own habit is on his /awards payload, with an award earned",
+  bobOwn?.name === 'Bob Award Habit' && bobOwn.awards.length > 0,
+  bobAwardsText);
+
+check("bob's habit id is not on alice's /awards payload",
+  !aliceAwards.habits.some((h) => h.id === bobAwardHabit), aliceAwardsText);
+check("...nor does bob's habit name appear anywhere in alice's payload",
+  !aliceAwardsText.includes('Bob Award Habit'), aliceAwardsText);
+check("alice's habit id is not on bob's /awards payload",
+  !bobAwards.habits.some((h) => h.id === aliceAwardHabit), bobAwardsText);
+check("...nor does alice's habit name appear anywhere in bob's payload",
+  !bobAwardsText.includes('Alice Award Habit'), bobAwardsText);
+
+// And the original secret habits from the top of the file — never named on
+// this route either, whatever award shape they happen to carry.
+check("bob's original secret habit is absent from alice's /awards payload",
+  !aliceAwardsText.includes('Bob Secret Habit'), aliceAwardsText);
+check("alice's original secret habit is absent from bob's /awards payload",
+  !bobAwardsText.includes('Alice Secret Habit'), bobAwardsText);
+
+aliceAwardsServer.close();
+bobAwardsServer.close();
+
 /* ---------- the reminder scheduler's scope ---------- */
 //
 // Migration 008 adds the only policy in the schema that lets a query see more

@@ -92,6 +92,18 @@ try {
       overflows:[...card.querySelectorAll('svg')].some(s=>s.getBoundingClientRect().width > cw+1),
     };})()`);
 
+  /** Any card, found by its title — the tiles issue #160 added, none of
+   * which is "Bouncing back", so `readCard` above cannot see them. */
+  const readCardByTitle = (title) => ev(`(()=>{
+    const c=[...document.querySelectorAll('#view-detail > .card')]
+      .find(x=>x.querySelector('.card-title')?.textContent.trim()===${JSON.stringify(title)});
+    if(!c) return {card:false};
+    return {card:true,
+      tiles:[...c.querySelectorAll('.stat-tile')].map(t=>({
+        value:t.querySelector('.stat-value').textContent.trim(),
+        label:t.querySelector('.stat-label').textContent.trim()}))};
+  })()`);
+
   const habits = await ev(
     `[...document.querySelectorAll('.habit-row .habit-name, .habit-row .name')].map(n=>n.textContent.trim())`);
   ck('the dashboard has habits to inspect', habits.length > 0, habits.join(', '));
@@ -111,6 +123,63 @@ try {
     first.order.join(' > '));
   ck('the calendar sits directly under habit strength', iCal === iScore + 1,
     first.order.join(' > '));
+
+  /* ---------- the three tiles (issue #160) ---------- */
+
+  console.log('\n--- the three tiles ---');
+
+  // Habit 0 is still open from the block above. `coverageWindow`/`trend` are
+  // never declined by this route, so both tiles are unconditional — unlike
+  // "Since last" on the frequency card, which only shows once a habit has
+  // been completed at least once.
+  const histTile = await readCardByTitle('History');
+  ck('the history card is present', histTile.card === true);
+  const covTile = histTile.tiles?.find(
+    (t) => t.label === 'Days answered' || t.label === 'No window');
+  ck('the history card holds a coverage tile', covTile != null,
+    JSON.stringify(histTile.tiles));
+  ck('its value is a percentage or a dash',
+    /^(\d{1,3}%|—)$/.test(covTile?.value ?? ''), covTile?.value ?? '(missing)');
+
+  const strengthTile = await readCardByTitle('Habit strength');
+  ck('the strength card is present', strengthTile.card === true);
+  const trendTile = strengthTile.tiles?.[0];
+  // All THREE labels the tile can carry, not two: the fallback branch was
+  // excluded by the old alternation, which is part of how it went un-rendered
+  // by any suite while saying something false. See the weekend-rester block
+  // below, which drives that branch on purpose.
+  // All THREE labels the tile can carry, not two: the withheld fallback was
+  // excluded by the old alternation, which is part of how it went un-rendered
+  // by any suite while saying something false. The `Needs` arm is anchored on
+  // `days$` and NOT on `scored days$` deliberately — that number is a calendar
+  // floor, and a build that relabels it as scored days must fail here.
+  ck('the strength card holds a trend tile with one of the three labels it can carry',
+    /^(Points, last|Needs \d+ days$|Not enough scored days$|No trend yet$)/
+      .test(trendTile?.label ?? ''),
+    trendTile?.label ?? '(missing)');
+
+  // Pinning the DECISION is not pinning the WIRING (root CLAUDE.md) — a
+  // string being right does not make its caller use it. So this fetches the
+  // same `/api/habits/:id/stats` the page itself called, for the habit
+  // actually open (its id read out of the URL), and recomputes the
+  // percentage independently rather than trusting the tile to agree with
+  // itself.
+  const payloadCoverageWindow = await ev(
+    "(async function(){ var id=(location.hash.match(/#\\/habit\\/(\\d+)/)||[])[1];" +
+    " var s=await (await fetch('/api/habits/'+id+'/stats')).json();" +
+    ' return s.coverageWindow; })()'
+  );
+  ck('the payload carries a coverageWindow for this habit',
+    payloadCoverageWindow != null, JSON.stringify(payloadCoverageWindow));
+  if (payloadCoverageWindow) {
+    const expectedPct = payloadCoverageWindow.days
+      ? Math.round(payloadCoverageWindow.answered / payloadCoverageWindow.days * 100) + '%'
+      : '—';
+    ck('the rendered coverage percentage equals answered/days from the payload',
+      covTile?.value === expectedPct,
+      'payload coverageWindow=' + JSON.stringify(payloadCoverageWindow) +
+      ' (expects ' + expectedPct + '), tile shows ' + covTile?.value);
+  }
 
   /* ---------- the card itself ---------- */
 
@@ -445,6 +514,156 @@ try {
         console.log(where + ' threw :: ' + err.message);
       }
     }
+  }
+
+  /* ---------- the withheld-trend label is true of the habit it is about ---------- */
+
+  console.log('\n--- the withheld trend says something true ---');
+
+  // The one branch no suite had ever rendered, and it said "Too new to tell"
+  // about a habit four months old. `trendOver`'s floor is on applied EWMA
+  // STEPS, not calendar days — a skip applies no step while the calendar day
+  // still elapses — so a weekend-skipper clears `minWindow` calendar days and
+  // is still withheld. That is `skipDays` used exactly as intended, not a
+  // contrived shape.
+  //
+  // 100 days: `stats.test.js` pins the real boundary at 110/111 against a
+  // FIXED end date, and the boundary moves with which weekday `end` falls on,
+  // which a browser suite cannot control. 100 was checked to withhold at all
+  // seven alignments while still clearing the 87-day calendar floor, so it
+  // lands in this branch whatever day the suite runs.
+  //
+  // Dates are built in UTC off today's LOCAL y/m/d, never by subtracting
+  // 86400000 from a local `Date`: a DST boundary inside the window would
+  // otherwise skip or repeat a day and shift every weekday after it.
+  const skipper = await ev(
+    '(async function(){'
+    + " var r = await fetch('/api/habits', { method: 'POST',"
+    + "   headers: { 'Content-Type': 'application/json' },"
+    + "   body: JSON.stringify({ name: 'Weekend rester', type: 'boolean' }) });"
+    + ' var h = await r.json();'
+    + ' var n = new Date();'
+    + ' var base = Date.UTC(n.getFullYear(), n.getMonth(), n.getDate());'
+    + ' for (var i = 99; i >= 0; i--) {'
+    + '   var d = new Date(base - i * 86400000);'
+    + '   var iso = d.toISOString().slice(0, 10);'
+    + '   var weekend = d.getUTCDay() === 0 || d.getUTCDay() === 6;'
+    + "   await fetch('/api/habits/' + h.id + '/entries/' + iso, { method: 'PUT',"
+    + "     headers: { 'Content-Type': 'application/json' },"
+    + '     body: JSON.stringify(weekend ? { value: 0, status: \'skip\' } : { value: 2 }) });'
+    + ' }'
+    + ' return h.id; })()'
+  );
+  ck('a weekend-resting habit was seeded', typeof skipper === 'number', String(skipper));
+
+  // Prove the fixture is IN the branch before asserting what the branch says —
+  // otherwise this passes through the `Needs N scored days` branch, which is a
+  // different sentence and was never the one in question.
+  const skipperTrend = await ev(
+    '(async function(){'
+    + " var s = await (await fetch('/api/habits/' + " + skipper + " + '/stats')).json();"
+    + ' return { scores: s.scores.length, minWindow: s.trend.minWindow, change: s.trend.change };'
+    + ' })()'
+  );
+  ck('the trend is withheld for it', skipperTrend?.change === null,
+    JSON.stringify(skipperTrend));
+  ck('...and NOT because it is short of calendar days — it is past that floor, '
+    + 'which is the branch whose label was false',
+    skipperTrend != null && skipperTrend.scores >= skipperTrend.minWindow,
+    JSON.stringify(skipperTrend));
+
+  // A fragment-only navigation, so `reloadAndWaitFor`'s `window.__doomed`
+  // marker would survive it and the wait would hang its full timeout — see the
+  // root CLAUDE.md. Poll the rendered tile instead.
+  await ev('location.hash = ' + JSON.stringify('#/habit/' + skipper));
+  let skipperTile = null;
+  for (let k = 0; k < 40; k++) {
+    const strength = await readCardByTitle('Habit strength');
+    skipperTile = strength.tiles?.[0] ?? null;
+    if (skipperTile && skipperTile.label !== trendTile?.label) break;
+    await sleep(200);
+  }
+
+  ck('the withheld trend renders a dash', skipperTile?.value === '—',
+    JSON.stringify(skipperTile));
+  // The assertion, and it is a LITERAL rather than a regex: the defect was a
+  // label that parsed fine and was untrue. "Too new to tell" about a habit
+  // with 100 days of history contradicts every other figure on the page.
+  ck('and says it is short of SCORED days rather than calling a 100-day habit new',
+    skipperTile?.label === 'Not enough scored days',
+    JSON.stringify(skipperTile));
+
+  // The OTHER withheld branch — the one carrying a number — rendered for the
+  // first time. A round-2 review found that number relabelled as "scored days"
+  // when it is a calendar floor, which is false for any habit that skips: this
+  // same weekend-resting shape at 40 days holds 28 scored days against a
+  // `minWindow` of 87 and never reaches 87 scored days at all (it unblocks at
+  // 111 calendar days with 79). `stats.test.js` pins that arithmetic; this
+  // pins the sentence the user is shown.
+  const young = await ev(
+    '(async function(){'
+    + " var r = await fetch('/api/habits', { method: 'POST',"
+    + "   headers: { 'Content-Type': 'application/json' },"
+    + "   body: JSON.stringify({ name: 'Young rester', type: 'boolean' }) });"
+    + ' var h = await r.json();'
+    + ' var n = new Date();'
+    + ' var base = Date.UTC(n.getFullYear(), n.getMonth(), n.getDate());'
+    + ' for (var i = 39; i >= 0; i--) {'
+    + '   var d = new Date(base - i * 86400000);'
+    + '   var iso = d.toISOString().slice(0, 10);'
+    + '   var weekend = d.getUTCDay() === 0 || d.getUTCDay() === 6;'
+    + "   await fetch('/api/habits/' + h.id + '/entries/' + iso, { method: 'PUT',"
+    + "     headers: { 'Content-Type': 'application/json' },"
+    + '     body: JSON.stringify(weekend ? { value: 0, status: \'skip\' } : { value: 2 }) });'
+    + ' }'
+    + ' return h.id; })()'
+  );
+  ck('a 40-day weekend-resting habit was seeded', typeof young === 'number', String(young));
+
+  // Prove it is in the FAST-PATH branch (short of calendar days), not the one
+  // above — otherwise this asserts the same sentence twice.
+  const youngTrend = await ev(
+    '(async function(){'
+    + " var s = await (await fetch('/api/habits/' + " + young + " + '/stats')).json();"
+    + ' return { scores: s.scores.length, minWindow: s.trend.minWindow, change: s.trend.change };'
+    + ' })()'
+  );
+  ck('it is short of CALENDAR days, which is the other reason a trend is withheld',
+    youngTrend != null && youngTrend.change === null
+      && youngTrend.scores < youngTrend.minWindow,
+    JSON.stringify(youngTrend));
+
+  await ev('location.hash = ' + JSON.stringify('#/habit/' + young));
+  let youngTile = null;
+  for (let k = 0; k < 40; k++) {
+    const strength = await readCardByTitle('Habit strength');
+    youngTile = strength.tiles?.[0] ?? null;
+    if (youngTile && youngTile.label !== skipperTile?.label) break;
+    await sleep(200);
+  }
+  ck('it names a DAY count, never a scored-day count — the number is a calendar floor',
+    youngTile?.label === `Needs ${youngTrend?.minWindow} days`,
+    JSON.stringify(youngTile));
+
+  try {
+    const gone = await ev(
+      "fetch('/api/habits/" + young + "', { method: 'DELETE' })"
+      + '.then(function(r){ return r.ok; })');
+    if (!gone) console.log('cleanup: DELETE /api/habits/' + young + ' (young rester) did not come back ok');
+  } catch (err) {
+    console.log('cleanup: DELETE /api/habits/' + young + ' (young rester) threw :: ' + err.message);
+  }
+
+  // Its own cleanup, reported rather than asserted, exactly as the two seeded
+  // habits above are — this block sits after that `finally`, so it is not
+  // covered by the loop there.
+  try {
+    const gone = await ev(
+      "fetch('/api/habits/" + skipper + "', { method: 'DELETE' })"
+      + '.then(function(r){ return r.ok; })');
+    if (!gone) console.log('cleanup: DELETE /api/habits/' + skipper + ' (weekend rester) did not come back ok');
+  } catch (err) {
+    console.log('cleanup: DELETE /api/habits/' + skipper + ' (weekend rester) threw :: ' + err.message);
   }
 
   ck('no JavaScript errors', jsErrors.length === 0, jsErrors.slice(0, 2).join(' | '));
