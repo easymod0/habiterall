@@ -41,6 +41,7 @@ are already answered here, usually because they were the first thing tried.
 | `must-stay-fixed.md` | #112 §3: the eleven premises that may never become settings, and what promotes a tunable into one |
 | `icons.md` | #66: the grapheme rule tier 1 settled, the one decision that shapes a preset set, the tier-2-on-Android question, the list tier 3 has to clear, and why "an uploaded icon can never reach a Discord reminder" is a gap in our sender rather than a never |
 | `sharing-and-rls.md` | #77: why sharing is expensive under one-owner RLS specifically, what has to be answered before any code, and the cheaper 80% |
+| `on-pace-and-frequency.md` | #340: why `onPaceSeries` rounded a fractional requirement UP against an integer count, the demanded-rate table, five schedules that fractured a perfect streak, the skip inversion, why floor and the unfilled-window clause each need the other, and what this does not fix (`awards.md`'s 21 → 17) |
 
 The **sixteen files dated 2026-08-17** are the original prose verbatim, sliced by
 topic and checked line-for-line against the pre-split `CLAUDE.md`; that split

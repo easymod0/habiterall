@@ -896,7 +896,12 @@ function regularityOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
  * The window is `denominator` days ending on the day being judged, and the
  * requirement is pro-rated by any skips inside it, exactly as `computeScores`
  * does: a week with two skipped days only demands its share of the target.
- * Near `start` the window is short and the requirement shrinks with it, so a
+ * That requirement FLOORS rather than rounding up, so a pro-rated window never
+ * demands a higher rate than the habit's own — `>=` against the raw ratio used
+ * to round the demand up to the next whole day, which made two skip days
+ * HARDER to keep up with than none. And a window that has not filled yet is
+ * not judged at all while it can still reach the target, provided at least one
+ * completion is already in it — so near `start`, where the window is short, a
  * habit is not judged against a week of history it does not have yet.
  *
  * For a habit asking for something every day (`num >= den`) the window is one
@@ -951,12 +956,25 @@ function onPaceSeries(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
     // stays whole: 3 × 7 / 7 is exactly 3, where 3 × (7/7) can float.
     // Capped at the days available, which is what keeps a "twice a day" habit
     // — more than the one row a day can hold — from being impossible to meet.
-    const required = Math.min(activeDays, (num * activeDays) / den);
+    // The requirement is a ratio and the count is not, so it FLOORS. `>=`
+    // against the ratio silently rounded it UP to the next whole day: a window
+    // pro-rated to 2.143 asked for 3, which is 60% of its active days on a
+    // habit set to 43%, so two skip days made a habit HARDER and the first
+    // `den - 1` days of every range demanded a weekly quota inside three days.
+    // Never below 1, or a window holding no completion at all reads as kept.
+    const required = Math.max(1, Math.floor(Math.min(activeDays, (num * activeDays) / den) + 1e-9));
+    // A window that has not FILLED yet cannot put the habit behind: with days
+    // still to come it can still reach `num`. Gated on a completion already in
+    // hand, so a lone imported lapse cannot manufacture a run out of silence
+    // (#223's shape) — ungated it reports a 4-day streak from one stored 0.
+    const potential = windowDone + (den - windowDays);
 
     out.push({
       date: dates[i],
-      // A hair of tolerance: the requirement is a ratio and the count is not.
-      ok: activeDays <= 0 || windowDone + 1e-9 >= required,
+      // A hair of tolerance on both comparisons: `required` is derived from a
+      // division and the count is not.
+      ok: activeDays <= 0 || windowDone + 1e-9 >= required
+        || (windowDone >= 1 && potential + 1e-9 >= Math.min(activeDays, num)),
     });
   }
   return out;

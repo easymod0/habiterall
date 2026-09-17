@@ -84,7 +84,8 @@ slip as one over the limit; type the real number in the day editor when it
 matters.
 
 **Any frequency** — *n* times per *m* days. A habit held at exactly its target
-reaches full strength whether that is daily or 3×/week.
+reaches full strength whether that is daily or 3×/week, and keeps an unbroken
+streak whichever days of the week it is kept on.
 
 **Edit any day** — click a square in the calendar to correct history, page back
 through months, or attach a note. A day with a note carries a small mark on

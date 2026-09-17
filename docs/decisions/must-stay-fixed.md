@@ -48,11 +48,17 @@ would silently restate every figure.
   them.)
 
 **2. What a streak is made of.** `onPaceSeries` (`stats.js`) asks the same
-trailing-window question the score does, deliberately, so strength and streaks
-cannot disagree about the same day; and `computeStreaks` counts **calendar** days
-so a 3×/week habit kept for a month reads as 30 rather than 12. An option for
-"count only the days I did it" puts those two back into contradiction, which is
-the bug `onPaceSeries` exists to fix.
+trailing-window question the score does, deliberately, so that strength and
+streaks cannot disagree about the same day; and `computeStreaks` counts
+**calendar** days so a 3×/week habit kept for a month reads as 30 rather than
+12. That was the intent from the start, and it failed once anyway: `>=`
+against a raw fractional requirement rounded the streak's demand up while the
+score's own comparison never rounded at all, so on a measurable fixture (two
+skip days inside a 3×/7 habit's window) the two disagreed about three
+consecutive days — `docs/decisions/on-pace-and-frequency.md` (#340) is the
+record that measured it and closed it by flooring the requirement instead. An
+option for "count only the days I did it" puts those two back into
+contradiction on purpose, which is the bug `onPaceSeries` exists to fix.
 
 **3. The four day states, and what a write does to storage.** `entryWrite` in
 `validate.js`: `PUT {value: 0}` records a stated lapse, `DELETE` is how a day

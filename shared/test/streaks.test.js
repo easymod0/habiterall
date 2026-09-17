@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 
-const { computeStreaks, dateRange } = await import('../src/stats.js');
+const { computeStreaks, dateRange, bestStreak, currentStreak, computeScores } = await import('../src/stats.js');
 
 const YES = 2, SKIP = 3, UNSET = 0;
 const boolHabit = {
@@ -183,4 +183,152 @@ test('numerical habits produce dated streaks too', () => {
   assert.deepEqual(streaks.map((s) => s.length), [2, 1]);
   assert.equal(streaks[0].start, '2026-04-01');
   assert.equal(streaks[0].end, '2026-04-02');
+});
+
+/* ---------- #340: a fractional requirement rounded up, not down ---------- */
+
+// A schedule that lands on Mon/Wed/Fri passes even against the unfixed code
+// (`num * activeDays / den` is a whole number every seventh day for that one
+// layout), which is exactly how three existing 3x/7 tests above never saw
+// this. Every case below either avoids that layout or, where it must reuse it
+// (case 3), adds skips that make the rounding bite anyway.
+
+test('a 3x/7 habit kept perfectly on Sat+Sun+Mon is one unbroken 91-day streak', () => {
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const start = '2026-01-05', end = '2026-04-05'; // Monday .. Sunday, 91 days
+  const entries = new Map();
+  for (const d of dateRange(start, end)) {
+    const dow = new Date(d + 'T12:00:00').getDay(); // Sat=6, Sun=0, Mon=1
+    if (dow === 6 || dow === 0 || dow === 1) entries.set(d, YES);
+  }
+  const streaks = computeStreaks(habit, entries, start, end);
+  assert.deepEqual(streaks, [{ start, end, length: 91, skips: 0 }],
+    'perfect adherence must not fracture into two runs depending on which ' +
+    'weekday the schedule falls on');
+});
+
+test('a 5x/7 habit kept perfectly on Thu-Mon is one unbroken 91-day streak', () => {
+  const habit = { ...boolHabit, freq_numerator: 5, freq_denominator: 7 };
+  const start = '2026-01-05', end = '2026-04-05';
+  const entries = new Map();
+  for (const d of dateRange(start, end)) {
+    const dow = new Date(d + 'T12:00:00').getDay(); // Thu=4 .. Mon=1, wrapping Sun=0
+    if ([4, 5, 6, 0, 1].includes(dow)) entries.set(d, YES);
+  }
+  const streaks = computeStreaks(habit, entries, start, end);
+  assert.deepEqual(streaks, [{ start, end, length: 91, skips: 0 }]);
+});
+
+test('a 3x/7 Mon/Wed/Fri habit with two skip days stays one run, and strength ' +
+     'agrees with the streak about every day inside it', () => {
+  // must-stay-fixed.md's invariant: a streak and a lapse are made of "on
+  // pace", not "done today", so strength and streaks cannot disagree about
+  // the same day. Before this fix they did here — the two skips shrank
+  // `activeDays` enough that `>=` against the un-floored ratio rounded the
+  // requirement up, and 2026-01-23/-24/-26 read as a lapse in the streak
+  // while the score (which floors nothing, and never fixed the requirement's
+  // rounding this way) kept climbing across them.
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const start = '2026-01-01', end = '2026-02-01';
+  const entries = new Map();
+  for (const d of dateRange(start, end)) {
+    const dow = new Date(d + 'T12:00:00').getDay();
+    if ([1, 3, 5].includes(dow)) entries.set(d, YES); // Mon, Wed, Fri
+  }
+  entries.set('2026-01-21', SKIP); // a scheduled Wednesday
+  entries.set('2026-01-22', SKIP); // an unscheduled Thursday
+
+  const streaks = computeStreaks(habit, entries, start, end);
+  assert.deepEqual(streaks,
+    [{ start: '2026-01-02', end: '2026-02-01', length: 31, skips: 2 }]);
+
+  const [streak] = streaks;
+  for (const d of ['2026-01-23', '2026-01-24', '2026-01-26']) {
+    assert.ok(d >= streak.start && d <= streak.end,
+      `${d} must fall inside the one streak — the strength/streak ` +
+      'disagreement this fix closes');
+  }
+
+  // The other half of the same claim: the score never disagreed about these
+  // days either, and unfixed it did — the streak called 2026-01-23/-24/-26 a
+  // lapse while the score kept climbing across them. Measured on this
+  // fixture: 2026-01-20 (the last day that read as on pace even before the
+  // fix) scores 0.466383, then 0.507831 / 0.522427 / 0.550135 — rising, so a
+  // `>` against 01-20's own score is what closes the disagreement rather than
+  // pinning the EWMA's exact constants.
+  const scores = computeScores(habit, entries, start, end);
+  const scoreOn = (date) => scores.find((s) => s.date === date).score;
+  const baseline = scoreOn('2026-01-20');
+  for (const d of ['2026-01-23', '2026-01-24', '2026-01-26']) {
+    assert.ok(scoreOn(d) > baseline,
+      `the score on ${d} (${scoreOn(d)}) must exceed 2026-01-20's ` +
+      `(${baseline}) — the streak agrees these days are on pace, so the ` +
+      'score, which never stopped rising across them, must too');
+  }
+});
+
+test('a 3x/7 habit whose only row is a stated lapse has no streak at all', () => {
+  // The `Math.max(1, …)` guard: without it a lone `{value: 0}` row still
+  // manufactures a requirement of 0 for every day around it, reporting a
+  // 2-day bestStreak out of a single stated miss (#223's shape).
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const entries = new Map([['2026-01-05', UNSET]]);
+  const streaks = computeStreaks(habit, entries, '2026-01-01', '2026-01-10');
+  assert.deepEqual(streaks, []);
+  assert.equal(bestStreak(streaks), 0);
+});
+
+test('a 3x/7 habit whose only row is a skip has no streak at all', () => {
+  // The `windowDone >= 1` gate on the unfilled-window clause: ungated, a lone
+  // skip still leaves `potential` high enough to call the window on pace,
+  // reporting a 4-day bestStreak out of silence (#223's shape again).
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const entries = new Map([['2026-01-05', SKIP]]);
+  const streaks = computeStreaks(habit, entries, '2026-01-01', '2026-01-10');
+  assert.deepEqual(streaks, []);
+  assert.equal(bestStreak(streaks), 0);
+});
+
+test('a 3x/7 habit done only 2 times a week has no current streak', () => {
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const start = '2026-01-01', end = '2026-03-01';
+  const entries = new Map();
+  for (const d of dateRange(start, end)) {
+    const dow = new Date(d + 'T12:00:00').getDay();
+    if ([1, 3].includes(dow)) entries.set(d, YES); // Mon+Wed only, under target
+  }
+  const streaks = computeStreaks(habit, entries, start, end);
+  // `currentStreak` alone is 0 under both the fix and the unfixed code — the
+  // unfixed code still produces two runs from this fixture, and neither is
+  // current either way. It is the STRUCTURE that differs: fixed, every
+  // trailing window this schedule can ever fill floors to a requirement of 1,
+  // which the first Monday alone already meets, so the two on-days a week
+  // never accumulate into anything longer than a single day.
+  assert.deepEqual(streaks,
+    [{ start: '2026-01-05', end: '2026-01-05', length: 1, skips: 0 }]);
+  assert.equal(currentStreak(streaks, end), 0);
+});
+
+test('daily and twice-a-day habits split at a miss exactly as before (num >= den degenerates)', () => {
+  const start = '2026-01-01', end = '2026-01-10';
+  const daily = { ...boolHabit }; // 1/1
+  const dailyEntries = new Map(dateRange(start, end).map((d) => [d, YES]));
+  dailyEntries.set('2026-01-05', UNSET);
+  const dailyStreaks = computeStreaks(daily, dailyEntries, start, end);
+  assert.deepEqual(dailyStreaks, [
+    { start: '2026-01-01', end: '2026-01-04', length: 4, skips: 0 },
+    { start: '2026-01-06', end: '2026-01-10', length: 5, skips: 0 },
+  ]);
+
+  const twiceDaily = {
+    type: 'numerical', target_value: 2, target_type: 'at_least',
+    freq_numerator: 2, freq_denominator: 1,
+  };
+  const twiceEntries = new Map(dateRange(start, end).map((d) => [d, 2]));
+  twiceEntries.set('2026-01-05', 0);
+  const twiceStreaks = computeStreaks(twiceDaily, twiceEntries, start, end);
+  assert.deepEqual(twiceStreaks, [
+    { start: '2026-01-01', end: '2026-01-04', length: 4, skips: 0 },
+    { start: '2026-01-06', end: '2026-01-10', length: 5, skips: 0 },
+  ]);
 });

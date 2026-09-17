@@ -485,10 +485,13 @@ untouched. Both cases are pinned in `test/timezones.test.js`, under their own
 zones, because neither is observable from anywhere else.
 
 **`onPaceSeries` pro-rates the requirement near the start** —
-`required = min(activeDays, num*activeDays/den)` — so a habit is not judged
-against history it does not have yet. Consequence worth knowing before touching
-it: moving the earliest entry EARLIER re-judges the first `den - 1` days against
-a full requirement they now fail, so *remembering something you did* can lower a
+`required = max(1, floor(min(activeDays, num*activeDays/den)))` — so a habit is
+not judged against history it does not have yet. It FLOORS rather than rounds
+up: `>=` against the raw ratio silently demanded the next whole day, which made
+a pro-rated window ask MORE than the habit's own rate (`docs/decisions/
+on-pace-and-frequency.md`, #340). Consequence worth knowing before touching it:
+moving the earliest entry EARLIER re-judges the first `den - 1` days against a
+full requirement they now fail, so *remembering something you did* can lower a
 figure. Daily habits (`num >= den`) have no leniency window and are immune, which
 is why a test suite built on one cannot see this.
 
@@ -546,6 +549,16 @@ habit is being kept. For `num >= den` the window is one day and the
 requirement clamps to it, so this reduces exactly to `isCompleted` and daily
 habits behave as they always have; that degeneration is what makes the change
 safe, and `test/resilience.test.js` pins it.
+
+This did disagree once: `onPaceSeries` compared an integer count against a
+raw fractional requirement with `>=`, which rounds the demand UP to the next
+whole day for every window short of a full one, while `computeScores` stayed
+continuous and never rounded at all. On a 3×/7 habit with two skip days inside
+the window, the streak called three days a lapse while the score kept
+climbing across them — measured, not hypothetical: 0.466383 on the last day
+both agreed on, then rising through 0.507831, 0.522427 and 0.550135 on the
+three days they disagreed about. `docs/decisions/on-pace-and-frequency.md`
+(#340) closes it by flooring the requirement instead of rounding it up.
 
 Consequences worth knowing. A streak counts CALENDAR days, so a 3×/week habit
 kept for a month is a 30-day streak rather than a 12-day one — that is what
