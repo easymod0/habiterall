@@ -832,6 +832,7 @@ api.get('/awards', (req, res) => {
       const stats = computeStats(habit, entries, {
         end, weekStart, unlogged,
         history: false, weekdayByMonth: false, frequency: false,
+        trend: false, regularity: false,
       });
       return {
         id: habit.id,

@@ -970,7 +970,7 @@ test('declining every pass no award reads changes not one award (#140 review)', 
   // The same denominator check the guard above makes, for the same reason: a
   // signature reader answering `[]` would decline nothing and compare a
   // reading against itself, which passes against any build at all.
-  assert.deepEqual(declinable, ['history', 'weekdayByMonth', 'frequency'],
+  assert.deepEqual(declinable, ['history', 'weekdayByMonth', 'frequency', 'trend', 'regularity'],
     'the passes no award reads have changed — if that is deliberate, this '
     + 'literal moves with them; it is spelled out so the set cannot drift '
     + 'silently to empty and make the comparison below vacuous');

@@ -664,6 +664,62 @@ worst case the route can be asked for — the shape `/overview` already has, whe
 would have one edition refuse a URL the other served, and a default that drifted
 would have them answer one `start`-less URL with different bucket counts.
 
+**`coverageWindow` is a second field, not a sum of `coverage`'s monthly
+buckets.** `coverageOver` reports months only for the ones the window entirely
+CONTAINS (above), so a window opening on the 12th of one month and closing on
+the 20th of a month two later has a partial month at BOTH ends — summing
+`coverage` reports a shorter span than every other figure on the page, and for
+a habit under 60 days old, with no month yet fully contained, `coverage` can be
+empty while the window itself is not. `coverageOver` therefore counts
+`window: {answered, days}` over every date in `dates`, in the SAME loop that
+buckets the months, and `coverageWindow` rides under the same opt-out as
+`coverage` — both present or both absent, since an absent key is the absence of
+a claim and an empty one is a claim.
+
+**The trend's floor is derived from where the strength curve converges, not
+fixed.** The EWMA above starts at 0 and climbs toward the truth regardless of
+behaviour, so for the first weeks of ANY habit an unguarded before/after
+comparison reports "getting much better" from a habit that has done nothing
+new. `trendOver` derives `minWindow` from the day the top strength band
+(`TREND_CONVERGED_SCORE = 0.95` — the same value as `STRENGTH_BANDS`'s last
+element in `awards.js`, pinned equal by a test since `stats.js` cannot import
+`awards.js`, which imports this file) is reached — where `alpha^n`, the weight
+still on the EWMA's zero start, has fallen to `1 - TREND_CONVERGED_SCORE` —
+plus `TREND_LOOKBACK_DAYS` (30), so both ends of the comparison sit at or past
+convergence. That evaluates to **87** for a daily habit and **179** for a
+1×/week one (a slower habit's `alpha` sits closer to 1, so `alpha^n` falls off
+more gradually), and a 1×/month habit's floor is deep into a year — a real
+limit worth knowing rather than a bug. The residual warm-up artefact right at
+the floor is **bounded to about 5 points** and decays fast after; it is
+bounded, not removed, which is why `minWindow` always rides on the payload,
+including when `change` is withheld, so the tile can say WHY rather than just
+going blank.
+
+**Regularity measures the SPREAD of the gaps between completions, never their
+mean.** The mean gap is `denominator / numerator` by definition for any habit
+hitting its rate — at 3×/week, Mon/Wed/Fri (gaps 2, 2, 3) and three days in a
+row (gaps 1, 1, 5) both average 2.33 days — so a mean-gap tile says nothing the
+frequency card does not already say; the population standard deviation of the
+closed gaps is what tells the two apart, and `regularityOver` withholds it
+under **two** closed gaps rather than one, because the population SD of a
+single sample is 0, which would claim perfect regularity from one data point.
+Skips are transparent to the CLOSED gaps, exactly as `computeMissRuns`/
+`computeStreaks` treat them, so a planned rest day inside a run of completions
+does not widen the gap on either side of it — `gaps`, `mean` and `spread` are
+about rhythm, and that is the whole of what the transparency protects. `openGap`
+does NOT share it (#160): it is read as a plain factual answer to "when did I
+last do this", so it counts every CALENDAR day since the last completion, skips
+included — a habit last completed six days ago and resting through every one of
+them since must not render "0 days since last" merely because none of the six
+was a miss. The last gap is OPEN and is not counted as a closed gap yet —
+reported separately as `openGap`, the same distinction `computeRecovery`
+draws between a closed lapse and `openRun`. And `regularityOver` is withheld
+outright (`applicable: false`) under the same gate the awards card already
+withholds its own card under — an at-most habit resolved to `success`, asked
+through `unansweredCounts` rather than restated — because under that
+resolution every unanswered day is already a "completion" and a gap between
+them measures nothing.
+
 ## Habit order (`habitSort`)
 
 **The list gets a sort order, and it is the SERVER's answer, never `paint()`'s.**
