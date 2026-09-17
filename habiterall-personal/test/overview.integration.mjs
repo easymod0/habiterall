@@ -383,6 +383,70 @@ ck('...and all three figures agree with the habit\'s own page',
   `overview ${phantomRow.score}/${phantomRow.currentStreak}/${phantomRow.bestStreak} vs `
   + `stats ${phantomStats.score}/${phantomStats.currentStreak}/${phantomStats.bestStreak}`);
 
+/* ---- issue #340 review round 1: the leniency at a habit's BIRTH must not
+ * fire at a bounded SLICE's own edge, and this pins the WIRING rather than
+ * the pure function. `onPaceSeries`'s leniency window near the start of a
+ * range is sound only where the range opens at the habit's genuine first
+ * row — this route reads two BOUNDED slices that each open wherever they
+ * happen to reach (the 400-day summary window for `score`/`currentStreak`,
+ * the 1830-day streak scan for `bestStreak`), so it must hand both
+ * `summaryStats` and `recomputeBestStreak` the habit's LIFETIME first row
+ * (the same `MIN(date)` read that already feeds `creditAnchor`) or the
+ * leniency at either slice's own edge is mistaken for the habit's birth.
+ *
+ * A single row 2000 days back is this habit's whole history for a long
+ * stretch — outside BOTH the 400-day and the 1830-day windows, so both bugs
+ * are reachable through one fixture — then 300 days back it resumes and is
+ * kept EXACTLY 3-per-7 (every rolling 7-day window holds precisely 3
+ * completions) with the completions clustered late in each cycle: the shape
+ * #340's own fix names as the one that survives even against the unfixed,
+ * un-floored ratio only when it is front-loaded, and fails otherwise.
+ * `computeStats`, over the WHOLE history, opens at the true 2000-day-back row
+ * and reads both figures at 295. Routed through this SAME habit's
+ * `/overview` row, each bounded slice's own earliest fetched row is the
+ * 300-day-back restart — not the habit's real birth — so a route that forgot
+ * to hand over the lifetime `birth` to either pass would apply the leniency
+ * there too, over-crediting the slice's own first six days by two and
+ * reading 297 instead of 295.
+ */
+const birthWiring = await post('/habits', {
+  name: 'BirthWiring', type: 'boolean', freq_numerator: 3, freq_denominator: 7,
+});
+const RESTART_DAYS_AGO = 300;
+db.prepare(
+  `INSERT INTO entries (habit_id, date, value, status, notes) VALUES (?, ?, ?, ?, ?)`
+).run(birthWiring.id, daysAgo(2000), 2, '', '');
+for (let i = RESTART_DAYS_AGO; i >= 0; i--) {
+  const idx = RESTART_DAYS_AGO - i; // 0 at the restart, increasing toward today
+  // Marks cluster in the LATE three of every 7-index cycle (never Mon/Wed/Fri
+  // spread-evenly, which the brief names as the one layout that survives even
+  // against the unfixed, un-floored ratio and so cannot see this bug). Every
+  // day carries a row — a stated `0` where unmarked, never an absent one — so
+  // the slice's earliest fetched row lands exactly at the restart date rather
+  // than drifting to whichever day happens to hold the first completion.
+  db.prepare(
+    `INSERT INTO entries (habit_id, date, value, status, notes) VALUES (?, ?, ?, ?, ?)`
+  ).run(birthWiring.id, daysAgo(i), (idx % 7 >= 4) ? 2 : 0, '', '');
+}
+
+const withBirthWiring = await overview({ days: 7 });
+const birthWiringRow = withBirthWiring.habits.find((h) => h.id === birthWiring.id);
+const birthWiringStats = await fetch(`${base}/api/habits/${birthWiring.id}/stats`)
+  .then((r) => r.json());
+
+ck('a bounded 400-day slice does not mistake its own edge for this habit\'s ' +
+  'birth — currentStreak, from summaryStats (#340 review round)',
+  birthWiringRow.currentStreak === 295, String(birthWiringRow.currentStreak));
+ck('...nor does the bounded 1830-day streak scan — bestStreak, from ' +
+  'recomputeBestStreak',
+  birthWiringRow.bestStreak === 295, String(birthWiringRow.bestStreak));
+ck('...and /overview agrees with the habit\'s own page, which reads the ' +
+  'whole history and so always opens at the genuine birth',
+  birthWiringRow.currentStreak === birthWiringStats.currentStreak
+  && birthWiringRow.bestStreak === birthWiringStats.bestStreak,
+  `overview ${birthWiringRow.currentStreak}/${birthWiringRow.bestStreak} vs `
+  + `stats ${birthWiringStats.currentStreak}/${birthWiringStats.bestStreak}`);
+
 /* ---- issue #200: /overview orders the habit list by the stored `habitSort` ----
  *
  * Created in an order that is deliberately NOT name order and NOT score

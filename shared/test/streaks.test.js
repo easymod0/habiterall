@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 
-const { computeStreaks, dateRange, bestStreak, currentStreak, computeScores } = await import('../src/stats.js');
+const { computeStreaks, dateRange, bestStreak, currentStreak, computeScores,
+  computeStats, summaryStats, addDays, UNLOGGED_DEFAULT } = await import('../src/stats.js');
 
 const YES = 2, SKIP = 3, UNSET = 0;
 const boolHabit = {
@@ -298,12 +299,14 @@ test('a 3x/7 habit done only 2 times a week has no current streak', () => {
     if ([1, 3].includes(dow)) entries.set(d, YES); // Mon+Wed only, under target
   }
   const streaks = computeStreaks(habit, entries, start, end);
-  // `currentStreak` alone is 0 under both the fix and the unfixed code — the
-  // unfixed code still produces two runs from this fixture, and neither is
-  // current either way. It is the STRUCTURE that differs: fixed, every
-  // trailing window this schedule can ever fill floors to a requirement of 1,
-  // which the first Monday alone already meets, so the two on-days a week
-  // never accumulate into anything longer than a single day.
+  // `currentStreak` alone is 0 under both the fix and the unfixed code —
+  // measured, the unfixed code produces ZERO runs at all from this fixture
+  // (`[]`), because the un-floored, un-clamped ratio never falls low enough
+  // for two days a week to clear it even once. It is the STRUCTURE that
+  // differs: fixed, every trailing window this schedule can ever fill floors
+  // to a requirement of 1, which the first Monday alone already meets, so the
+  // two on-days a week accumulate into a single one-day streak instead of
+  // none at all.
   assert.deepEqual(streaks,
     [{ start: '2026-01-05', end: '2026-01-05', length: 1, skips: 0 }]);
   assert.equal(currentStreak(streaks, end), 0);
@@ -331,4 +334,89 @@ test('daily and twice-a-day habits split at a miss exactly as before (num >= den
     { start: '2026-01-01', end: '2026-01-04', length: 4, skips: 0 },
     { start: '2026-01-06', end: '2026-01-10', length: 5, skips: 0 },
   ]);
+});
+
+/* ---------- #340 review round 1: the leniency is sound only at a BIRTH ---------- */
+
+// A 3x/7 habit with one row 900 days before `end`, then silence, then a
+// restart 300 days before `end` kept perfectly at Mon/Wed/Fri ever since.
+// `computeStats` (no `start`) opens at the habit's own lifetime first row —
+// its genuine birth — so it always agreed. `summaryStats` over a bounded
+// 400-day slice opens at the RESTART instead, which is not a birth: the days
+// before it already happened, they are simply outside the slice the caller
+// fetched. Without the gate the restart's own first six days were pro-rated
+// as if the habit had no history there, adding five days nothing earned.
+test('#340 review: a bounded slice must not mistake its own edge for the ' +
+     'habit\'s birth — computeStats and summaryStats must agree', () => {
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const end = '2026-06-30';
+  const trueBirth = addDays(end, -900);
+  const restart = addDays(end, -300);
+
+  const entries = [{ date: trueBirth, value: YES }];
+  for (const d of dateRange(restart, end)) {
+    const dow = new Date(d + 'T12:00:00').getDay();
+    if ([1, 3, 5].includes(dow)) entries.push({ date: d, value: YES }); // Mon/Wed/Fri
+  }
+
+  // The detail view: the whole history, no `start`, opens at `trueBirth`.
+  const detail = computeStats(habit, entries, { end });
+  assert.equal(detail.currentStreak, 296);
+
+  // The dashboard: a bounded 400-day slice, so the earliest row IN the slice
+  // is the restart — 300 days back, well inside the fetched 400. `birth` is
+  // supplied as the habit's real, LIFETIME first row (900 days back), which
+  // both editions' routes read from the same `MIN(date)` query that already
+  // feeds `creditAnchor`.
+  const cutoff = addDays(end, -400);
+  const windowed = entries.filter((e) => e.date >= cutoff);
+  const dashboard = summaryStats(habit, windowed, { end, birth: trueBirth });
+  assert.equal(dashboard.currentStreak, 296,
+    'the dashboard must agree with the detail view about this habit (#340)');
+});
+
+// The contract test: `summaryStats` with `birth` WITHHELD. This is the same
+// shape `creditFrom` already has (`resolveWindow`'s own JSDoc) — a bounded
+// caller that does not supply the lifetime value gets a figure derived from
+// its own slice, which is narrower than the truth and, here, simply wrong:
+// the derived birth lands on the restart, which IS the slice's own edge, so
+// the leniency fires there as if it were day one of the habit's life.
+test('#340 review: summaryStats withholding birth is a stated contract, not a bug', () => {
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const end = '2026-06-30';
+  const trueBirth = addDays(end, -900);
+  const restart = addDays(end, -300);
+
+  const entries = [{ date: trueBirth, value: YES }];
+  for (const d of dateRange(restart, end)) {
+    const dow = new Date(d + 'T12:00:00').getDay();
+    if ([1, 3, 5].includes(dow)) entries.push({ date: d, value: YES });
+  }
+
+  const cutoff = addDays(end, -400);
+  const windowed = entries.filter((e) => e.date >= cutoff);
+  const withheld = summaryStats(habit, windowed, { end });
+  assert.equal(withheld.currentStreak, 301,
+    'withholding birth from a bounded caller is the caller\'s to get right, ' +
+    'exactly as creditFrom already documents — this is the pre-#340 number');
+});
+
+// The other half: a habit whose range genuinely DOES open at its own birth
+// must be entirely unaffected by this review round — reuses the Sat+Sun+Mon
+// fixture from #340's own fix above, but passes `birth` explicitly (equal to
+// `start`) rather than relying on the omitted-`birth` default, so this pins
+// the gate's ACTIVE branch (`dates[0] === birth`) and not merely its
+// backward-compatible fallback, which the pre-existing test above already
+// covers.
+test('#340 review: a habit whose range opens at its own birth is unaffected', () => {
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const start = '2026-01-05', end = '2026-04-05'; // Monday .. Sunday, 91 days
+  const entries = new Map();
+  for (const d of dateRange(start, end)) {
+    const dow = new Date(d + 'T12:00:00').getDay(); // Sat=6, Sun=0, Mon=1
+    if (dow === 6 || dow === 0 || dow === 1) entries.set(d, YES);
+  }
+  const streaks = computeStreaks(habit, entries, start, end, UNLOGGED_DEFAULT, undefined, start);
+  assert.deepEqual(streaks, [{ start, end, length: 91, skips: 0 }],
+    'unchanged by the birth gate — the range opens at this habit\'s own first row');
 });

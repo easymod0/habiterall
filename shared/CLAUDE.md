@@ -484,16 +484,26 @@ elapsed count shrinks along with the calendar, which is why Apia round-trips
 untouched. Both cases are pinned in `test/timezones.test.js`, under their own
 zones, because neither is observable from anywhere else.
 
-**`onPaceSeries` pro-rates the requirement near the start** —
+**`onPaceSeries` pro-rates the requirement near the start, but only at a
+habit's own BIRTH** —
 `required = max(1, floor(min(activeDays, num*activeDays/den)))` — so a habit is
 not judged against history it does not have yet. It FLOORS rather than rounds
 up: `>=` against the raw ratio silently demanded the next whole day, which made
-a pro-rated window ask MORE than the habit's own rate (`docs/decisions/
-on-pace-and-frequency.md`, #340). Consequence worth knowing before touching it:
-moving the earliest entry EARLIER re-judges the first `den - 1` days against a
-full requirement they now fail, so *remembering something you did* can lower a
-figure. Daily habits (`num >= den`) have no leniency window and are immune, which
-is why a test suite built on one cannot see this.
+a pro-rated window ask MORE than the habit's own rate. The leniency fires only
+while the range being walked opens at the habit's own LIFETIME first row
+(`birth`); once it opens somewhere else — a bounded slice (`/overview`'s
+400-day window, `recomputeBestStreak`'s 1830-day one, a narrowed `?start=`) —
+a short window there is the slice's own edge rather than missing history, and
+is judged by the plain, unfloored expression instead (`docs/decisions/
+on-pace-and-frequency.md`, #340, review round 1). Consequence worth knowing
+before touching it: for a caller that walks a habit's WHOLE history with no
+override — `computeStats`, and so `/awards` — moving the earliest entry
+EARLIER re-judges the first `den - 1` days against a full requirement they now
+fail, so *remembering something you did* can lower a figure. A bounded caller
+supplying the real `birth` does not see this: its own slice never opened at
+the habit's birth to begin with, so the leniency was never there to lose.
+Daily habits (`num >= den`) have no leniency window and are immune, which is
+why a test suite built on one cannot see this.
 
 **`computeCoverage` reports only the months the window entirely CONTAINS**, and
 that one rule does two jobs. A partial first month can never legitimately be
@@ -558,7 +568,13 @@ the window, the streak called three days a lapse while the score kept
 climbing across them — measured, not hypothetical: 0.466383 on the last day
 both agreed on, then rising through 0.507831, 0.522427 and 0.550135 on the
 three days they disagreed about. `docs/decisions/on-pace-and-frequency.md`
-(#340) closes it by flooring the requirement instead of rounding it up.
+(#340) closes it by flooring the requirement instead of rounding it up. That
+leniency is birth-gated: it applies only where the range being walked opens at
+the habit's own LIFETIME first row, because a bounded caller's range often
+opens somewhere else and the days before THAT edge already happened — a
+review round found the dashboard and the detail view disagreeing about one
+habit's streak for exactly this reason (`docs/decisions/
+on-pace-and-frequency.md`, review round 1).
 
 Consequences worth knowing. A streak counts CALENDAR days, so a 3×/week habit
 kept for a month is a 30-day streak rather than a 12-day one — that is what

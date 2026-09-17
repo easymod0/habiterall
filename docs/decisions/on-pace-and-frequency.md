@@ -124,37 +124,66 @@ ok: activeDays <= 0 || windowDone + 1e-9 >= required
   || (windowDone >= 1 && potential + 1e-9 >= Math.min(activeDays, num));
 ```
 
-Each half fixes one fixture and does nothing for the other, and each opens its
-own hole that the other's guard has to close — measured by ablating each half
-in isolation against both fixtures (the 91-day Sat+Sun+Mon schedule and the
-Mon/Wed/Fri-with-two-skips fixture above):
+This is the AT-BIRTH branch only — the one that runs while `dates[0] === birth`
+— and the ablations below are about the two guards inside it. The gate that
+decides whether this branch or master's own, unfloored expression runs for a
+given day is a review-round addition, covered in its own section further down;
+it changes nothing about which fixture exercises which guard here.
 
-- **Floor alone fixes the skip case.** A floored requirement never demands
-  more than the habit's own rate, so the skip fixture collapses to one run.
-  It does **nothing** for the warm-up: Sat+Sun+Mon still fractures into two
-  runs (measured: 4 and 86 days) exactly as it does unfixed, because flooring
-  changes what the requirement demands once the window is full, not whether an
-  unfilled window is judged at all. And flooring alone opens a hole of its
-  own: on day one of a brand-new 3×/7 habit, `Math.floor(0.429)` is 0, and a
-  requirement of 0 is trivially met by a window with nothing in it at all —
-  measured, a habit whose only stored row is a stated lapse reports
-  `bestStreak` 2 with floor alone, where master and the full fix both read 0.
-- **The unfilled-window clause alone fixes the warm-up.** A window that has
-  not finished filling cannot yet fail, because there are still days left in
-  it to reach `num` — measured, Sat+Sun+Mon collapses to one 91-day run with
-  the clause alone and no floor. It does **nothing** for the skip case (still
-  two runs, measured), because the skip fixture's window is full and it is the
-  floored-vs-raw requirement that was wrong there, not whether the window had
-  finished filling. And the clause opens its own hole if the requirement is
-  otherwise met trivially by an empty window: ungated, `potential` alone reads
-  a window with no evidence in it as "still able to reach target" — measured,
-  a habit whose only stored row is a skip reports `bestStreak` 4 with the
-  clause ungated, where master and the full fix both read 0.
+Neither half is separable along a clean "this fixture, not that one" line —
+measured by ablating each of the four sub-expressions in isolation against
+SIX fixtures, not two: Sat+Sun+Mon and the 5×/7 Thu-Mon schedule (the two
+front-loading cases), the Mon/Wed/Fri-with-two-skips fixture, the under-target
+case (3×/7 done only 2 days a week, `currentStreak` must read 0), and the two
+`bestStreak`-manufactured-from-silence cases (a lone stated lapse, a lone
+skip). The ablations are MORE entangled than "each half owns one fixture",
+which is worse for isolating either half and better for what it says about
+the coverage: no single fixture in the set is carried by only one guard.
 
-So `Math.max(1, …)` and the `windowDone >= 1` gate are not a third feature —
-each is closing the hole its own neighbouring half opens, and neither guard is
-answering the other fixture. Both halves, both guards, are what the measurement
-shows necessary; no combination of three of the four passes both fixtures.
+- **Dropping `Math.max(1, …)`** — `Math.floor(...)` alone, no floor at
+  1 — fails **four** of the six: the lone-lapse and lone-skip cases (a
+  requirement of 0 on day one, `Math.floor(0.429)`, is trivially met by a
+  window holding nothing at all — measured, `bestStreak` 2 for the lone
+  lapse), and, less obviously, the two-skip and under-target cases too:
+  without the floor at 1, a day whose window has too few active days to
+  round up to even 1 completion passes the FIRST condition on nothing, which
+  papers over exactly the shortfall the `windowDone >= 1` gate on the clause
+  exists to catch, so the fixtures that exercise that gate fail once the
+  floor stops forcing a nonzero requirement onto it. Sat+Sun+Mon and Thu-Mon
+  are unaffected — their divergence from master is about the CLAUSE, not the
+  floor's lower bound.
+- **Deleting `windowDone >= 1 &&` from the clause** fails the SAME four —
+  lone-lapse, lone-skip, two-skip and under-target — for the mirror-image
+  reason: with the evidence gate gone, `potential` alone reads a window with
+  ZERO completions in it as "still able to reach target" purely because days
+  remain, which is precisely the #223 shape both `bestStreak`-from-silence
+  fixtures are built to catch, and the same ungated clause also papers over
+  the two-skip and under-target shortfalls the way the missing floor does
+  above — two different sub-expressions guarding the identical set of four
+  fixtures from two different directions.
+- **Deleting the whole clause** — no leniency at all, `ok` decided by the
+  floored requirement alone — fails Sat+Sun+Mon, 5×/7 Thu-Mon and
+  under-target. The two front-loading fixtures fail for the reason the clause
+  exists: a still-filling window cannot pass on `windowDone` alone once every
+  short window is compared against a strictly-positive floored requirement.
+  Under-target fails too, for a subtler reason: that fixture's `currentStreak`
+  reads 0 only because every trailing window this schedule can ever fill
+  floors its requirement down to 1, which the FIRST Monday already meets
+  without needing the clause — remove the clause and that same first Monday
+  needs the clause to be judged at all (`windowDays < den` there), so the one
+  streak the fixture asserts (`length: 1`) disappears along with the two it
+  is checking are absent. The two-skip and lone-row fixtures are unaffected
+  by this ablation — their divergence from master is about the FLOOR and the
+  evidence gate, not the clause's leniency.
+
+So `Math.max(1, …)`, the `windowDone >= 1` gate and the clause are not three
+independent features each answering its own fixture — they overlap, and the
+overlap is what makes the set of six fixtures a stronger net than "one guard,
+one bug" would suggest: the same four fixtures catch a missing floor AND a
+missing evidence gate, from opposite directions, while a third, disjoint set
+of three catches a missing clause. Every guard is still necessary — no
+ablation above leaves all six passing — but "each half fixes one fixture and
+does nothing for the other" overstated how separable they are.
 
 Both holes are #223's shape — a lone imported or stray row manufacturing a
 streak out of silence rather than out of anything the habit did — and both
@@ -174,6 +203,53 @@ first 7-day window is still open, and it holds at least the one completion
 the evidence gate asks for, the habit has not yet had the chance to fall
 behind — the unfilled-window clause is doing exactly what it is for. Do not
 narrow it back down; that reopens the warm-up case above.
+
+## Review round 1: the leniency is sound only at a habit's BIRTH
+
+The first round of this fix treated "the window is short" as "the habit has
+not lived this long" unconditionally — true when `dates[0]` is the habit's own
+first row, and false when the range merely *opens* there because that is all
+the caller fetched. Three callers fetch a bounded SLICE rather than a habit's
+whole history: both editions' `/overview` (`summaryStats` over
+`SUMMARY_WINDOW_DAYS`, 400 days), `recomputeBestStreak`
+(`shared/src/summary-cache.js`) over `STREAK_HISTORY_DAYS` (1830 days), and
+`GET /habits/:id/stats?start=`. The days a bounded slice's window reaches back
+into DID happen and DO have rows — the caller simply did not fetch them — so
+crediting them with "the habit has no history here" is wrong, and it made two
+surfaces disagree about one habit.
+
+**Measured, and this is the reproduction kept as the record.** A 3×/7 habit
+with one row 900 days before `end`, then silence, then a restart 300 days
+before `end` kept perfectly at Mon/Wed/Fri ever since, `end = 2026-06-30`:
+
+| | master | round 1 | round 2 (birth-gated) |
+|---|---|---|---|
+| detail view — `computeStats`, no `start` | 296 | 296 | 296 |
+| dashboard — `summaryStats` over the 400-day slice | 296 | **301** | 296 |
+
+Master agrees with itself; round 1 did not. Gating only the unfilled-window
+CLAUSE on birth was not enough by itself and still measured 301: the floored
+`Math.max(1, …)` requirement over-credits at a slice edge too, because
+`max(1, floor(3d/7))` is far laxer than master's own `ceil(3d/7)`-shaped
+demand for small `d`. The gate has to cover the whole partial-window
+treatment, both the requirement and the clause, not just the clause.
+
+**The rule:** `onPaceSeries` learns the habit's LIFETIME earliest real row
+(`birth`), and a day whose window is still partial (`windowDays < den`) is
+judged by the new, floored rule only while `dates[0] === birth` — the range
+genuinely opens at this habit's own start, and the days before it did not
+happen. Once the range opens somewhere else, a short window is merely a
+SLICE edge, not missing history, and every such day is judged by MASTER's
+own expression instead, unfloored and unclaused: **outside a habit's genuine
+birth, this fix alters no streak, no miss run, no resilience figure and no
+`lastMiss` anywhere** — the property the shape above is chosen to hold, and
+the property the 296/296/296 row confirms. `birth` is threaded the same way
+`creditFrom` already is (`resolveWindow`'s own JSDoc states the same
+reasoning for that date): a caller holding the whole history gets it for
+free, since the range does open at the habit's birth there; a caller holding
+a bounded slice must supply the LIFETIME value itself, or `onPaceSeries`
+narrows to the same answer round 1 gave, which is `summaryStats`'s and
+`recomputeBestStreak`'s own stated contract for withholding it.
 
 ## What this does not fix
 

@@ -171,13 +171,24 @@ export function summaryCacheHit(row, summaryEnd) {
  * a scan for a minimum rather than a read of a position — so a caller is no
  * longer silently depending on its query's `ORDER BY`.
  *
+ * **`birth` is the habit's LIFETIME earliest real row, and this scan is a
+ * bounded caller for exactly the reason `onPaceSeries`'s own doc comment
+ * names (#340).** The scan opens at the earliest REAL row *inside* its own
+ * `STREAK_HISTORY_DAYS` slice — not at the habit's true first row, for a
+ * habit whose history outlasts that window — so without `birth` a short
+ * leniency window at the SLICE's own edge is mistaken for the habit's birth,
+ * pro-rating a requirement the habit has no excuse for. The caller must
+ * supply it from the same `MIN(date)` read that already feeds `creditAnchor`;
+ * see `summaryStats`'s JSDoc for what a caller gets for withholding it.
+ *
  * @param {import('./types.js').Habit} habit
  * @param {Array<{date: string, value: number, status?: string}>} entries the
  *   habit's rows over the last `STREAK_HISTORY_DAYS`. Any order.
- * @param {{summaryEnd: string, unlogged?: string, creditFrom?: string}} opts
+ * @param {{summaryEnd: string, unlogged?: string, creditFrom?: string,
+ *          birth?: string}} opts
  * @returns {number}
  */
-export function recomputeBestStreak(habit, entries, { summaryEnd, unlogged, creditFrom }) {
+export function recomputeBestStreak(habit, entries, { summaryEnd, unlogged, creditFrom, birth }) {
   const entryMap = new Map(
     entries.map((e) => [e.date, { value: e.value, status: e.status }])
   );
@@ -191,7 +202,8 @@ export function recomputeBestStreak(habit, entries, { summaryEnd, unlogged, cred
     earliestRealDay(entryMap.keys()) ?? summaryEnd,
     summaryEnd,
     unlogged,
-    creditFrom
+    creditFrom,
+    birth
   );
   return bestStreak(streaks);
 }

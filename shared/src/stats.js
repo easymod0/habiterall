@@ -904,6 +904,33 @@ function regularityOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
  * completion is already in it — so near `start`, where the window is short, a
  * habit is not judged against a week of history it does not have yet.
  *
+ * **That leniency is sound only at the habit's genuine BIRTH, and `birth` is
+ * what tells the two apart (#340's review round).** A short window near the
+ * start of `dates` means "the habit has no history here" only when `dates[0]`
+ * IS that first day — a caller who merely fetched a bounded SLICE (both
+ * editions' `/overview` over `SUMMARY_WINDOW_DAYS`, `recomputeBestStreak` over
+ * `STREAK_HISTORY_DAYS`, a narrowed `?start=`) opens its range somewhere the
+ * habit was already alive, and the days the window reaches back into DID
+ * happen and DO have rows the caller just did not fetch — crediting them made
+ * a 3×/7 habit kept perfectly for 400 days read `currentStreak` 301 on the
+ * dashboard against 296 on its own page (`docs/decisions/on-pace-and-frequency.md`,
+ * #340). So: while `dates[0] === birth`, this is the habit's own start and the
+ * leniency above applies exactly as written. Once the range opens somewhere
+ * ELSE — `birth` supplied and different from `dates[0]` — a short window is
+ * merely a slice edge, not missing history, and every day the window is still
+ * partial is judged by the plain, unfloored, unclaused ratio instead: the
+ * expression this rule replaces everywhere else. A day once the window has
+ * FILLED (`windowDays === den`) is judged the same way either way, since a
+ * full window needs no leniency and floors to the same whole number the raw
+ * ratio does. Omitting `birth` behaves as `dates[0] === birth` always — the
+ * pre-review, always-lenient shape — which is right for a caller (a direct
+ * test, `computeStats`) that has already opened its window at the habit's own
+ * first row and wrong for a caller holding a bounded slice, which must supply
+ * the real one (see `summaryStats`'s own JSDoc for what happens if it does
+ * not). The property this buys: outside a habit's genuine birth, this rule
+ * alters no streak, no miss run, no resilience figure and no `lastMiss`
+ * anywhere.
+ *
  * For a habit asking for something every day (`num >= den`) the window is one
  * day and the requirement clamps to it, so this reduces exactly to
  * `isCompleted` and daily habits behave precisely as they always have.
@@ -921,13 +948,20 @@ function regularityOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
  *   call over `start, end`) and hands it in; because this function is not
  *   exported and has no `dates` parameter reachable from outside `stats.js`,
  *   there is no second way to reach it with an unclamped range.
+ * @param {string} [birth] the habit's LIFETIME earliest real row — see the
+ *   note above. Compared against `dates[0]` as a plain string.
  * @returns {{date: string, ok: boolean|null}[]} `null` on a skipped day, which
  *   is transparent: it neither starts, extends nor breaks a run.
  */
 function onPaceSeries(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
-                      creditFrom = undefined) {
+                      creditFrom = undefined, birth = undefined) {
   const num = Math.max(1, Number(habit.freq_numerator) || 1);
   const den = Math.max(1, Number(habit.freq_denominator) || 1);
+
+  // See the doc comment above: undefined behaves as "the range opens at the
+  // habit's own birth", which is the only shape a caller not supplying this
+  // could honestly mean.
+  const opensAtBirth = birth === undefined || (dates.length > 0 && dates[0] === birth);
 
   const done = dates.map(
     (date) => isCompleted(habit, entryMap.get(date), unlogged, answeredBy(date, creditFrom))
@@ -952,30 +986,42 @@ function onPaceSeries(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
 
     const windowDays = Math.min(i + 1, den);
     const activeDays = windowDays - windowSkips;
-    // `num * activeDays` before the division, so a whole-number requirement
-    // stays whole: 3 × 7 / 7 is exactly 3, where 3 × (7/7) can float.
-    // Capped at the days available, which is what keeps a "twice a day" habit
-    // — more than the one row a day can hold — from being impossible to meet.
-    // The requirement is a ratio and the count is not, so it FLOORS. `>=`
-    // against the ratio silently rounded it UP to the next whole day: a window
-    // pro-rated to 2.143 asked for 3, which is 60% of its active days on a
-    // habit set to 43%, so two skip days made a habit HARDER and the first
-    // `den - 1` days of every range demanded a weekly quota inside three days.
-    // Never below 1, or a window holding no completion at all reads as kept.
-    const required = Math.max(1, Math.floor(Math.min(activeDays, (num * activeDays) / den) + 1e-9));
-    // A window that has not FILLED yet cannot put the habit behind: with days
-    // still to come it can still reach `num`. Gated on a completion already in
-    // hand, so a lone imported lapse cannot manufacture a run out of silence
-    // (#223's shape) — ungated it reports a 4-day streak from one stored 0.
-    const potential = windowDone + (den - windowDays);
 
-    out.push({
-      date: dates[i],
+    let ok;
+    if (windowDays < den && !opensAtBirth) {
+      // The window is short because the SLICE opens here, not because the
+      // habit does — the days it reaches back into already happened, so no
+      // leniency: master's own expression, unfloored and unclaused.
+      const required = Math.min(activeDays, (num * activeDays) / den);
+      ok = activeDays <= 0 || windowDone + 1e-9 >= required;
+    } else {
+      // `num * activeDays` before the division, so a whole-number requirement
+      // stays whole: 3 × 7 / 7 is exactly 3, where 3 × (7/7) can float.
+      // Capped at the days available, which is what keeps a "twice a day"
+      // habit — more than the one row a day can hold — from being impossible
+      // to meet.
+      // The requirement is a ratio and the count is not, so it FLOORS. `>=`
+      // against the ratio silently rounded it UP to the next whole day: a
+      // window pro-rated to 2.143 asked for 3, which is 60% of its active
+      // days on a habit set to 43%, so two skip days made a habit HARDER and
+      // the first `den - 1` days of every range demanded a weekly quota
+      // inside three days. Never below 1, or a window holding no completion
+      // at all reads as kept.
+      const required = Math.max(1, Math.floor(Math.min(activeDays, (num * activeDays) / den) + 1e-9));
+      // A window that has not FILLED yet cannot put the habit behind: with
+      // days still to come it can still reach `num`. Gated on a completion
+      // already in hand, so a lone imported lapse cannot manufacture a run
+      // out of silence (#223's shape) — ungated it reports a 4-day streak
+      // from one stored 0.
+      const potential = windowDone + (den - windowDays);
+
       // A hair of tolerance on both comparisons: `required` is derived from a
       // division and the count is not.
-      ok: activeDays <= 0 || windowDone + 1e-9 >= required
-        || (windowDone >= 1 && potential + 1e-9 >= Math.min(activeDays, num)),
-    });
+      ok = activeDays <= 0 || windowDone + 1e-9 >= required
+        || (windowDone >= 1 && potential + 1e-9 >= Math.min(activeDays, num));
+    }
+
+    out.push({ date: dates[i], ok });
   }
   return out;
 }
@@ -1051,9 +1097,15 @@ function streaksFrom(series) {
  * @param {string} [creditFrom] see `answeredBy`. A route that scans streaks
  *   itself — both editions' `/overview`, for `bestStreak` — has to pass this or
  *   it serves a figure the rest of the same payload disagrees with (#223).
+ * @param {string} [birth] the habit's LIFETIME earliest real row — see
+ *   `onPaceSeries`. `recomputeBestStreak` (`summary-cache.js`) is the one
+ *   caller here that matters: its 1830-day slice opens wherever the scan
+ *   happens to reach, not necessarily at the habit's own first row, so it
+ *   must supply this or the leniency window at the slice's own edge is
+ *   mistaken for the habit's birth.
  */
 export function computeStreaks(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
-                               creditFrom = undefined) {
+                               creditFrom = undefined, birth = undefined) {
   // Clamp here rather than at each call site. `dateRange` allocates one
   // element per day, so a single entry dated in the distant past — trivially
   // planted through an import — would otherwise spin for hundreds of
@@ -1063,7 +1115,7 @@ export function computeStreaks(habit, entryMap, start, end, unlogged = UNLOGGED_
   // the clamp can be escaped from — and it cannot, because nothing outside
   // `stats.js` can reach `onPaceSeries` directly.
   const dates = boundedRange(start, end);
-  return streaksFrom(onPaceSeries(habit, entryMap, dates, unlogged, creditFrom));
+  return streaksFrom(onPaceSeries(habit, entryMap, dates, unlogged, creditFrom, birth));
 }
 
 export function currentStreak(streaks, endDate) {
@@ -1919,13 +1971,25 @@ export function creditAnchor(firstAnswer, end) {
  * such override, deliberately — it is how far back THIS reading reaches, which
  * is exactly what a slice does decide. See `creditAnchor`.
  *
+ * **A third date rides beside the other two for the identical reason: `birth`
+ * (#340's review round).** It is the same `firstEntry` this function already
+ * computes for `from` above — no new pass — returned so a caller can hand it
+ * to `onPaceSeries` (through `computeStreaks` / `summaryStats`'s own `birth`
+ * option) and tell "the range opens at the habit's own start" from "the range
+ * opens wherever a bounded SLICE happens to reach". A caller holding a full
+ * history gets the right answer for free — `from` and `birth` are the same
+ * value here, because the range DOES open at the habit's birth — and a caller
+ * holding a slice must supply the LIFETIME one itself, exactly as it must for
+ * `creditFrom`, or `onPaceSeries`'s leniency at the slice's own edge is
+ * mistaken for the habit's.
+ *
  * @param {import('./types.js').Entry[]} entries
  * @param {string|undefined} start
  * @param {string} end
  * @param {string} [creditFrom] a credit date the caller has already resolved
  *   through `creditAnchor`, for a bounded `entries`
  * @returns {{entryMap: Map<string, {value: *, status: string}>, from: string,
- *            creditFrom: string}}
+ *            creditFrom: string, birth: string|null}}
  */
 function resolveWindow(entries, start, end, creditFrom = undefined) {
   // Preserve `status` alongside the value so skips stay distinguishable from
@@ -1958,6 +2022,7 @@ function resolveWindow(entries, start, end, creditFrom = undefined) {
     // than wrong in the dangerous direction. Both routes pass `creditAnchor`,
     // which always answers a real day, so neither spelling is reachable today.
     creditFrom: creditFrom ?? creditFor(firstStatedAnswer(entryMap), start, end),
+    birth: firstEntry,
   };
 }
 
@@ -2049,7 +2114,7 @@ export function computeStats(habit, entries,
                                coverage = true, history = true,
                                weekdayByMonth = true, frequency = true,
                                trend = true, regularity = true } = {}) {
-  const { entryMap, from, creditFrom } = resolveWindow(entries, start, end);
+  const { entryMap, from, creditFrom, birth } = resolveWindow(entries, start, end);
 
   // One walk shared by every pass below (#219), where master built it once
   // PER PASS — `scoresOver`'s wrapper, `historyOver`'s, `weekdaysOver`'s,
@@ -2090,7 +2155,10 @@ export function computeStats(habit, entries,
   // `onPaceSeries` over the same `dates` a second time, for no reason but that
   // the fold was inline inside them. `streaksFrom`/`missRunsFrom` only READ
   // `onPace`; neither may mutate it, and both are handed the SAME object.
-  const onPace = onPaceSeries(habit, entryMap, dates, unlogged, creditFrom);
+  // `birth` is `resolveWindow`'s own `from` derivation (#340): this function is
+  // handed the habit's WHOLE entry set, so the range genuinely does open at
+  // its birth and no override is needed — see `onPaceSeries`'s doc comment.
+  const onPace = onPaceSeries(habit, entryMap, dates, unlogged, creditFrom, birth);
   const streaks = streaksFrom(onPace);
   const missRuns = missRunsFrom(onPace);
 
@@ -2178,6 +2246,18 @@ export function computeStats(habit, entries,
  * never answered from one that answered before the rows it fetched, and the two
  * readings differ by the whole width of the figure.
  *
+ * **`birth` is the same shape of override, and for the same reason (#340).**
+ * `onPaceSeries`'s leniency near the start of a range is sound only where the
+ * range opens at the habit's genuine first row — a BOUNDED slice opens
+ * wherever the caller happened to fetch, and the days its window reaches back
+ * into already happened. Left to derive one, this falls back to
+ * `resolveWindow`'s own `from` — which is exactly the slice's own edge, not
+ * the habit's LIFETIME first row — so **a bounded caller must pass the real
+ * one** (both editions' `/overview` reads it out of the same `MIN(date)` query
+ * that already feeds `creditAnchor`) or this reports the pre-#340 numbers:
+ * measured, a 3×/7 habit kept perfectly for 400 days read `currentStreak` 301
+ * here against 296 on `computeStats`'s own page, over the identical habit.
+ *
  * **`lastMiss` is a third, opt-IN pass, for the `'recently missed'` habit
  * sort and nothing else.** Declined — the default — the key is ABSENT from
  * the return, not `null`: the same precedent `coverage` sets in
@@ -2196,13 +2276,16 @@ export function computeStats(habit, entries,
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
  * @param {{start?: string, end?: string, unlogged?: string,
- *          creditFrom?: string, lastMiss?: boolean}} [opts]
+ *          creditFrom?: string, birth?: string, lastMiss?: boolean}} [opts]
  * @returns {import('./types.js').SummaryStats}
  */
 export function summaryStats(habit, entries,
                              { start, end, unlogged = UNLOGGED_DEFAULT,
-                               creditFrom: creditGiven, lastMiss = false } = {}) {
-  const { entryMap, from, creditFrom } = resolveWindow(entries, start, end, creditGiven);
+                               creditFrom: creditGiven, birth: birthGiven,
+                               lastMiss = false } = {}) {
+  const { entryMap, from, creditFrom, birth: derivedBirth } =
+    resolveWindow(entries, start, end, creditGiven);
+  const birth = birthGiven ?? derivedBirth;
 
   // Same one-walk, one-series sharing as `computeStats` — see the comment
   // there for why threading rather than a memo, and why the private `*Over`
@@ -2212,7 +2295,7 @@ export function summaryStats(habit, entries,
   // rather than a second time apiece inside that wrapper (#219).
   const dates = boundedRange(from, end);
   const { scores } = scoresOver(habit, entryMap, dates, unlogged, creditFrom);
-  const series = onPaceSeries(habit, entryMap, dates, unlogged, creditFrom);
+  const series = onPaceSeries(habit, entryMap, dates, unlogged, creditFrom, birth);
   const streaks = streaksFrom(series);
   // `missRunsFrom(series)` and NOT `computeMissRuns`, which would rebuild
   // both the walk and the series this function has already built — the same
@@ -2755,8 +2838,18 @@ export function computeCategoryStats(categories, members,
       // bucket series instead of walking the identical range again per member —
       // `computeScores` above keeps its own, wider, per-member walk
       // (`[memberWarm, end]`), which is not this range and must not share it.
+      //
+      // `firstEntry` — the member's own LIFETIME earliest row, already
+      // supplied or derived above — is `onPaceSeries`'s `birth` (#340): this
+      // axis is a comparison window the route was asked for, not the member's
+      // own history, so `dates[0]` opens at the member's birth only when the
+      // comparison's own `start` happens to coincide with it. Deriving one
+      // from `dates` instead would mistake every comparison's own edge for
+      // the member's birth and re-introduce the leniency `onPaceSeries`'s doc
+      // comment describes for a bounded slice.
       rate = computeRecovery(
-        missRunsFrom(onPaceSeries(habit, entryMap, dates, unlogged, memberCredit)), end
+        missRunsFrom(onPaceSeries(habit, entryMap, dates, unlogged, memberCredit, firstEntry)),
+        end
       ).rate;
     }
 
