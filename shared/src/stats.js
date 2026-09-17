@@ -1693,10 +1693,23 @@ function resolveWindow(entries, start, end, creditFrom = undefined) {
  * these three off of — declines nothing.
  *
  * A test pins each edition's two call sites here — `/stats`, which carries
- * `granularity` and takes every pass, and `/awards`, which carries the three
- * opt-outs beside `coverage: true` — and the one `summaryStats` call site at
+ * `granularity` and takes every pass, and `/awards`, which declines every
+ * opt-out no award reads — and the one `summaryStats` call site at
  * `/overview`, because a third shape added later must not quietly pay for
  * passes it discards either way.
+ *
+ * **Adding an opt-out to the destructuring below is therefore a change to
+ * `/awards` as well, and the guard is what says so.** It does not name
+ * today's opt-outs: `statsOptOuts` (`shared/test/awards.test.js`) reads them
+ * off this signature and requires `/awards` to decline each one that is not
+ * in `READ_BY_AWARDS` — a map carrying, per pass, the award that reads it.
+ * So a new opt-out fails that test by name until it is either declined at
+ * `/awards` or written down as one an award needs. The version that named
+ * `history`/`weekdayByMonth`/`frequency` as literals could not have seen a
+ * fourth, which mattered immediately: #160 adds `trend` and `regularity`
+ * here, neither of them read by `computeAwards`, and it conflicts with this
+ * PR on this exact destructuring — so the merge is a hand edit either way,
+ * and the only question was whether getting it wrong was silent.
  *
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
