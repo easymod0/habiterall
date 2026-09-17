@@ -2389,7 +2389,7 @@ It travels in the JSON backup. The Android app does not read it yet; see issue
 
 ## API
 
-27 endpoints, identical in both editions. Dates are local calendar dates
+28 endpoints, identical in both editions. Dates are local calendar dates
 (`YYYY-MM-DD`).
 
 <details>
@@ -2409,6 +2409,7 @@ It travels in the JSON backup. The Android app does not read it yet; see issue
 | `PUT` | `/habits/:id/entries/:date` | Record a value, a skip, or a note |
 | `DELETE` | `/habits/:id/entries/:date` | Clear a day |
 | `GET` | `/habits/:id/stats` | Full statistics (`?granularity=day\|week\|month\|quarter\|year`) |
+| `GET` | `/awards` | Every habit's awards, over its full history (no query params) |
 | `GET` | `/overview` | Dashboard data in one call (`?days=N&end=YYYY-MM-DD`) |
 | `GET` `PUT` `DELETE` | `/settings` | User preferences |
 | `POST` | `/notify/test` | Send a test notification to each configured destination |

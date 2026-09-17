@@ -218,6 +218,13 @@ class AppSettingsDefaultsTest {
         // copy of it. One renderer, so a second default would be the drift this
         // list exists to avoid rather than the mirror that prevents it.
         "detailCards" to "the detail view is the WebView, which reads it already",
+        // The account-wide off switch for the awards feature (#140). This
+        // client draws no award anywhere — no badge, no awards card, no
+        // awards page — and the one place an award is ever drawn is the
+        // detail view, which IS the WebView and already reads the web
+        // registry's own default, the identical reasoning `detailCards` gets
+        // above. A default here would be a value nothing native reads.
+        "awards" to "this client draws no award anywhere; the detail view is the WebView",
         // Server-sent destinations. The phone's own channel is `notifyChannels`,
         // which IS mirrored; these three configure Discord, which this client
         // neither posts to nor holds the credential for.

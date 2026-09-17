@@ -1573,8 +1573,18 @@ function buildResilienceCard({ stats, color, chartWidth }) {
  *
  * Returns null for a habit with nothing yet, so a brand-new one gets no empty
  * card — the same rule the resilience card follows.
+ *
+ * `awards` (ui/settings.js) is the account-wide off switch, and it is checked
+ * HERE rather than upstream: it is a rendering preference, never a reason for
+ * `GET /habits/:id/stats` or `GET /awards` to withhold the field — a display
+ * preference must not silently change what an API returns. Either it or the
+ * `detailCards` entry with id `awards` being off hides this card; the two ask
+ * different questions (an account-wide "I do not want this feature" versus a
+ * per-view card order/visibility preference) and either being off is enough.
  */
 function buildAwardsCard({ stats, color }) {
+  if (!settings.get('awards')) return null;
+
   // `?? []` and not a guard on the key: an offline boot can serve a stats
   // response the service worker cached before this shipped.
   const awards = stats.awards ?? [];

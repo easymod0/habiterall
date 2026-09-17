@@ -649,6 +649,10 @@ await withUser(alice, (db) => db.query(
     // from PORTABLE_SETTINGS entirely — which is the one decision that issue
     // had to make about this key.
     habitSort: 'strength',
+    // The awards off switch (#140). `false` rather than the registry default
+    // (`true`), or this compares `true` with `true` and passes with `awards`
+    // dropped from `PORTABLE_SETTINGS` entirely.
+    awards: false,
     discordWebhook: 'https://discord.com/api/webhooks/1/secret',
   }), alice]
 ));
@@ -669,6 +673,7 @@ ck('a backup carries the tracking settings',
   // in a list, and a key that quietly stopped travelling would show up only as
   // a page that came back longer than it was left.
   exported.gridDays === '7' && exported.habitSort === 'strength' &&
+  exported.awards === false &&
   JSON.stringify(exported.detailCards) === JSON.stringify(nonCanonicalDetailCards),
   JSON.stringify(exported));
 ck('and no notification destination',

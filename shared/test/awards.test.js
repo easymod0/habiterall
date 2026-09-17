@@ -607,6 +607,152 @@ function callsIn(src, name) {
 /** The argument text of every `computeAwards(...)` call, comments removed. */
 const awardCallsIn = (src) => callsIn(src, 'computeAwards');
 
+/**
+ * The `computeStats` opt-outs `/awards` must KEEP, each with the reason.
+ *
+ * A map and not a set, the same shape as Android's `notMirrored` and
+ * `compose.test.js`'s `ELSEWHERE`, because the next opt-out added has to be a
+ * decision somebody wrote down: either an award reads it and it belongs here,
+ * or `/awards` declines it. Everything `computeStats` offers and this does not
+ * name is a pass `/awards` pays for once per habit and throws away.
+ *
+ * Both tests below read it — the source-text guard to decide what the call
+ * site must decline, and the behavioural one to decide what to decline when
+ * it checks that the cheap reading earns the identical awards. One list, so
+ * they cannot come to disagree about which passes are dead weight.
+ */
+const READ_BY_AWARDS = new Map([
+  ['coverage', 'computeAwards reads stats.coverage for the coverage badge; '
+    + 'declining it would answer /awards and /habits/:id/stats with different '
+    + 'award arrays for the identical habit'],
+]);
+
+/**
+ * `computeStats`' options that are NOT opt-outs, each with what it is instead.
+ *
+ * The other half of `statsOptOuts`, and the half that makes it safe. An
+ * earlier version of that reader matched `name = true` and returned what it
+ * found, which meant a parameter it did not RECOGNISE was indistinguishable
+ * from one that was not there — so an opt-out spelled `trend = TREND_DEFAULT`,
+ * exactly the way `unlogged = UNLOGGED_DEFAULT` is spelled one line above it,
+ * was read as "no such opt-out" and `/awards` went on paying for the pass with
+ * this whole file green. A review round found it by mutation.
+ *
+ * So every option is classified and nothing is skipped: an opt-out defaults to
+ * the literal `true`, everything else is named here, and a parameter in
+ * neither fails the test by name. That turns the dangerous direction — a new
+ * pass the guard cannot see — into the loud one, and it is why this is a map
+ * with reasons rather than a set: the next option added to `computeStats` has
+ * to be classified by somebody, not merely tolerated.
+ */
+const NOT_OPT_OUTS = new Map([
+  ['start', 'the window\'s own start date, not a pass'],
+  ['end', 'the window\'s own end date, not a pass'],
+  ['granularity', "history's bucket width ('day'); /awards declines history "
+    + 'and so carries no granularity at all'],
+  ['weekStart', "which day a week opens on ('monday'), an account setting"],
+  ['unlogged', 'what an unanswered day is worth (UNLOGGED_DEFAULT) — a '
+    + 'judgement every pass reads, never a pass that can be skipped'],
+]);
+
+/**
+ * Every optional pass `computeStats` lets a caller decline, read off its own
+ * signature in `shared/src/stats.js`.
+ *
+ * An opt-out is a destructured option defaulting to the literal `true` — that
+ * is what the shape has meant since `coverage` was the only one, and it is the
+ * shape the ones added since kept. Every OTHER option is in `NOT_OPT_OUTS`,
+ * and this throws on one that is in neither rather than quietly omitting it;
+ * see that map for the mutation that made the difference matter.
+ *
+ * Derived rather than listed because the list is the thing that goes stale:
+ * a guard naming today's opt-outs as literals is green on the day a fourth is
+ * added, which is the day `/awards` starts paying for a pass nothing reads.
+ * The caller asserts the size and a known member before trusting it, since a
+ * reader that silently answers `[]` makes every check downstream vacuous.
+ *
+ * Deliberately NOT imported and called: `computeStats.length` is 2 and a
+ * function cannot be asked for its destructured option names at runtime, so
+ * the signature is the only place this exists to be read from.
+ *
+ * @returns {string[]}
+ */
+function statsOptOuts() {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const src = stripComments(readFileSync(join(root, 'shared', 'src', 'stats.js'), 'utf8'));
+  const at = src.indexOf('export function computeStats(');
+  assert.notEqual(at, -1, 'computeStats is not declared in shared/src/stats.js');
+  // The options object only: from the `{` that opens the destructuring to the
+  // `}` that closes it, matched by depth rather than by the first `}` found,
+  // so a nested default cannot end the scan early.
+  const open = src.indexOf('{', at);
+  assert.notEqual(open, -1, 'cannot find computeStats\' options destructuring');
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < src.length; i++) {
+    if ('{[('.includes(src[i])) depth++;
+    else if ('}])'.includes(src[i])) {
+      depth--;
+      if (depth === 0) { close = i; break; }
+    }
+  }
+  assert.notEqual(close, -1, 'cannot find the end of computeStats\' options');
+
+  // Split on the commas that separate OPTIONS — depth 0 only, so a default
+  // holding a comma cannot split one parameter into two.
+  const body = src.slice(open + 1, close);
+  const parts = [];
+  let start = 0;
+  depth = 0;
+  for (let i = 0; i < body.length; i++) {
+    if ('{[('.includes(body[i])) depth++;
+    else if ('}])'.includes(body[i])) depth--;
+    else if (body[i] === ',' && depth === 0) { parts.push(body.slice(start, i)); start = i + 1; }
+  }
+  parts.push(body.slice(start));
+
+  const optOuts = [];
+  const seen = [];
+  for (const part of parts) {
+    const text = part.trim();
+    if (!text) continue;
+    const eq = text.indexOf('=');
+    const name = (eq === -1 ? text : text.slice(0, eq)).trim();
+    const dflt = eq === -1 ? '' : text.slice(eq + 1).trim();
+    seen.push(name);
+    // The classification, and the assertion that there is no third answer.
+    // A parameter this does not recognise is the failure the old reader had
+    // no way to report: it must be an opt-out spelled `true`, or named as
+    // something else, and never merely unseen.
+    if (dflt === 'true') optOuts.push(name);
+    else assert.ok(NOT_OPT_OUTS.has(name),
+      `computeStats has an option this test cannot classify: \`${name}\``
+      + (dflt ? ` (defaulting to \`${dflt}\`)` : ' (no default)')
+      + '. If it is an opt-out — a pass a caller may decline — spell its '
+      + 'default as the literal `true`, which is what every opt-out here uses '
+      + 'and what this reader recognises, and then decide whether /awards '
+      + 'declines it or it belongs in READ_BY_AWARDS. If it is not an opt-out, '
+      + 'add it to NOT_OPT_OUTS with what it is instead. It must not be '
+      + 'neither: that is how a pass /awards pays for per habit goes unseen.');
+  }
+
+  // The other direction, and the one the classification above cannot see: an
+  // entry here that names an option `computeStats` no longer has. The same
+  // check `compose.test.js` makes of `ELSEWHERE` ("nothing is opted out that
+  // the server no longer reads"), for the same reason — an excuse that
+  // outlived what it excused is a claim about the code that is no longer
+  // true, and the next reader takes it for one. Without this, deleting
+  // `granularity` from the signature left its entry sitting here describing a
+  // parameter that had gone, with every test green.
+  for (const name of NOT_OPT_OUTS.keys()) {
+    assert.ok(seen.includes(name),
+      `NOT_OPT_OUTS names \`${name}\`, which is no longer an option of `
+      + `computeStats (it has: ${seen.join(', ')}) — an excuse that outlived `
+      + 'what it excused; take the entry out.');
+  }
+  return optOuts;
+}
+
 test('the comment stripper is not fooled by the two things it must not be', () => {
   // A test on the test, because everything below trusts it.
   // Asserted on substance rather than on whitespace: the stripper leaves the
@@ -638,21 +784,26 @@ test('both editions hand the gate its inputs, or it silently does nothing', () =
     const calls = awardCallsIn(src);
 
     // EVERY call site, not the first one. Checking only the first let a second,
-    // ungated `computeAwards(...)` ship in the same file — and a route added
-    // later is exactly how that would happen.
-    assert.equal(calls.length, 1,
-      `${edition} has ${calls.length} computeAwards call sites, expected 1: `
-      + calls.join(' | '));
+    // ungated `computeAwards(...)` ship in the same file. `GET /awards` (#140)
+    // is exactly the "route added later" the old comment here predicted, and
+    // this count is what keeps a THIRD one a reviewed act rather than a silent
+    // one: an empty offender list below would mean nothing if this count could
+    // drift upward unnoticed first.
+    assert.equal(calls.length, 2,
+      `${edition} has ${calls.length} computeAwards call sites, expected 2 `
+      + `(/habits/:id/stats and /awards): ${calls.join(' | ')}`);
 
-    const args = calls[0].split(',').map((s) => s.trim());
-    assert.equal(args.length, 5,
-      `${edition} calls computeAwards with ${args.length} arguments: ${calls[0]}`);
-    assert.equal(args[2], 'habit', `${edition} passes ${args[2]} as the habit`);
-    assert.equal(args[3], 'unlogged', `${edition} passes ${args[3]} as the setting`);
-    // The fifth is the same trap one argument further along: `skipDays` is
-    // optional, so dropping it turns the rest award off for every account in
-    // that edition and nothing anywhere else changes.
-    assert.equal(args[4], 'skipDays', `${edition} passes ${args[4]} as skipDays`);
+    for (const call of calls) {
+      const args = call.split(',').map((s) => s.trim());
+      assert.equal(args.length, 5,
+        `${edition} calls computeAwards with ${args.length} arguments: ${call}`);
+      assert.equal(args[2], 'habit', `${edition} passes ${args[2]} as the habit`);
+      assert.equal(args[3], 'unlogged', `${edition} passes ${args[3]} as the setting`);
+      // The fifth is the same trap one argument further along: `skipDays` is
+      // optional, so dropping it turns the rest award off for every account in
+      // that edition and nothing anywhere else changes.
+      assert.equal(args[4], 'skipDays', `${edition} passes ${args[4]} as skipDays`);
+    }
 
     // And it must be the SAME value computeStats was given, or the gate and the
     // arithmetic answer different questions about one habit.
@@ -676,22 +827,102 @@ test('both editions hand the gate its inputs, or it silently does nothing', () =
     assert.match(stripComments(src), /skipDays\s*[:=][^;\n]*(storedSkipDays|skip_days)/,
       `${edition} does not derive skipDays from the account's setting`);
 
-    // `/overview` no longer calls `computeStats` at all: it reads two numbers
-    // per habit and calls `summaryStats` for them instead, so the only
-    // `computeStats` call site left is `/stats`'s whole reading. Pinned by
-    // COUNT as well as by content: a third route added later that paid for
-    // `computeStats` and threw most of it away would otherwise slip in
-    // silently, once per habit.
+    // `/overview` never calls `computeStats` at all: it reads two numbers per
+    // habit and calls `summaryStats` for them instead. `/habits/:id/stats` is
+    // one call site and `GET /awards` (#140) is the second — the account-level
+    // route walks every habit but still asks `computeStats` for each one.
+    // Pinned by COUNT as well as by content: a THIRD route added later doing
+    // that would otherwise slip in silently, once per habit.
     const statsCalls = callsIn(src, 'computeStats');
-    assert.equal(statsCalls.length, 1,
-      `${edition} has ${statsCalls.length} computeStats call sites, expected 1 `
-      + `(/stats only): ${statsCalls.join(' | ')}`);
-    // ...and it must be the one feeding awards — the call with `granularity`,
-    // which `summaryStats` does not take — or the detail view lost a field
-    // nothing replaced.
-    assert.ok(/granularity/.test(statsCalls[0]),
-      `${edition}'s only computeStats call site is missing granularity, so it `
-      + `is not the /stats call: ${statsCalls[0]}`);
+    assert.equal(statsCalls.length, 2,
+      `${edition} has ${statsCalls.length} computeStats call sites, expected 2 `
+      + `(/stats and /awards): ${statsCalls.join(' | ')}`);
+
+    // The two call sites have DIFFERENT correct shapes, and pinning them to
+    // one shape is exactly the mistake a review of #140 found: `/awards`
+    // walks EVERY habit on the account, and `computeAwards` reads only
+    // `bestStreak`, `score`, `scores`, `resilience`, `weekdays`, `streaks` and
+    // `coverage` off the result (see the opt-out note above `computeStats` in
+    // shared/src/stats.js) — never `history`, `weekdayByMonth` or `frequency`.
+    // Those are therefore declined at `/awards`, which also means it takes no
+    // `granularity`, since nothing is left for that parameter to reach once
+    // `history` is declined. `/habits/:id/stats` is the detail view's whole
+    // reading: it declines nothing and carries `granularity`, the one knob
+    // `history` reads.
+    //
+    // The list of opt-outs is DERIVED from `computeStats`' own signature and
+    // never spelled here, and that is the whole point of this block rather
+    // than a tidiness preference. The version that named
+    // `history`/`weekdayByMonth`/`frequency` as three literals was
+    // structurally unable to see a FOURTH opt-out added later: #160 adds
+    // `trend` and `regularity` on a branch open at the same time as this one,
+    // both of them passes `computeAwards` does not read, and against the
+    // literal version `/awards` would have gone on paying for both — per
+    // habit, for every habit on the account — with this guard green. The two
+    // branches also conflict on exactly this destructuring, so the merge is
+    // already a hand edit; what this turns it into is a hand edit that FAILS
+    // LOUDLY until `/awards` is wired to decline the new passes, instead of
+    // one whose only symptom is a slower route.
+    const optOuts = statsOptOuts();
+    // The denominator, asserted rather than assumed (root CLAUDE.md: an empty
+    // offender list means nothing until the denominator is known). If the
+    // signature is reformatted past what this reader understands it answers
+    // the empty set, and every "is it declined?" question below then passes
+    // vacuously.
+    assert.ok(optOuts.length >= 4,
+      `only found ${optOuts.length} computeStats opt-outs (${optOuts.join(', ')}) `
+      + '— the signature reader is broken, and every check below it is vacuous');
+    assert.ok(optOuts.includes('coverage'),
+      `the computeStats opt-outs (${optOuts.join(', ')}) do not include coverage, `
+      + 'which has been one since it was the only one — the reader is broken');
+
+    for (const name of READ_BY_AWARDS.keys()) {
+      assert.ok(optOuts.includes(name),
+        `READ_BY_AWARDS names ${name}, which is no longer a computeStats opt-out `
+        + `(${optOuts.join(', ')}) — an excuse that outlived what it excused`);
+    }
+    const mustDecline = optOuts.filter((name) => !READ_BY_AWARDS.has(name));
+
+    const declines = (call, name) => new RegExp(`${name}\\s*:\\s*false`).test(call);
+    const declinesAwardsPasses = (call) => mustDecline.every((n) => declines(call, n));
+    const declinesNothing = (call) => !optOuts.some((n) => declines(call, n));
+    // Named offenders BEFORE the counts, and the ordering is the useful half.
+    // A newly-added opt-out shows up in the count assertions as
+    // "expected 1, got 0", which says nothing about which pass or what to do;
+    // this one says `pays for trend, regularity` and names both remedies. It
+    // is the message whoever resolves the #160 merge conflict will read.
+    for (const call of statsCalls.filter((c) => !/granularity/.test(c))) {
+      const paidFor = mustDecline.filter((n) => !declines(call, n));
+      assert.deepEqual(paidFor, [],
+        `${edition}'s /awards-shaped computeStats call pays for ${paidFor.join(', ')}, `
+        + `which computeAwards does not read — decline them at that call site, or `
+        + `add each to READ_BY_AWARDS with the award that reads it: ${call}`);
+    }
+
+    const fullReadingCalls = statsCalls.filter(
+      (call) => /granularity/.test(call) && declinesNothing(call));
+    const awardsShapedCalls = statsCalls.filter(
+      (call) => declinesAwardsPasses(call) && !/granularity/.test(call));
+    // Each shape exactly once — not "at least one of each" — so a third call
+    // site cannot silently take either shape and hide inside this count.
+    assert.equal(fullReadingCalls.length, 1,
+      `${edition} has ${fullReadingCalls.length} computeStats call sites `
+      + `shaped like /stats (carrying granularity, declining nothing), `
+      + `expected 1: ${statsCalls.join(' | ')}`);
+    assert.equal(awardsShapedCalls.length, 1,
+      `${edition} has ${awardsShapedCalls.length} computeStats call sites `
+      + `shaped like /awards (declining ${mustDecline.join('/')}), `
+      + `expected 1: ${statsCalls.join(' | ')}`);
+    // ...and the awards shape must keep what IS read: a caller silently
+    // declining `coverage` too would answer `/awards` and `/habits/:id/stats`
+    // with different award arrays for the identical habit.
+    for (const call of awardsShapedCalls) {
+      for (const [name, why] of READ_BY_AWARDS) {
+        assert.ok(!declines(call, name),
+          `${edition}'s /awards-shaped computeStats call declines ${name}: ${why}. `
+          + `Call: ${call}`);
+      }
+    }
 
     // `/overview`'s replacement, pinned the same way: exactly one call site,
     // so a second one added later pays for the two passes twice per habit
@@ -701,6 +932,77 @@ test('both editions hand the gate its inputs, or it silently does nothing', () =
       `${edition} has ${summaryCalls.length} summaryStats call sites, expected 1 `
       + `(/overview): ${summaryCalls.join(' | ')}`);
   }
+});
+
+test('declining every pass no award reads changes not one award (#140 review)', () => {
+  // `/awards` (#140) walks every habit on the account and was found paying for
+  // three `computeStats` passes it throws away: `history`, `weekdayByMonth`
+  // and `frequency` are on the payload only because `/habits/:id/stats`, the
+  // OTHER caller, needs them, and `computeAwards` reads none of the three.
+  // The guard above pins that both call sites carry the right SHAPE; this
+  // pins that the cheap shape is actually safe to trust — the two readings
+  // must produce the byte-identical award array for the same inputs.
+  //
+  // Which passes to decline comes from `computeStats`' signature and
+  // `READ_BY_AWARDS`, not from three literals, for the reason `statsOptOuts`
+  // gives: an opt-out added later is declined here automatically, so this
+  // test covers it on the day it appears rather than on the day somebody
+  // remembers to add it. If the new pass DOES feed an award, this fails —
+  // which is the correct answer, and the prompt to put it in
+  // `READ_BY_AWARDS` with the award that reads it.
+  //
+  // The fixture has to earn several families at once, or an empty-array
+  // comparison would pass for a fixture too thin to say anything: 90 days
+  // (three full calendar months, for `coverage`), one skip deep inside the
+  // opening run (for `rest`, `skipDays: true`), and a two-day lapse — long
+  // enough for `computeRecovery`'s `COMEBACK_MIN_DAYS` (2) — that breaks a
+  // 49-day run and leaves a second, shorter one behind it (for `streak` and
+  // `resilience`).
+  const pattern = Array(90).fill('x');
+  pattern[14] = 's';       // 2026-01-15: a rest day inside the opening run
+  pattern[49] = '0';       // 2026-02-19 \ a two-day stated lapse: a closed
+  pattern[50] = '0';       // 2026-02-20 / comeback, and the run that ends it
+  const str = pattern.join('');
+  const end = endOf(str);
+  const rows = entries(str);
+
+  const declinable = statsOptOuts().filter((name) => !READ_BY_AWARDS.has(name));
+  // The same denominator check the guard above makes, for the same reason: a
+  // signature reader answering `[]` would decline nothing and compare a
+  // reading against itself, which passes against any build at all.
+  assert.deepEqual(declinable, ['history', 'weekdayByMonth', 'frequency'],
+    'the passes no award reads have changed — if that is deliberate, this '
+    + 'literal moves with them; it is spelled out so the set cannot drift '
+    + 'silently to empty and make the comparison below vacuous');
+
+  const full = computeStats(DAILY, rows, { end });
+  const declined = computeStats(DAILY, rows,
+    { end, ...Object.fromEntries(declinable.map((n) => [n, false])) });
+
+  // The opt-out contract itself, checked directly rather than assumed: every
+  // declined field is ABSENT (not empty) on the cheap reading and present on
+  // the full one, and everything `computeAwards` DOES read survives on both,
+  // the same way `/awards`'s call site keeps it.
+  for (const field of declinable) {
+    assert.ok(field in full, `fixture setup: full reading is missing ${field}`);
+    assert.ok(!(field in declined), `declining ${field} left it on the payload`);
+  }
+  for (const field of READ_BY_AWARDS.keys()) {
+    assert.ok(field in full && field in declined,
+      `${field} must survive both readings — ${READ_BY_AWARDS.get(field)}`);
+  }
+
+  const fullAwards = computeAwards(full, end, DAILY, 'miss', true);
+  const declinedAwards = computeAwards(declined, end, DAILY, 'miss', true);
+
+  const families = new Set(fullAwards.map((a) => a.family));
+  assert.ok(families.has('coverage'), `fixture earned no coverage award: ${[...families]}`);
+  assert.ok(families.has('rest'), `fixture earned no rest award: ${[...families]}`);
+  assert.ok(families.size >= 4,
+    `fixture is not rich enough to trust this comparison: ${[...families]}`);
+
+  assert.deepEqual(declinedAwards, fullAwards,
+    `declining ${declinable.join('/')} changed the award array`);
 });
 
 test('the Award typedef lists every family the file can actually produce', () => {
