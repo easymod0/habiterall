@@ -976,25 +976,46 @@ api.get('/awards', route(async (req, res) => {
     // read in this file without one, so it is the odd one out on purpose
     // rather than by omission. Read this before adding `AND date >= $2`.
     //
-    // `computeStats` derives BOTH of its anchors from the rows it is handed:
-    // the window's own start (`earliestRealDay`) and, separately,
-    // `creditFrom` (`creditFor(firstStatedAnswer(entryMap), ...)`). The first
-    // survives a bounded slice — `windowStart` clamps to
-    // `end - MAX_RANGE_DAYS` anyway, so trimming rows older than that moves
-    // nothing. The second does NOT, and `creditFor`'s own doc comment carries
-    // the measurement: an at-most habit resolved to `success` whose only
-    // stated row is 500 days old read `score: 1.000` correctly and
-    // `0.051922` with the credit date taken from a 400-day slice. That is a
-    // wrong number presented as fact, and this route's entire reason to exist
-    // is agreeing with `/habits/:id/stats` about the same habit.
+    // `computeStats` derives BOTH of its anchors from the rows it is handed —
+    // the window's own start (`earliestRealDay` -> `windowStart`) and,
+    // separately, `creditFrom` (`creditFor(firstStatedAnswer(entryMap), ...)`)
+    // — and **NEITHER survives a bounded slice**. An earlier version of this
+    // comment said the first one did, on the grounds that `windowStart` clamps
+    // to `end - MAX_RANGE_DAYS` anyway; that is backwards, and a review round
+    // caught it. The clamp only fires when the anchor is EARLIER than the
+    // cutoff, so a query bound that has already removed every row before the
+    // cutoff makes the clamp a no-op and leaves `from` sitting at whatever real
+    // row happens to be earliest among the SURVIVORS. Measured against
+    // `computeStats` on this branch — one row 500 days before the cutoff, a
+    // gap, then rows resuming 40 days before `end`:
     //
-    // So a bound here is not a one-line change. It is: a second, grouped
-    // `MIN(date)` read for the lifetime first answer, a `creditAnchor`
-    // parameter threaded into `computeStats` (which today takes none — only
-    // `/overview`, which calls the lower-level passes directly, can supply
-    // one), and the identical treatment at `/habits/:id/stats`, or the two
-    // routes disagree and the agreement test goes red. `/overview` is the
-    // worked example of all three if it is ever worth doing.
+    //     unbounded            bounded at end - MAX_RANGE_DAYS
+    //     coverage  120 months coverage  1 month
+    //     resilience.rate  0   resilience.rate  null
+    //
+    // The second of those is the sharper one: `null` and `0` are deliberately
+    // different claims here — `shared/CLAUDE.md` says a rate of `null` means
+    // "nothing has ever been missed" and "must not render as a number" — so the
+    // bound turns "recovered from none of your lapses" into "never lapsed".
+    //
+    // `creditFrom` is unsafe for its own separate reason, and `creditFor`'s doc
+    // comment carries that measurement: an at-most habit resolved to `success`
+    // whose only stated row is 500 days old read `score: 1.000` correctly and
+    // `0.051922` with the credit date taken from a 400-day slice.
+    //
+    // Both are wrong numbers presented as fact, and this route's entire reason
+    // to exist is agreeing with `/habits/:id/stats` about the same habit.
+    //
+    // So a bound here is not a one-line change, and it is not a one-anchor
+    // change either. It needs BOTH anchors supplied from unbounded reads
+    // alongside the bounded rows — a grouped `MIN(date)` for the lifetime first
+    // entry AND one for the lifetime first stated answer — both threaded into
+    // `computeStats`, which today accepts neither (only `/overview`, which
+    // calls the lower-level passes directly, can supply them), plus the
+    // identical treatment at `/habits/:id/stats` or the two routes disagree and
+    // the agreement test goes red. `/overview` is the worked example of all of
+    // it if it is ever worth doing. `shared/test/stats.test.js` pins the two
+    // measurements above so this paragraph cannot go stale in silence again.
     //
     // What it costs unbounded, stated rather than left to be discovered: at
     // `MAX_HABITS_PER_USER` with an imported Loop history this materialises
