@@ -1142,13 +1142,32 @@ function buildStrengthCard({ habit, stats, color, chartWidth }) {
     // who has kept a habit perfectly for four months, resting weekends, that
     // it is "too new" contradicts every other figure on the page.
     //
-    // What is true in both cases is that not enough days have been SCORED: a
-    // skip leaves the curve untouched while the calendar day still elapses, so
-    // a scored day and a calendar day are the same count only for a habit that
-    // never skips. That is the quantity the floor is actually about, and it is
-    // the wording both branches can share — the first merely names the number.
+    // **The two branches do NOT share a noun, and a round-2 review caught an
+    // attempt to make them.** The tempting fix for "Too new to tell" was to
+    // call both of them scored days, since the step gate is what actually
+    // withholds. That makes the FIRST branch false: `minWindow` is
+    // `convergedSteps + TREND_LOOKBACK_DAYS` and it is compared against
+    // `scores.length`, which counts CALENDAR days — the function's own comment
+    // calls that comparison "a cheap fast path only" for exactly this reason.
+    // Measured on the weekend-skipper this PR exists for: at calendar day 80
+    // the tile would read "Needs 87 scored days" over a habit holding 57 of
+    // them, and the trend then unblocks at calendar day 111 with 79 — so 87 is
+    // not a target, and not even a lower bound on the scored days the habit
+    // will have when it clears. It is simply the wrong quantity.
+    //
+    // So each branch names the quantity ITS OWN condition is about, which is
+    // two different things because they are two different reasons:
+    //
+    //   - the fast path failed: fewer than `minWindow` CALENDAR days exist.
+    //     "Needs N days" is true — a necessary condition, and it understates
+    //     rather than lying, since clearing it may still leave the step gate
+    //     unmet, which is the other branch.
+    //   - the fast path cleared and the step gate did not: the habit has the
+    //     calendar days and not the SCORED ones. No number, because the one in
+    //     hand is the wrong one and the right one (`convergedSteps` at the
+    //     lookback point) is not on the payload.
     const label = (Number.isFinite(trend.minWindow) && stats.scores.length < trend.minWindow)
-      ? `Needs ${trend.minWindow} scored days`
+      ? `Needs ${trend.minWindow} days`
       : 'Not enough scored days';
     tiles.append(tile('—', label));
   } else {

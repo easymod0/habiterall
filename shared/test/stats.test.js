@@ -1718,6 +1718,33 @@ test('the weekend-skipper is the ordinary case', () => {
   assert.notEqual(wide.trend.change, null);
   assert.ok(wide.trend.change * 100 <= 5,
     `expected the reported change bounded at 5 points, got ${wide.trend.change * 100}`);
+
+  // `minWindow` is a CALENDAR floor and must never be described as a count of
+  // scored days. A round-2 review found the tile doing exactly that, and this
+  // is the arithmetic that makes it false — pinned here rather than left to the
+  // renderer, because `ui/detail.js` is not unit-testable and the wording is
+  // one edit away from looking harmless again.
+  //
+  // At the point the fast path is still failing, the habit holds FEWER scored
+  // days than `minWindow`...
+  const atEighty = weekendSkipperRows(80);
+  const eighty = computeStats(boolHabit, atEighty, { end });
+  const scoredAtEighty = atEighty.filter((e) => e.status !== 'skip').length;
+  assert.equal(eighty.trend.minWindow, 87);
+  assert.equal(eighty.scores.length, 80);          // calendar days, the fast path's own count
+  assert.equal(scoredAtEighty, 57);                // scored days — the other quantity entirely
+  assert.equal(eighty.trend.change, null);
+
+  // ...and, decisively, it never reaches `minWindow` scored days at all: the
+  // trend unblocks at 111 calendar days holding 79 of them. So `minWindow` is
+  // not a target for scored days and not even a lower bound on them — a label
+  // saying "Needs 87 scored days" is wrong in both directions at once.
+  const atUnblock = weekendSkipperRows(111);
+  const scoredAtUnblock = atUnblock.filter((e) => e.status !== 'skip').length;
+  assert.equal(scoredAtUnblock, 79);
+  assert.ok(scoredAtUnblock < eighty.trend.minWindow,
+    `the trend cleared with ${scoredAtUnblock} scored days, `
+    + `which must be fewer than minWindow (${eighty.trend.minWindow}) for this test to mean anything`);
 });
 
 /* ---------- regularity: the spread of the gaps between completions ---------- */

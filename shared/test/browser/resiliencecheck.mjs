@@ -148,8 +148,13 @@ try {
   // excluded by the old alternation, which is part of how it went un-rendered
   // by any suite while saying something false. See the weekend-rester block
   // below, which drives that branch on purpose.
+  // All THREE labels the tile can carry, not two: the withheld fallback was
+  // excluded by the old alternation, which is part of how it went un-rendered
+  // by any suite while saying something false. The `Needs` arm is anchored on
+  // `days$` and NOT on `scored days$` deliberately — that number is a calendar
+  // floor, and a build that relabels it as scored days must fail here.
   ck('the strength card holds a trend tile with one of the three labels it can carry',
-    /^(Points, last|Needs \d+ scored days$|Not enough scored days$|No trend yet$)/
+    /^(Points, last|Needs \d+ days$|Not enough scored days$|No trend yet$)/
       .test(trendTile?.label ?? ''),
     trendTile?.label ?? '(missing)');
 
@@ -587,6 +592,67 @@ try {
   ck('and says it is short of SCORED days rather than calling a 100-day habit new',
     skipperTile?.label === 'Not enough scored days',
     JSON.stringify(skipperTile));
+
+  // The OTHER withheld branch — the one carrying a number — rendered for the
+  // first time. A round-2 review found that number relabelled as "scored days"
+  // when it is a calendar floor, which is false for any habit that skips: this
+  // same weekend-resting shape at 40 days holds 28 scored days against a
+  // `minWindow` of 87 and never reaches 87 scored days at all (it unblocks at
+  // 111 calendar days with 79). `stats.test.js` pins that arithmetic; this
+  // pins the sentence the user is shown.
+  const young = await ev(
+    '(async function(){'
+    + " var r = await fetch('/api/habits', { method: 'POST',"
+    + "   headers: { 'Content-Type': 'application/json' },"
+    + "   body: JSON.stringify({ name: 'Young rester', type: 'boolean' }) });"
+    + ' var h = await r.json();'
+    + ' var n = new Date();'
+    + ' var base = Date.UTC(n.getFullYear(), n.getMonth(), n.getDate());'
+    + ' for (var i = 39; i >= 0; i--) {'
+    + '   var d = new Date(base - i * 86400000);'
+    + '   var iso = d.toISOString().slice(0, 10);'
+    + '   var weekend = d.getUTCDay() === 0 || d.getUTCDay() === 6;'
+    + "   await fetch('/api/habits/' + h.id + '/entries/' + iso, { method: 'PUT',"
+    + "     headers: { 'Content-Type': 'application/json' },"
+    + '     body: JSON.stringify(weekend ? { value: 0, status: \'skip\' } : { value: 2 }) });'
+    + ' }'
+    + ' return h.id; })()'
+  );
+  ck('a 40-day weekend-resting habit was seeded', typeof young === 'number', String(young));
+
+  // Prove it is in the FAST-PATH branch (short of calendar days), not the one
+  // above — otherwise this asserts the same sentence twice.
+  const youngTrend = await ev(
+    '(async function(){'
+    + " var s = await (await fetch('/api/habits/' + " + young + " + '/stats')).json();"
+    + ' return { scores: s.scores.length, minWindow: s.trend.minWindow, change: s.trend.change };'
+    + ' })()'
+  );
+  ck('it is short of CALENDAR days, which is the other reason a trend is withheld',
+    youngTrend != null && youngTrend.change === null
+      && youngTrend.scores < youngTrend.minWindow,
+    JSON.stringify(youngTrend));
+
+  await ev('location.hash = ' + JSON.stringify('#/habit/' + young));
+  let youngTile = null;
+  for (let k = 0; k < 40; k++) {
+    const strength = await readCardByTitle('Habit strength');
+    youngTile = strength.tiles?.[0] ?? null;
+    if (youngTile && youngTile.label !== skipperTile?.label) break;
+    await sleep(200);
+  }
+  ck('it names a DAY count, never a scored-day count — the number is a calendar floor',
+    youngTile?.label === `Needs ${youngTrend?.minWindow} days`,
+    JSON.stringify(youngTile));
+
+  try {
+    const gone = await ev(
+      "fetch('/api/habits/" + young + "', { method: 'DELETE' })"
+      + '.then(function(r){ return r.ok; })');
+    if (!gone) console.log('cleanup: DELETE /api/habits/' + young + ' (young rester) did not come back ok');
+  } catch (err) {
+    console.log('cleanup: DELETE /api/habits/' + young + ' (young rester) threw :: ' + err.message);
+  }
 
   // Its own cleanup, reported rather than asserted, exactly as the two seeded
   // habits above are — this block sits after that `finally`, so it is not
