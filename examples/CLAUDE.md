@@ -33,6 +33,13 @@ puts Authentik's database in habiterall's own Postgres. Extending them yields
 were the plausible second blocker and are not one: a service-level `volumes:`
 merges by CONTAINER PATH.
 
+A service can hit the same limit from *inside* one published file, not only
+across the two: `notifier` (#194) is hand-written in
+`examples/docker-compose.cloud.yml` rather than `extends: service: app`,
+because `extends` concatenates sequences and cannot remove a key — extending
+`app` would have inherited its `ports:`, and two containers would have fought
+for the one published port.
+
 **The published Authentik file is the exception and stays standalone**, repeating
 `db` / `migrate` / `app`, because downloading ONE file and running it is the whole
 point of this directory.
@@ -48,9 +55,36 @@ nothing since they were written. Both halves individually looked right.
 `ENV_TEMPLATES` in `shared/test/compose.test.js` runs both ways: every `${NAME}`
 in a stack's compose files must be offered by its template, and nothing in a
 template may go uninterpolated. A commented `#LOG_LEVEL=info` counts as offered —
-the tuning block ships that way and uncommenting is the intended path. Everything
-named is `${NAME:-}`, and empty is safe for every one, since each reader is
-`Number(x) || default` or an equality test.
+the tuning block ships that way and uncommenting is the intended path. Almost
+everything named is `${NAME:-}`, and empty is safe for those, since each reader
+is `Number(x) || default` or an equality test.
+
+**The notifier's `PG_POOL_MAX: ${NOTIFIER_PG_POOL_MAX:-6}` is the one exception,
+and the reason it has to be one is worth keeping.** Two processes read the same
+variable name out of the same `db/pool.js`, whose reader is
+`Number(PG_POOL_MAX) || 10` — so an empty string does not mean "the notifier's
+own default", it means the APP's. Left as `${NOTIFIER_PG_POOL_MAX:-}` the
+notifier shipped with a pool of 10 while the tuning block documented 3 under a
+*Defaults shown* header, and an operator keeping `max × replicas` under the
+server's `max_connections` (the budget `server.js` states and nothing else
+does) budgeted seven connections short. A default that is documented in the env
+template and supplied by the code can disagree silently; one supplied by the
+compose file cannot.
+
+**Why 6 and not the 3 the prose first argued for: this variable is a FAN-OUT
+setting as well as a connection budget.** `notifier.js` derives the tick's
+collect and delivery concurrency from `pool.options.max` as `floor(max / 2)`,
+so a pool of 3 gives a tick that collects and delivers **one account at a
+time** where the in-process tick on master ran five wide. The two figures were
+reasoned about separately — "it competes with nobody, so 2-3 is plenty" is
+about connections, and the halving was about leaving room for request traffic
+this process no longer serves — and their product was nobody's decision. 6
+restores a three-wide tick and still leaves three connections for the Discord
+gateway, whose presses take a checkout and time out after 5s. Fixing the
+documented default without noticing this would have shipped a
+serially-delivering notifier as a *documentation* change, which is the shape of
+the thing worth remembering: **a figure in a compose file can be a performance
+setting in disguise, and an env template cannot tell you which.**
 
 **Templates ship the limits at their CODE defaults**, so repairing the inertness
 does not silently change what a running instance enforces —

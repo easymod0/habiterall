@@ -60,15 +60,28 @@ const MAX_ACCOUNTS_PER_TICK = Number(process.env.NOTIFY_MAX_ACCOUNTS) || 500;
  * How many accounts `collect` reads concurrently.
  *
  * Derived from the pool's own configured max (`pool.options.max` — the same
- * number `poolGauge()` reports as `pg_max`) rather than a literal: a busy
- * tick still has to leave connections for live requests, so this takes
+ * number `poolGauge()` reports as `pg_max`) rather than a literal, taking
  * roughly half of it, floored at 1 (an operator who set the pool down to 1
- * still gets a tick that completes) and capped at 6 (an operator who raised
- * the pool to serve more traffic should not hand the notifier proportionally
- * more of it — each account here is a transaction of four queries, and past
- * a point that competes with `/overview` rather than shortening a slow tick).
- * A hardcoded number would silently starve the API the moment an operator set
- * `PG_POOL_MAX` below what it assumed.
+ * still gets a tick that completes) and capped at 6 (each account here is a
+ * transaction of four queries, and past a point more workers lengthen nothing
+ * but the queue). A hardcoded number would silently oversubscribe the pool
+ * the moment an operator set `PG_POOL_MAX` below what it assumed.
+ *
+ * **The half is still right and its REASON changed with #194.** It was
+ * written when the tick shared a process and a pool with request serving, and
+ * it read "a busy tick still has to leave connections for live requests" —
+ * which is now false, because this process serves none. What the reserve is
+ * for here is the **Discord gateway**: a button press runs `handleInteraction`
+ * -> `record` -> `withUser`, which takes a checkout of its own and gives up
+ * after `connectionTimeoutMillis` (5s). Saturating this pool with collect
+ * workers would make a press wait behind a whole tick. So the fraction stays,
+ * the sentence under it does not — and do not read the half as slack that
+ * could be reclaimed for free.
+ *
+ * The consequence an operator meets is that `NOTIFIER_PG_POOL_MAX` is a
+ * FAN-OUT setting as much as a connection budget: 3 gives a tick one account
+ * wide, 6 gives three. The shipped compose files default it to 6 for exactly
+ * that reason, and say so.
  */
 export const COLLECT_CONCURRENCY =
   Math.max(1, Math.min(6, Math.floor((pool.options?.max ?? 10) / 2)));
@@ -714,6 +727,16 @@ export function start(env = process.env, deps = {}) {
     appUrl: config.appUrl,
     botToken: config.botToken,
     deliveryConcurrency: DELIVERY_CONCURRENCY,
+    // This edition's tick runs in a process with NO server (#194):
+    // `notifier-entry.js` and nothing else calls this function. So the tick's
+    // own timer has to be what holds that process open — unset, it is unref'd,
+    // and a notifier with no Discord bot token (a webhook or ntfy deployment)
+    // exits 0 after its first tick with nothing in the log saying so. See
+    // `startNotifier` in `@habiterall/shared/notify-send.js` for the
+    // measurement. Personal's `start()` deliberately does NOT pass this: there
+    // the tick shares a process with `app.listen`, and a ref'd timer would
+    // keep a drained server alive past its own exit.
+    keepAlive: true,
     // Travels the same route `botToken` and `appUrl` already do: no reaching
     // into `process.env` from inside `shared/src` for it.
     signAnswer,

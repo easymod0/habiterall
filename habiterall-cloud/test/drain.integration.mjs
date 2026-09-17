@@ -249,6 +249,34 @@ try {
     await admin.connect();
     state = await boot(issuer);
 
+    // The tick, the gateway and the scheduled dump moved to
+    // `notifier-entry.js` (#194) — this booted web server should say nothing
+    // about reminders at all, neither that it started one nor that it is off.
+    // `test/notifier-entry.test.js` guards the SOURCE (no `startNotifier`
+    // binding); this is the behavioural half over the real spawned process,
+    // which would still catch one reintroduced under a renamed import.
+    check('1. the booted web server logs no notify.starting or notify.disabled line',
+      !state.logs.includes('"notify.starting"') && !state.logs.includes('"notify.disabled"'),
+      JSON.stringify(state.logs.slice(-300)));
+
+    // ...and the positive half, which is the one an operator depends on. The
+    // silence above is correct and indistinguishable, from the log alone,
+    // from a deployment that simply never got a notifier: `HABITERALL_NOTIFY`
+    // is opt-OUT, so somebody upgrading an `app`-only stack loses every
+    // reminder with no misconfiguration to detect and nothing to search for.
+    // `notify.delivered_elsewhere` is the breadcrumb, and it was the one
+    // claim this PR makes about operator experience with no test behind it —
+    // a refactor could drop the line and only assertion 1 would stay green,
+    // which it would.
+    //
+    // The line is asserted WITH the field that makes it actionable, not by
+    // name alone: an event name says a job moved, and naming the entry point
+    // is what tells a reader where it moved TO.
+    check('1. ...and it does say where reminders ARE delivered from',
+      state.logs.includes('"notify.delivered_elsewhere"')
+      && state.logs.includes('notifier-entry.js'),
+      JSON.stringify(state.logs.slice(-300)));
+
     // Warm the socket, so what follows travels on a POOLED connection as a
     // reverse proxy's would. An unwarmed connection is not the case under test.
     const s = openSocket();

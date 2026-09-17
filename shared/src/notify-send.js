@@ -190,6 +190,9 @@ function stateKey(o) {
  *   has one timer, and a periodic job joins it here rather than growing a
  *   second one — called once per tick, after reminder delivery, with the same
  *   instant `runTick` used.
+ * @property {boolean} [keepAlive] whether this timer may hold the process
+ *   open. Unset means no, which is right for a process that also serves
+ *   requests; see `startNotifier` for the one caller that has no server.
  */
 
 /**
@@ -1058,9 +1061,24 @@ export function startNotifier(ctx) {
   };
 
   const timer = setInterval(tick, intervalMs);
-  // Nothing here should keep a process alive on its own; the HTTP server is
-  // what does that.
-  timer.unref?.();
+  // Unref by default, because the default caller is a process that also serves
+  // requests and the HTTP server is what holds the loop open there.
+  //
+  // `keepAlive` is for the caller that has NO server, which since #194 is
+  // `habiterall-cloud/src/notifier-entry.js`. There this timer is the only
+  // ref'd handle the process will ever have — UNLESS a Discord bot token
+  // happens to be configured, because a gateway WebSocket is ref'd while a
+  // webhook, an ntfy topic and a nightly `pg_dump` open nothing that outlives
+  // a tick. So the wrong default is wrong only for some deployments, which is
+  // the worst shape for it.
+  //
+  // Measured rather than reasoned, against the real entry point and a real
+  // Postgres with the shipped 60s interval: it ran its first tick cleanly and
+  // then exited **0**, with no signal and no line, about fifteen seconds
+  // before its second tick was due. `restart: on-failure` does not restart an
+  // exit 0 — so that is a notifier container that goes quiet under a minute
+  // after every boot, takes the nightly backup with it, and says nothing.
+  if (!ctx.keepAlive) timer.unref?.();
   tick();
 
   return { stop: () => clearInterval(timer) };

@@ -39,9 +39,15 @@ import { dirname, join } from 'node:path';
  */
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
+// The three processes examples/docker-compose.cloud.yml runs: the web
+// process, the migration step, and the notifier (#194) — the reminder tick,
+// the Discord gateway and the scheduled backup, split into its own entry
+// point and its own `notifier` service so a fleet of `app` replicas shares
+// none of the three.
 const CLOUD_APP = [
   'habiterall-cloud/src/server.js',
   'habiterall-cloud/src/db/migrate.js',
+  'habiterall-cloud/src/notifier-entry.js',
 ];
 // The one process examples/docker-compose.cloud.yml does not run, and the
 // reason its AUTHENTIK_* variables are required in the other two cloud files.

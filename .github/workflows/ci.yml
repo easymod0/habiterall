@@ -375,6 +375,25 @@ jobs:
           ADMIN_URL: postgres://owner:testpw@localhost:5432/habiterall
         run: node test/drain.integration.mjs
 
+      # The second entry point (#194), over the real spawned process: it parks
+      # rather than exiting when it has nothing to run, the tick's own timer is
+      # the only thing ref'ing its loop so it survives past its first tick,
+      # SIGTERM drains it, and importing `api.js` starts neither a tick nor a
+      # gateway. Every one of those is a property this split RESTS on, and
+      # nothing else in CI can see any of them: `notifier-entry.test.js` reads
+      # source text and cannot see a renamed binding, and the two places that
+      # pinned "parks rather than exits" were this suite and — until it was
+      # fixed — a backup case asserting the opposite.
+      #
+      # `DATABASE_URL` is a deliberately unreachable address: the suite is
+      # about the process lifecycle, and every tick it drives is SUPPOSED to
+      # fail its read and be logged doing so. It needs no Postgres and could
+      # live in any job; it is here because this is where the rest of the
+      # edition's integration suites are.
+      - name: The notifier entry point boots, ticks, serves nothing and drains
+        working-directory: habiterall-cloud
+        run: npm run test:notifierentry
+
       # A mapping change inside completeLogin only matters if it reaches
       # GET /api/me. Boots the real server.js and drives a real OIDC callback
       # against a fake issuer, so the assertion is on the response body rather

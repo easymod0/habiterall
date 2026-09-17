@@ -631,18 +631,15 @@ exit 1
       what: 'case 11b: the real, spawned server (misconfigured backups) to answer /healthz',
     });
     ck('case11b: the server boots and answers healthy despite the misconfigured backup variable', true);
-    ck('case11b: the real process logged backup.admin_url_missing at boot too',
-      logs11.includes('"msg":"backup.admin_url_missing"'), logs11.slice(0, 800));
-    // FIX 3 (issue #75 fix round): `reportBackupConfig` is called exactly
-    // ONCE at boot in `server.js`, unconditionally — never inside
-    // `backupConfig` itself and never from a route. `waitFor`'s polling above
-    // issued several requests to `/healthz`, which does not touch
-    // `backupConfig` at all, but this count is still the direct check that
-    // boot logs it once and only once, regardless of what else the process
-    // does afterward.
-    const missingCount11b = (logs11.match(/"msg":"backup\.admin_url_missing"/g) ?? []).length;
-    ck('case11b (FIX 3): backup.admin_url_missing is logged EXACTLY ONCE at boot, not per request',
-      missingCount11b === 1, `count=${missingCount11b}\n${logs11.slice(0, 800)}`);
+    // And says NOTHING about backups, which is the half that changed with
+    // #194. `reportBackupConfig` used to be called here; the tick, the dump
+    // and the boot-time complaint all moved to `notifier-entry.js`, so this
+    // process no longer computes a backup config at all. Asserted as an
+    // ABSENCE rather than deleted, because the deletion is the thing worth
+    // pinning: a `reportBackupConfig` re-added to `server.js` would put an
+    // error line into the log of every replica for a job none of them runs.
+    ck('case11b: and the web process now says NOTHING about backups — that moved to the notifier',
+      !logs11.includes('"msg":"backup.'), logs11.slice(0, 800));
   } finally {
     if (child11 && exit11 === null) {
       child11.kill('SIGTERM');
@@ -652,6 +649,101 @@ exit 1
       });
     }
     issuerSrv.close();
+  }
+
+  console.log('--- case 11c: the notifier entry point is what complains now ---');
+  // The other half of 11b, and the reason it is a second spawn rather than an
+  // assertion moved: the complaint has to come from the process that would
+  // have done the dump. It binds nothing and needs no identity provider — no
+  // Express, no OIDC — so all it takes is the misconfigured pair and a
+  // DATABASE_URL its pool never connects on.
+  {
+    const notifierPath = fileURLToPath(new URL('../src/notifier-entry.js', import.meta.url));
+    let child11c = null;
+    let exit11c = null;
+    let logs11c = '';
+    try {
+      const spawnEnv11c = {
+        ...process.env,
+        SESSION_SECRET: 'backup-suite-secret',
+        // Off, with a directory set and no admin credential: `backupTask`
+        // answers `null` (a directory alone is not a backup hook), so there is
+        // genuinely nothing to run — and the entry point PARKS rather than
+        // exiting, because a container that exits 0 here is one the daemon
+        // leaves down after a host reboot. The complaint comes first, which is
+        // the ordering this case is about.
+        HABITERALL_NOTIFY: 'off',
+        // `error`, not `warn`: the line this case waits on
+        // (`backup.admin_url_missing`) is an error and is the case's own
+        // subject, and holding the level here is what keeps the wait from
+        // passing on some other, chattier line. It is also why the wait below
+        // is NOT on `notifier.nothing_to_run`, which is a warn and is
+        // suppressed at this level — `test:notifierentry` case 3b is where
+        // that line is pinned, at a level that can see it.
+        LOG_LEVEL: 'error',
+        HABITERALL_BACKUP_DIR: dir11,
+        HABITERALL_PG_DUMP: PG_DUMP,
+      };
+      delete spawnEnv11c.DATABASE_URL_ADMIN;
+
+      child11c = spawn(process.execPath, [notifierPath], {
+        cwd: new URL('..', import.meta.url).pathname,
+        env: spawnEnv11c,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      child11c.stdout.on('data', (d) => { logs11c += String(d); });
+      child11c.stderr.on('data', (d) => { logs11c += String(d); });
+      child11c.on('exit', (code, signal) => { exit11c = { code, signal }; });
+
+      // Wait for the COMPLAINT, never for the exit. This process parks on
+      // purpose, so a wait on `exit11c` cannot be satisfied by anything and
+      // would time out, take this whole suite's remaining cases down with it,
+      // and read as a red X against the entry point rather than against the
+      // wait. The predicate also admits an exit, so an entry point that
+      // regressed to exiting says so through the assertions below rather than
+      // through a 10-second hang.
+      await waitFor(async () => exit11c !== null
+        || logs11c.includes('"msg":"backup.admin_url_missing"'), {
+        timeoutMs: 10000,
+        what: 'case 11c: the notifier entry point to name the missing admin credential',
+      });
+      ck('case11c: the notifier logged backup.admin_url_missing at boot',
+        logs11c.includes('"msg":"backup.admin_url_missing"'), logs11c.slice(0, 800));
+      // FIX 3 (issue #75 fix round) follows the reporter to its new home:
+      // `reportBackupConfig` is called exactly ONCE, at boot, unconditionally
+      // — never inside `backupConfig` itself and never from a route, which is
+      // what stops one of N tenants opening the "Backup and restore" dialog
+      // driving an error line per request. The count is the direct check.
+      const missingCount11c = (logs11c.match(/"msg":"backup\.admin_url_missing"/g) ?? []).length;
+      ck('case11c (FIX 3): backup.admin_url_missing is logged EXACTLY ONCE at boot',
+        missingCount11c === 1, `count=${missingCount11c}\n${logs11c.slice(0, 800)}`);
+
+      // It PARKS rather than exiting, and the settle is the assertion: there is
+      // no predicate for "it did not exit", so this is one of the few waits in
+      // the repo that is deliberately a duration. An exit-0 notifier is one a
+      // daemon restart never brings back — `restart: unless-stopped` restores
+      // `app` and `db` after a host reboot and leaves a cleanly-exited
+      // container down, because 0 is not a failure — so the whole deployment
+      // loses its reminders with nothing in any log to find.
+      await new Promise((r) => setTimeout(r, 500));
+      ck('case11c: it PARKS rather than exiting — a directory alone is not a backup hook, '
+        + 'and a clean exit here is a container a restart leaves down',
+        exit11c === null, `exit=${JSON.stringify(exit11c)}`);
+
+      // And a signal still ends it, through the `armShutdown` at the top of
+      // `notifier-entry.js` — parking must not mean unkillable, or
+      // `stop_grace_period` is spent waiting for a SIGKILL on every deploy.
+      child11c.kill('SIGTERM');
+      await waitFor(async () => exit11c !== null, {
+        timeoutMs: 10000,
+        what: 'case 11c: the parked notifier to exit on SIGTERM',
+      });
+      ck('case11c: and SIGTERM still ends it cleanly',
+        exit11c?.code === 0 && exit11c?.signal === null,
+        `code=${exit11c?.code} signal=${exit11c?.signal}`);
+    } finally {
+      if (child11c && exit11c === null) child11c.kill('SIGKILL');
+    }
   }
 
   /* ---------- case 12 (FIX 1): a directory that cannot be created at all does not crash the process ---------- */
