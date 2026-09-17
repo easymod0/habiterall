@@ -628,14 +628,42 @@ const READ_BY_AWARDS = new Map([
 ]);
 
 /**
+ * `computeStats`' options that are NOT opt-outs, each with what it is instead.
+ *
+ * The other half of `statsOptOuts`, and the half that makes it safe. An
+ * earlier version of that reader matched `name = true` and returned what it
+ * found, which meant a parameter it did not RECOGNISE was indistinguishable
+ * from one that was not there — so an opt-out spelled `trend = TREND_DEFAULT`,
+ * exactly the way `unlogged = UNLOGGED_DEFAULT` is spelled one line above it,
+ * was read as "no such opt-out" and `/awards` went on paying for the pass with
+ * this whole file green. A review round found it by mutation.
+ *
+ * So every option is classified and nothing is skipped: an opt-out defaults to
+ * the literal `true`, everything else is named here, and a parameter in
+ * neither fails the test by name. That turns the dangerous direction — a new
+ * pass the guard cannot see — into the loud one, and it is why this is a map
+ * with reasons rather than a set: the next option added to `computeStats` has
+ * to be classified by somebody, not merely tolerated.
+ */
+const NOT_OPT_OUTS = new Map([
+  ['start', 'the window\'s own start date, not a pass'],
+  ['end', 'the window\'s own end date, not a pass'],
+  ['granularity', "history's bucket width ('day'); /awards declines history "
+    + 'and so carries no granularity at all'],
+  ['weekStart', "which day a week opens on ('monday'), an account setting"],
+  ['unlogged', 'what an unanswered day is worth (UNLOGGED_DEFAULT) — a '
+    + 'judgement every pass reads, never a pass that can be skipped'],
+]);
+
+/**
  * Every optional pass `computeStats` lets a caller decline, read off its own
  * signature in `shared/src/stats.js`.
  *
- * An opt-out is a destructured option defaulting to `true` — that is what the
- * shape has meant since `coverage` was the only one, and it is the shape the
- * ones added since kept. Everything else in that destructuring either has a
- * non-boolean default (`granularity = 'day'`, `weekStart = 'monday'`,
- * `unlogged = UNLOGGED_DEFAULT`) or none at all (`start`, `end`).
+ * An opt-out is a destructured option defaulting to the literal `true` — that
+ * is what the shape has meant since `coverage` was the only one, and it is the
+ * shape the ones added since kept. Every OTHER option is in `NOT_OPT_OUTS`,
+ * and this throws on one that is in neither rather than quietly omitting it;
+ * see that map for the mutation that made the difference matter.
  *
  * Derived rather than listed because the list is the thing that goes stale:
  * a guard naming today's opt-outs as literals is green on the day a fourth is
@@ -654,13 +682,75 @@ function statsOptOuts() {
   const src = stripComments(readFileSync(join(root, 'shared', 'src', 'stats.js'), 'utf8'));
   const at = src.indexOf('export function computeStats(');
   assert.notEqual(at, -1, 'computeStats is not declared in shared/src/stats.js');
-  // The signature only: stop at the `{` that opens the body, which is the
-  // first `{` AFTER the closing `)`. Reading to the end of the file instead
-  // would collect every `x = true` in the module.
-  const close = src.indexOf(') {', at);
-  assert.notEqual(close, -1, 'cannot find the end of the computeStats signature');
-  const signature = src.slice(at, close);
-  return [...signature.matchAll(/([A-Za-z_$][\w$]*)\s*=\s*true\b/g)].map(([, n]) => n);
+  // The options object only: from the `{` that opens the destructuring to the
+  // `}` that closes it, matched by depth rather than by the first `}` found,
+  // so a nested default cannot end the scan early.
+  const open = src.indexOf('{', at);
+  assert.notEqual(open, -1, 'cannot find computeStats\' options destructuring');
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < src.length; i++) {
+    if ('{[('.includes(src[i])) depth++;
+    else if ('}])'.includes(src[i])) {
+      depth--;
+      if (depth === 0) { close = i; break; }
+    }
+  }
+  assert.notEqual(close, -1, 'cannot find the end of computeStats\' options');
+
+  // Split on the commas that separate OPTIONS — depth 0 only, so a default
+  // holding a comma cannot split one parameter into two.
+  const body = src.slice(open + 1, close);
+  const parts = [];
+  let start = 0;
+  depth = 0;
+  for (let i = 0; i < body.length; i++) {
+    if ('{[('.includes(body[i])) depth++;
+    else if ('}])'.includes(body[i])) depth--;
+    else if (body[i] === ',' && depth === 0) { parts.push(body.slice(start, i)); start = i + 1; }
+  }
+  parts.push(body.slice(start));
+
+  const optOuts = [];
+  const seen = [];
+  for (const part of parts) {
+    const text = part.trim();
+    if (!text) continue;
+    const eq = text.indexOf('=');
+    const name = (eq === -1 ? text : text.slice(0, eq)).trim();
+    const dflt = eq === -1 ? '' : text.slice(eq + 1).trim();
+    seen.push(name);
+    // The classification, and the assertion that there is no third answer.
+    // A parameter this does not recognise is the failure the old reader had
+    // no way to report: it must be an opt-out spelled `true`, or named as
+    // something else, and never merely unseen.
+    if (dflt === 'true') optOuts.push(name);
+    else assert.ok(NOT_OPT_OUTS.has(name),
+      `computeStats has an option this test cannot classify: \`${name}\``
+      + (dflt ? ` (defaulting to \`${dflt}\`)` : ' (no default)')
+      + '. If it is an opt-out — a pass a caller may decline — spell its '
+      + 'default as the literal `true`, which is what every opt-out here uses '
+      + 'and what this reader recognises, and then decide whether /awards '
+      + 'declines it or it belongs in READ_BY_AWARDS. If it is not an opt-out, '
+      + 'add it to NOT_OPT_OUTS with what it is instead. It must not be '
+      + 'neither: that is how a pass /awards pays for per habit goes unseen.');
+  }
+
+  // The other direction, and the one the classification above cannot see: an
+  // entry here that names an option `computeStats` no longer has. The same
+  // check `compose.test.js` makes of `ELSEWHERE` ("nothing is opted out that
+  // the server no longer reads"), for the same reason — an excuse that
+  // outlived what it excused is a claim about the code that is no longer
+  // true, and the next reader takes it for one. Without this, deleting
+  // `granularity` from the signature left its entry sitting here describing a
+  // parameter that had gone, with every test green.
+  for (const name of NOT_OPT_OUTS.keys()) {
+    assert.ok(seen.includes(name),
+      `NOT_OPT_OUTS names \`${name}\`, which is no longer an option of `
+      + `computeStats (it has: ${seen.join(', ')}) — an excuse that outlived `
+      + 'what it excused; take the entry out.');
+  }
+  return optOuts;
 }
 
 test('the comment stripper is not fooled by the two things it must not be', () => {

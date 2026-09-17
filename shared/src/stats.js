@@ -1711,6 +1711,18 @@ function resolveWindow(entries, start, end, creditFrom = undefined) {
  * PR on this exact destructuring — so the merge is a hand edit either way,
  * and the only question was whether getting it wrong was silent.
  *
+ * **One constraint that falls out of that, and it is on the code rather than
+ * on the test: an opt-out's default must be the literal `true`.** The reader
+ * classifies EVERY option here — an opt-out defaults to `true`, everything
+ * else is named in its `NOT_OPT_OUTS` map with what it is instead — and an
+ * option in neither fails by name. That is deliberate and was not free: the
+ * first version of it matched `= true` and returned what it found, so a pass
+ * spelled `trend = TREND_DEFAULT`, the way `unlogged = UNLOGGED_DEFAULT` is
+ * spelled three lines below this comment, was not a recognised opt-out but an
+ * INVISIBLE one — `/awards` paying for it per habit, per request, with the
+ * guard green. A review round found that by mutation rather than by reading.
+ * Spell the default `true`, or the test will tell you to.
+ *
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
  * @param {{start?: string, end?: string, granularity?: string,
