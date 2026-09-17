@@ -251,6 +251,54 @@ a bounded slice must supply the LIFETIME value itself, or `onPaceSeries`
 narrows to the same answer round 1 gave, which is `summaryStats`'s and
 `recomputeBestStreak`'s own stated contract for withholding it.
 
+## Review round 2: the leniency must refuse a PHANTOM birth too
+
+Round 1's `birth` comes from a raw `MIN(date)` in both editions — personal's
+`q.firstEntryPerHabit` over a SQLite **TEXT** column, cloud's grouped
+`MIN(date)` — so it is exactly as phantom-capable as every other raw
+`MIN(date)` this file already refuses as an anchor (#270): `creditAnchor`,
+`firstStatedAnswer`, and `warmAnchor`, whose own comment says the value beside
+it is "exactly as phantom-capable as the `MIN(date)` that feeds
+`firstEntry`/`warmAnchor`". `dates[0]` — round 1's own comparison point — comes
+from `earliestRealDay` and is never phantom, so an unfiltered `birth` could
+never equal it: a phantom row is lexically the minimum, `birth` lands on a date
+like `2026-02-30`, `dates[0] === birth` is false for the WHOLE slice, and the
+gate collapses to the strict branch throughout — re-entering the disagreement
+round 1 exists to close, through the very anchor it introduced. Measured: a
+3×/7 habit with real rows from 2026-03-22 kept Sat+Sun+Mon and one phantom row
+dated 2026-02-30 read **101** on the habit's own page and **95** on the
+dashboard.
+
+The fix: `onPaceSeries` treats a `birth` that is a STRING but not a real day
+the same way it treats an absent one — the lenient branch, not the strict one —
+matching what `creditAnchor`, `firstStatedAnswer` and `warmAnchor` already do
+with this class of value.
+
+**The residue, stated plainly.** Treating a non-real `birth` as absent means
+assuming the range opens at the habit's birth. That is right whenever the
+phantom IS the habit's earliest row, and it is narrowly wrong for a habit that
+carries a phantom row AND has real rows before the slice edge: there the gate
+is withdrawn where it should have fired, and the slice edge over-credits
+again. That residue is strictly better than the guaranteed disagreement it
+replaces, for every phantom-carrying habit rather than only some of them, and
+it is not fixable in SQL — no `GLOB` or `LIKE` rejects February 30th, so no
+sharper `MIN(date)` read can hand this function a birth that is never
+phantom. Do not spend an afternoon looking for one.
+
+An explicit `null` — both routes' spelling for "no `MIN(date)` row at all" —
+stays on the strict branch rather than joining the phantom on the lenient one.
+The two mean different things (a real row this file cannot admit as an anchor,
+against no anchor to be lenient about), and over a one-day range the floored
+and the raw expressions are provably identical, so the strict branch costs a
+`null` birth nothing while keeping `null` and `undefined` the documented
+opposites they already are.
+
+The existing `PhantomAnchor` route fixture (`overview.integration.mjs`) is a
+**daily** habit, so `num >= den` gives it no leniency window and it
+structurally cannot see this — the blindness `shared/CLAUDE.md` already names,
+landing again on the same shape of test. The fixture this round adds beside it
+is 3×/7 for exactly that reason.
+
 ## What this does not fix
 
 `docs/decisions/awards.md` documents a separate mechanism: a 3×/7 habit kept

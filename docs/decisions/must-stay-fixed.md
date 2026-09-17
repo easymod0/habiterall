@@ -56,9 +56,19 @@ against a raw fractional requirement rounded the streak's demand up while the
 score's own comparison never rounded at all, so on a measurable fixture (two
 skip days inside a 3×/7 habit's window) the two disagreed about three
 consecutive days — `docs/decisions/on-pace-and-frequency.md` (#340) is the
-record that measured it and closed it by flooring the requirement instead. An
-option for "count only the days I did it" puts those two back into
-contradiction on purpose, which is the bug `onPaceSeries` exists to fix.
+record that measured it, and it is not closed by flooring the requirement
+alone. The review round that followed found the floor sound only where a
+range opens at the habit's genuine birth: a bounded slice (`/overview`'s
+400-day window, `recomputeBestStreak`'s 1830-day one) opens somewhere the
+habit was already alive, so the raw, unfloored comparison this fixed is
+DELIBERATELY back for the first `den - 1` days of every such slice — the
+gate, not the floor alone, is what closes it. `scoresOver` pro-rates
+continuously with no such gate, so the same cliff `onPaceSeries` now avoids
+at a habit's birth is still reachable there, on a payload carrying `score`
+and `currentStreak` side by side; that residual disagreement is known and
+accepted, not a second bug. An option for "count only the days I did it"
+puts those two back into contradiction on purpose, which is the bug
+`onPaceSeries` exists to fix.
 
 **3. The four day states, and what a write does to storage.** `entryWrite` in
 `validate.js`: `PUT {value: 0}` records a stated lapse, `DELETE` is how a day

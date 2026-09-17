@@ -185,7 +185,11 @@ export function summaryCacheHit(row, summaryEnd) {
  * @param {Array<{date: string, value: number, status?: string}>} entries the
  *   habit's rows over the last `STREAK_HISTORY_DAYS`. Any order.
  * @param {{summaryEnd: string, unlogged?: string, creditFrom?: string,
- *          birth?: string}} opts
+ *          birth?: string|null}} opts `birth: null` — both routes' spelling
+ *   for "no `MIN(date)` row for this habit" — is handed straight through to
+ *   `computeStreaks`/`onPaceSeries` and is NOT the same instruction as
+ *   omitting `birth`: see `onPaceSeries`'s own doc comment for why a lookup
+ *   miss stays on the strict branch where an absent override does not.
  * @returns {number}
  */
 export function recomputeBestStreak(habit, entries, { summaryEnd, unlogged, creditFrom, birth }) {

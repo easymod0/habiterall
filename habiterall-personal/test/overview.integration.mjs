@@ -447,6 +447,66 @@ ck('...and /overview agrees with the habit\'s own page, which reads the ' +
   `overview ${birthWiringRow.currentStreak}/${birthWiringRow.bestStreak} vs `
   + `stats ${birthWiringStats.currentStreak}/${birthWiringStats.bestStreak}`);
 
+/* ---- issue #340 review round 2: the birth gate itself must refuse a
+ * PHANTOM anchor, not just a bounded slice's own edge ----
+ *
+ * The round-1 fix above threads the habit's LIFETIME earliest row through as
+ * `birth`, exactly as both routes read it — an unfiltered `MIN(date)`. That
+ * read is exactly as phantom-capable as the `MIN(date)` reads `creditAnchor`
+ * and `computeCategoryStats`'s own `warmAnchor` already refuse (#270), and a
+ * phantom row is lexically the minimum, so it can NEVER equal `dates[0]` —
+ * `onPaceSeries`'s gate collapsed to the strict, un-floored, un-claused
+ * branch for the WHOLE slice of any phantom-carrying habit, re-entering
+ * through the very anchor round 1 introduced.
+ *
+ * This fixture is deliberately a habit whose real history is entirely inside
+ * BOTH bounded slices (`/overview`'s 400-day window, `recomputeBestStreak`'s
+ * 1830-day one), unlike `birthWiring` above — so the only source of
+ * disagreement is the phantom row corrupting the raw `MIN(date)` read, not a
+ * genuine slice edge. Kept in the LATE three of every 7-day cycle
+ * (`idx % 7 >= 4`, exactly `birthWiring`'s own pattern and exactly what
+ * `docs/decisions/on-pace-and-frequency.md`'s five-schedule table names as
+ * the layout that fails without the leniency and survives with it) so the
+ * warm-up actually matters: a front-loaded Mon/Wed/Fri schedule meets the
+ * un-floored ratio on its own and could not tell the two branches apart.
+ */
+const phantomBirth3x7 = await post('/habits', {
+  name: 'PhantomBirth3x7', type: 'boolean', freq_numerator: 3, freq_denominator: 7,
+});
+const PB_RANGE_DAYS = 91; // same span as birthWiring and the pure-function fixture
+for (let i = PB_RANGE_DAYS - 1; i >= 0; i--) {
+  const idx = PB_RANGE_DAYS - 1 - i; // 0 at the habit's own first day, increasing toward today
+  await put(`/habits/${phantomBirth3x7.id}/entries/${daysAgo(i)}`,
+    { value: (idx % 7 >= 4) ? 2 : 0 });
+}
+// Lexically before every real row above, exactly `PhantomAnchor`'s own
+// construction: `PB_RANGE_DAYS + 40` days back is more than a month clear of
+// the real fixture, so its 'YYYY-MM' prefix sorts strictly below every real
+// row's regardless of what the '-99' day component sorts against within it.
+const phantomBirthDate = `${daysAgo(PB_RANGE_DAYS + 40).slice(0, 7)}-99`;
+db.prepare(
+  `INSERT INTO entries (habit_id, date, value, status, notes) VALUES (?, ?, ?, ?, ?)`
+).run(phantomBirth3x7.id, phantomBirthDate, 2, '', '');
+
+const withPhantomBirth = await overview({ days: 7 });
+const phantomBirthRow = withPhantomBirth.habits.find((h) => h.id === phantomBirth3x7.id);
+const phantomBirthStats = await fetch(`${base}/api/habits/${phantomBirth3x7.id}/stats`)
+  .then((r) => r.json());
+
+ck('a phantom-dated MIN(date) does not collapse the birth gate to the strict ' +
+  'branch for the whole slice — currentStreak, from summaryStats ' +
+  '(#340 review round 2)',
+  phantomBirthRow.currentStreak === PB_RANGE_DAYS - 4, String(phantomBirthRow.currentStreak));
+ck('...nor does the bounded 1830-day streak scan — bestStreak, from ' +
+  'recomputeBestStreak',
+  phantomBirthRow.bestStreak === PB_RANGE_DAYS - 4, String(phantomBirthRow.bestStreak));
+ck('...and /overview agrees with the habit\'s own page, which filters the ' +
+  'phantom row before ever choosing an anchor and so never saw this bug',
+  phantomBirthRow.currentStreak === phantomBirthStats.currentStreak
+  && phantomBirthRow.bestStreak === phantomBirthStats.bestStreak,
+  `overview ${phantomBirthRow.currentStreak}/${phantomBirthRow.bestStreak} vs `
+  + `stats ${phantomBirthStats.currentStreak}/${phantomBirthStats.bestStreak}`);
+
 /* ---- issue #200: /overview orders the habit list by the stored `habitSort` ----
  *
  * Created in an order that is deliberately NOT name order and NOT score

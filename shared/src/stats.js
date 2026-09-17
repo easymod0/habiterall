@@ -916,13 +916,31 @@ function regularityOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
  * dashboard against 296 on its own page (`docs/decisions/on-pace-and-frequency.md`,
  * #340). So: while `dates[0] === birth`, this is the habit's own start and the
  * leniency above applies exactly as written. Once the range opens somewhere
- * ELSE — `birth` supplied and different from `dates[0]` — a short window is
- * merely a slice edge, not missing history, and every day the window is still
- * partial is judged by the plain, unfloored, unclaused ratio instead: the
- * expression this rule replaces everywhere else. A day once the window has
- * FILLED (`windowDays === den`) is judged the same way either way, since a
- * full window needs no leniency and floors to the same whole number the raw
- * ratio does. Omitting `birth` behaves as `dates[0] === birth` always — the
+ * ELSE — `birth` supplied, real, and different from `dates[0]` — a short window
+ * is merely a slice edge, not missing history, and every day the window is
+ * still partial is judged by the plain, unfloored, unclaused ratio instead: the
+ * expression this rule replaces everywhere else. A `birth` that is not a real
+ * day (#340's second review round: both editions hand this straight from SQL's
+ * `MIN(date)`, exactly as phantom-capable as the raw reads `creditAnchor` and
+ * `warmAnchor` already refuse) is treated as absent rather than as a real,
+ * non-matching one — the lenient branch, not the strict one — because a
+ * phantom row is lexically the minimum and can never equal `dates[0]`, so an
+ * unfiltered `birth` collapsed the gate to the strict branch for the WHOLE
+ * slice of any phantom-carrying habit.
+ *
+ * **A day once the window has FILLED (`windowDays === den`) is judged the same
+ * way either way, but NOT because a full window "needs no leniency and floors
+ * to the same whole number the raw ratio does" — that is false under skips.**
+ * A full window with two skips still has `activeDays < den`, so 3×/7 with two
+ * skips demands a floored 2 against a raw, unfloored 2.143 (which rounds up to
+ * 3) — the two branches disagree, and that disagreement is this rule's own
+ * headline fixture. The two are equal only STRUCTURALLY: the branch below reads
+ * `windowDays < den && !opensAtBirth`, so a full window (`windowDays === den`)
+ * never reaches the strict branch no matter what `opensAtBirth` says. Do not
+ * simplify that condition to `!opensAtBirth` alone — it would revert the floor
+ * for every full window, with no test that fails, since the birth-opening case
+ * is exactly where `windowDays < den` and the two conditions look
+ * interchangeable. Omitting `birth` behaves as `dates[0] === birth` always — the
  * pre-review, always-lenient shape — which is right for a caller (a direct
  * test, `computeStats`) that has already opened its window at the habit's own
  * first row and wrong for a caller holding a bounded slice, which must supply
@@ -948,8 +966,13 @@ function regularityOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
  *   call over `start, end`) and hands it in; because this function is not
  *   exported and has no `dates` parameter reachable from outside `stats.js`,
  *   there is no second way to reach it with an unclamped range.
- * @param {string} [birth] the habit's LIFETIME earliest real row — see the
- *   note above. Compared against `dates[0]` as a plain string.
+ * @param {string|null} [birth] the habit's LIFETIME earliest real row — see
+ *   the note above. `undefined` and a non-real STRING both mean "treat the
+ *   range as opening at birth"; an explicit `null` — both routes' spelling
+ *   for "no `MIN(date)` row for this habit at all" — takes the strict
+ *   branch instead, deliberately: a phantom is a real row this file cannot
+ *   admit as an anchor, where a lookup miss is "no anchor exists to be
+ *   lenient about". Compared against `dates[0]` as a plain string.
  * @returns {{date: string, ok: boolean|null}[]} `null` on a skipped day, which
  *   is transparent: it neither starts, extends nor breaks a run.
  */
@@ -960,8 +983,35 @@ function onPaceSeries(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
 
   // See the doc comment above: undefined behaves as "the range opens at the
   // habit's own birth", which is the only shape a caller not supplying this
-  // could honestly mean.
-  const opensAtBirth = birth === undefined || (dates.length > 0 && dates[0] === birth);
+  // could honestly mean. A `birth` that IS a string but not a real day gets
+  // the same treatment rather than the strict branch: both editions hand
+  // this straight from SQL's `MIN(date)` (personal's `q.firstEntryPerHabit`,
+  // cloud's grouped `MIN(date)`), which is exactly as phantom-capable as the
+  // raw reads `creditAnchor`, `firstStatedAnswer` and `warmAnchor` already
+  // refuse for the same reason — a phantom row is lexically the minimum and
+  // can never equal `dates[0]`, so an unfiltered `birth` collapsed the gate
+  // to the strict branch for the WHOLE slice of any phantom-carrying habit
+  // (`docs/decisions/on-pace-and-frequency.md`, #340 review round 2:
+  // measured 95 against a detail view of 101). Treating it as absent means
+  // "assume the range opens at the habit's birth", which is right whenever
+  // the phantom IS the earliest row and only narrowly wrong — the gate
+  // withdrawn one slice-edge too many — for a habit that carries a phantom
+  // row AND has real rows before the slice edge; SQL cannot tell the two
+  // apart (no `GLOB`/`LIKE` rejects February 30th), and that residue is
+  // strictly better than the guaranteed disagreement this replaces.
+  //
+  // `typeof birth === 'string'` gates that check deliberately, rather than
+  // `!isRealDay(birth)` alone: both routes hand a birth-less habit `null`
+  // (`birthById.get(h.id) ?? null` — a lookup MISS, meaning the habit has no
+  // row in `MIN(date)` at all), and `isRealDay(null)` is also false. Folding
+  // that into this clause would flip a lookup miss from strict to lenient
+  // too, which is a different question with a different right answer: a
+  // phantom is a real row this file simply cannot admit as an anchor, where
+  // a miss is "no anchor exists to be lenient about" and stays on the
+  // conservative, no-leniency branch it already took.
+  const opensAtBirth = birth === undefined
+    || (typeof birth === 'string' && !isRealDay(birth))
+    || (dates.length > 0 && dates[0] === birth);
 
   const done = dates.map(
     (date) => isCompleted(habit, entryMap.get(date), unlogged, answeredBy(date, creditFrom))
@@ -1097,11 +1147,12 @@ function streaksFrom(series) {
  * @param {string} [creditFrom] see `answeredBy`. A route that scans streaks
  *   itself — both editions' `/overview`, for `bestStreak` — has to pass this or
  *   it serves a figure the rest of the same payload disagrees with (#223).
- * @param {string} [birth] the habit's LIFETIME earliest real row — see
- *   `onPaceSeries`. `recomputeBestStreak` (`summary-cache.js`) is the one
- *   caller here that matters: its 1830-day slice opens wherever the scan
- *   happens to reach, not necessarily at the habit's own first row, so it
- *   must supply this or the leniency window at the slice's own edge is
+ * @param {string|null} [birth] the habit's LIFETIME earliest real row, or
+ *   `null` for "no such row" — see `onPaceSeries` for why the two are not the
+ *   same. `recomputeBestStreak` (`summary-cache.js`) is the one caller here
+ *   that matters: its 1830-day slice opens wherever the scan happens to
+ *   reach, not necessarily at the habit's own first row, so it must supply
+ *   this or the leniency window at the slice's own edge is
  *   mistaken for the habit's birth.
  */
 export function computeStreaks(habit, entryMap, start, end, unlogged = UNLOGGED_DEFAULT,
@@ -2276,7 +2327,10 @@ export function computeStats(habit, entries,
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
  * @param {{start?: string, end?: string, unlogged?: string,
- *          creditFrom?: string, birth?: string, lastMiss?: boolean}} [opts]
+ *          creditFrom?: string, birth?: string|null, lastMiss?: boolean}} [opts]
+ *   `birth: null` and `birth: undefined` are NOT the same instruction to
+ *   `onPaceSeries` — see its own doc comment for why a lookup miss (`null`)
+ *   stays strict where an absent override (`undefined`) does not.
  * @returns {import('./types.js').SummaryStats}
  */
 export function summaryStats(habit, entries,
@@ -2847,8 +2901,23 @@ export function computeCategoryStats(categories, members,
       // from `dates` instead would mistake every comparison's own edge for
       // the member's birth and re-introduce the leniency `onPaceSeries`'s doc
       // comment describes for a bounded slice.
+      //
+      // **`firstEntry` itself is exactly as phantom-capable as `warmAnchor`
+      // exists to filter, and handing it to `onPaceSeries` raw was review
+      // round 2's second site.** Both editions' `MIN(date)` read reaches this
+      // parameter the same way it reaches `warmAnchor` a few lines up — but
+      // this is a different question from that one: `warmAnchor` is a WARM-UP
+      // start and degrades to `earliestRealDay(entryMap.keys())`, the earliest
+      // real row the fetched SLICE can prove, when `firstEntry` is a phantom.
+      // `birth` asks "is this the member's genuine lifetime start", and a
+      // slice's own earliest real row is not an honest answer to that — it is
+      // exactly the slice-edge `onPaceSeries`'s birth gate exists to tell
+      // apart from a true birth. So a non-real `firstEntry` here degrades to
+      // `undefined`, never to `warmAnchor`'s fallback: "the member's lifetime
+      // first row, or nothing if it is not a real day."
+      const memberBirth = firstEntry !== null && isRealDay(firstEntry) ? firstEntry : undefined;
       rate = computeRecovery(
-        missRunsFrom(onPaceSeries(habit, entryMap, dates, unlogged, memberCredit, firstEntry)),
+        missRunsFrom(onPaceSeries(habit, entryMap, dates, unlogged, memberCredit, memberBirth)),
         end
       ).rate;
     }
