@@ -31,15 +31,19 @@ plausible kind. It was a true statement about the FIGURES and a false one about
 the WINDOW, and only the second is what a user sees.
 
 `computeStats` starts at `from = start ?? firstEntry`, and `onPaceSeries`
-pro-rates the requirement near that start — `required = min(activeDays,
-num*activeDays/den)` — deliberately, so a habit is not judged against history it
-does not have yet. Move the earliest entry EARLIER and the first `den - 1` days
-are re-judged against a full requirement they now fail. Measured end to end
-through the real route: a 3×/week habit kept perfectly reads `bestStreak` 21 and
-shows "21-day streak"; logging **one forgotten session** from the week before
-drops it to 17 and the badge to "14-day streak". Remembering something you did
-takes the award down. Daily habits (`num >= den`) have no leniency window and
-are immune, which is exactly why this survived a test suite built on one.
+pro-rates the requirement near that start — `required = max(1, floor(min(
+activeDays, num*activeDays/den)))`, see `on-pace-and-frequency.md` for why it
+floors rather than rounds up — deliberately, so a habit is not judged against
+history it does not have yet. Move the earliest entry EARLIER and the first
+`den - 1` days are re-judged against a full requirement they now fail. Measured
+end to end through the real route: a 3×/week habit kept perfectly reads
+`bestStreak` 21 and shows "21-day streak"; logging **one forgotten session**
+from the week before drops it to 17 and the badge to "14-day streak" —
+re-measured after #340's fix to the requirement's rounding, unchanged, because
+this is the window moving rather than the rounding bug that fix closed.
+Remembering something you did takes the award down. Daily habits (`num >=
+den`) have no leniency window and are immune, which is exactly why this
+survived a test suite built on one.
 
 The second mechanism needs no user at all. `MAX_RANGE_DAYS` clamps `from` to
 `end - 3660`, so a habit older than ten years — or one carrying a single ancient

@@ -927,6 +927,13 @@ api.get('/overview', (req, res) => {
   const firstAnswer = new Map(
     firstRows.map((r) => [r.habit_id, /** @type {string|null} */ (r.first_answer)])
   );
+  // Unconditional, unlike `firstEntry` above: `summaryStats`/`recomputeBestStreak`
+  // compute the row's figures in archived mode too (see the comment above), so a
+  // map that goes `null` there would silently withdraw the birth gate (#340) on
+  // exactly the view `firstEntry` itself was widened to unconditional for.
+  const birthById = new Map(
+    firstRows.map((r) => [r.habit_id, /** @type {string} */ (r.first_date)])
+  );
 
   // For the grid the frontend only needs something paintable, so skips are
   // flattened onto the SKIP wire value here. Scoring never uses this map.
@@ -1013,9 +1020,16 @@ api.get('/overview', (req, res) => {
     // both because its wider slice could see the answer. Derived once and shared,
     // so the three figures cannot disagree by construction.
     const creditFrom = creditAnchor(firstAnswer.get(h.id) ?? null, summaryEnd);
+    // The habit's LIFETIME earliest row, for `onPaceSeries`'s birth gate
+    // (#340): both the 400-day summary slice below and the 1830-day streak
+    // scan open wherever they happen to reach, not necessarily at the
+    // habit's own first row, so the leniency at either slice's own edge must
+    // not be mistaken for the habit's birth. `?? null` for the same reason
+    // `firstAnswer` reads it that way — a habit with no rows at all.
+    const birth = birthById.get(h.id) ?? null;
 
     const stats = summaryStats(h, windowed, {
-      end: summaryEnd, unlogged, creditFrom, lastMiss: wantsLastMiss,
+      end: summaryEnd, unlogged, creditFrom, birth, lastMiss: wantsLastMiss,
     });
     // Collected as each row is built rather than in a second pass over
     // `habitPayloads`: `stats.lastMiss` is absent unless `wantsLastMiss` asked
@@ -1033,7 +1047,9 @@ api.get('/overview', (req, res) => {
     // — #270) lives there now rather than here. It is handed the SAME
     // `creditFrom` the summary above got, not a second one derived from its
     // wider slice: the two derivations disagree exactly when the habit's
-    // answer falls between the two windows (#223).
+    // answer falls between the two windows (#223). Same for `birth` (#340):
+    // its own 1830-day slice opens at the earliest row INSIDE that window,
+    // which is not the habit's lifetime birth for anything older.
     let bestStreakValue;
     let totalCompleted;
     if (fresh) {
@@ -1041,7 +1057,7 @@ api.get('/overview', (req, res) => {
       totalCompleted = h.total_completed;
     } else {
       bestStreakValue = recomputeBestStreak(h, /** @type {any} */ (all), {
-        summaryEnd, unlogged, creditFrom,
+        summaryEnd, unlogged, creditFrom, birth,
       });
       // Counted in SQLite rather than by walking every row in JS. The
       // expression mirrors isCompleted exactly, including that a skip is

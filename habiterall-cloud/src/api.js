@@ -1670,9 +1670,17 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
     // both because its wider slice could see the answer. Derived once and
     // shared, so the three figures cannot disagree by construction.
     const creditFrom = creditAnchor(firstAnswer.get(h.id) ?? null, summaryEnd);
+    // The habit's LIFETIME earliest row, for `onPaceSeries`'s birth gate
+    // (#340): both the 400-day summary slice above and the 1830-day streak
+    // scan below open wherever they happen to reach, not necessarily at the
+    // habit's own first row, so the leniency at either slice's own edge must
+    // not be mistaken for the habit's birth. `firstEntry` is already
+    // unconditional (unlike personal's, which is `null` in archived mode) —
+    // the same grouped `MIN(date)` read that feeds `creditAnchor` above.
+    const birth = firstEntry.get(h.id) ?? null;
 
     const stats = summaryStats(h, recent, {
-      end: summaryEnd, unlogged, creditFrom, lastMiss: wantsLastMiss,
+      end: summaryEnd, unlogged, creditFrom, birth, lastMiss: wantsLastMiss,
     });
     // Collected while each row is built rather than in a second pass over
     // `habitPayloads`: `stats.lastMiss` is absent unless `wantsLastMiss` asked
@@ -1687,10 +1695,12 @@ async function buildOverview(db, { user, start, end, summaryEnd, archived }) {
     // `recomputeBestStreak` is the shared block (`summary-cache.js`), handed
     // the SAME `creditFrom` the summary above got rather than a second one
     // derived from its wider slice — the two disagree exactly when the habit's
-    // answer falls between the two windows (#223).
+    // answer falls between the two windows (#223). Same for `birth` (#340):
+    // its own 1830-day slice opens at the earliest row INSIDE that window,
+    // which is not the habit's lifetime birth for anything older.
     const bestStreak = fresh
       ? h.best_streak
-      : recomputeBestStreak(h, all, { summaryEnd, unlogged, creditFrom });
+      : recomputeBestStreak(h, all, { summaryEnd, unlogged, creditFrom, birth });
     const totalCompleted = fresh ? h.total_completed : (totals.get(h.id) ?? 0);
     if (!fresh) {
       // `summary_epoch` comes off the row this recompute was derived FROM, and

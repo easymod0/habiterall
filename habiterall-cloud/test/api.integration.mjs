@@ -689,6 +689,79 @@ for (const id of [creditHabit.id, lapseHabit.id, staleAnswerHabit.id, phantomAnc
   await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
 }
 
+/* ---- issue #340, review round 1: cloud's own wiring test for the birth
+ * gate ----
+ *
+ * Personal pinned this in abc9656 (`overview.integration.mjs`'s
+ * `birthWiring` fixture); cloud wires `birth` into the IDENTICAL two call
+ * sites (`buildOverview` in `src/api.js`: `summaryStats` and
+ * `recomputeBestStreak`) and had no test of its own — a future edit
+ * dropping it from either cloud call site would be caught by nothing here,
+ * not by the pure-function tests and not by personal's own suite.
+ *
+ * A 3x/7 habit with one row 2000 days back — outside BOTH the 400-day
+ * summary slice and the 1830-day streak scan — then silence, then a restart
+ * 300 days back kept EXACTLY 3-per-7 (every rolling 7-day window holds
+ * precisely 3 completions), with completions clustered LATE in each 7-day
+ * cycle (`idx % 7 >= 4` — the shape the fix's own record names as the one
+ * that fails against the unfixed, un-floored ratio and so is what makes this
+ * fixture able to fail at all; Mon/Wed/Fri survives even unfixed and would
+ * prove nothing). `computeStats`, over the whole history, opens at the true
+ * 2000-day-back row and reads 295 on both figures; a bounded slice that
+ * forgot the lifetime `birth` would instead mistake its OWN edge (the
+ * 300-day-back restart) for the habit's birth and over-credit the first six
+ * days of it, exactly as personal's fixture measures.
+ */
+console.log('\n--- issue #340: cloud wires the LIFETIME birth into summaryStats ' +
+  'and recomputeBestStreak ---');
+
+const birthWiringHabit = await (await fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: 'CloudBirthWiring', type: 'boolean', freq_numerator: 3, freq_denominator: 7,
+  }),
+})).json();
+
+await fetch(`${overviewBase}/api/habits/${birthWiringHabit.id}/entries/${isoDaysAgo(2000)}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ value: 2 }), // YES — boolean habits accept 0, 2 or 3
+});
+
+const CLOUD_RESTART_DAYS_AGO = 300;
+for (let i = CLOUD_RESTART_DAYS_AGO; i >= 0; i--) {
+  const idx = CLOUD_RESTART_DAYS_AGO - i; // 0 at the restart, increasing toward today
+  // Every day carries a row — a stated 0 where unmarked, never an absent one
+  // — so the slice's earliest fetched row lands exactly at the restart date
+  // rather than drifting to whichever day happens to hold the first
+  // completion.
+  await fetch(`${overviewBase}/api/habits/${birthWiringHabit.id}/entries/${isoDaysAgo(i)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ value: (idx % 7 >= 4) ? 2 : 0 }), // 2 is YES here too
+  });
+}
+
+const cloudBirthWiringView = await getOverview({ days: 7 });
+const cloudBirthWiringRow = cloudBirthWiringView.habits.find((h) => h.id === birthWiringHabit.id);
+const cloudBirthWiringStats = await fetch(`${overviewBase}/api/habits/${birthWiringHabit.id}/stats`)
+  .then((r) => r.json());
+
+ck('a bounded 400-day slice does not mistake its own edge for this habit\'s ' +
+  'birth — currentStreak, from summaryStats',
+  cloudBirthWiringRow.currentStreak === 295, String(cloudBirthWiringRow.currentStreak));
+ck('...nor does the bounded 1830-day streak scan — bestStreak, from recomputeBestStreak',
+  cloudBirthWiringRow.bestStreak === 295, String(cloudBirthWiringRow.bestStreak));
+ck('...and /overview agrees with the habit\'s own page, which reads the ' +
+  'whole history and so always opens at the genuine birth',
+  cloudBirthWiringRow.currentStreak === cloudBirthWiringStats.currentStreak
+  && cloudBirthWiringRow.bestStreak === cloudBirthWiringStats.bestStreak,
+  `overview ${cloudBirthWiringRow.currentStreak}/${cloudBirthWiringRow.bestStreak} vs `
+  + `stats ${cloudBirthWiringStats.currentStreak}/${cloudBirthWiringStats.bestStreak}`);
+
+await fetch(`${overviewBase}/api/habits/${birthWiringHabit.id}`, { method: 'DELETE' });
+
 /* ---------- issue #224: a quick answer preserves that day's note ----------
  *
  * `parseEntry` now answers `notes: null` for a body that omits the key, and

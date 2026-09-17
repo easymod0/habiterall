@@ -1173,10 +1173,21 @@ try {
     }
 
     // The `MIN_STREAK` gate: a probe habit with exactly one entry ~12 days ago
-    // and a 3/7 frequency makes `onPaceSeries` a run of exactly 2 days (the
+    // and a 2/3 frequency makes `onPaceSeries` a run of exactly 2 days (the
     // entry day plus the day after) — one below `MIN_STREAK` — so the day
-    // after the entry must draw empty rather than a tick. Verified against
-    // `/api/habits/:id/stats` rather than assumed.
+    // after the entry must draw empty rather than a tick. The frequency is
+    // FIXTURE-CHOSEN, not incidental, and this is the whole reason it is 2/3
+    // and not some rounder ratio: on the day after the entry `activeDays` is
+    // 2, so the raw requirement is `2 * 2 / 3 = 1.333…` — genuinely
+    // fractional, which is the whole point. `onPaceSeries` floors that to 1,
+    // and `windowDone` (the one completion still inside the trailing 2-day
+    // window) meets it, so the day after the entry is on pace and the run
+    // reaches 2 days. A ratio whose arithmetic never lands on a fraction at
+    // that day — 1/2 was tried and rejected here for exactly this reason —
+    // cannot tell the floored rule apart from the raw, un-floored one, so a
+    // later edit that swaps in a "rounder" frequency would silently stop this
+    // block testing anything. Verified against `/api/habits/:id/stats` rather
+    // than assumed.
     const localISO = (n) => {
       const d = new Date();
       d.setHours(12, 0, 0, 0);
@@ -1190,7 +1201,7 @@ try {
       const h = await (await fetch('/api/habits', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ name: 'Strip run-length probe', type: 'boolean',
-          freq_numerator: 3, freq_denominator: 7, color: '#3b82f6' }),
+          freq_numerator: 2, freq_denominator: 3, color: '#3b82f6' }),
       })).json();
       await fetch('/api/habits/' + h.id + '/entries/${probeEntryDate}', {
         method: 'PUT', headers: { 'content-type': 'application/json' },

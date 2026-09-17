@@ -78,7 +78,7 @@ only defaults, and why `compileSdk` is 37 while `targetSdk` stays 36.
 
 | working in | read | archive |
 |---|---|---|
-| `shared/src/` | `shared/CLAUDE.md` | `docs/decisions/day-states.md`, `awards.md`, `import-and-loop.md`, `categories.md`, `phantom-dates.md` |
+| `shared/src/` | `shared/CLAUDE.md` | `docs/decisions/day-states.md`, `awards.md`, `import-and-loop.md`, `categories.md`, `phantom-dates.md`, `on-pace-and-frequency.md` |
 | `shared/public/` | `shared/CLAUDE.md`, `shared/public/CLAUDE.md` | `dashboard-and-detail.md`, `routing.md`, `amounts.md`, `notifications-web.md`, `categories.md`, `caching.md`, `phantom-dates.md` |
 | `android-native/` | `android-native/CLAUDE.md` | `android.md`, `routing.md`, `caching.md`, `android-stats-screen.md` |
 | `habiterall-personal/` | `habiterall-personal/CLAUDE.md` | `auth.md`, `caching.md` |
