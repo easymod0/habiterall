@@ -405,37 +405,22 @@ figures are taken from the fetch (`Widgets.refreshed`), because that is the
 only thing that will stop them.
 
 **The figures are as of `record.date`, on a line a user can see — except
-`record.date` alone cannot answer "are they current".** Same rule as the
-checkmark cell's own note above, and the same precedent behind it: the first
-version of THAT put the explanation in `setContentDescription` alone ("It has
-to be VISIBLE, not just described"), so a stats widget repeating that mistake
-would have been the identical bug on a second surface. But `record.date` names
-the day the ENTRY is about, not when `score`/`currentStreak` were last
-fetched, and `Widgets.answered` can record an answer with no network at all — a
-notification button, its number pad, or the checkmark widget's own tap. A
-morning sync leaves the figures at yesterday's answer; a 9am tap in the shade
-moves the strip to today with no fetch behind it, and `record.date == today`
-then read as "everything here is current" for up to six hours, contradicting
-the strip cell sitting right beside it. `Record.figuresStale` is the second
-flag this needed: set on BOTH of `answered`'s branches — an answer has been
-recorded with no fetch behind it, not "the strip moved", so the branch that
-leaves `date` unchanged (an older-day answer) still sets it — cleared in
-`Widgets.refreshed` (a successful fetch is exactly what makes the figures
-current again), and shown as its own sentence (`stats_figures_behind`) rather
-than the dated one — naming a date would be a false claim when the day itself
-is not stale, only the score and streak are. `WidgetSync.noteRefused` leaves
-the flag untouched rather than setting or clearing it, but not because
-setting it would put the note line on screen: on every path that can produce
-a refusal (the shade, the number pad, a widget's own tap), the `answered`
-that preceded the write already set the flag, so the note line is already
-showing before the refusal ever runs, and leaving it alone changes nothing
-there. The decision only matters on the one path that enqueues without
-calling `noteAnswer` — the list screen's own tap (`MainActivity`). A refusal
-never reached the server, so it is neither evidence the figures are stale nor
-evidence they are current, and a boolean cannot hold "this refusal's own
-answer" apart from "an earlier one still unfetched" — so it is left exactly
-as found, and over-reporting staleness is the fail-safe direction.
+`record.date` alone cannot answer "are they current".** It names the day the
+ENTRY is about, not when `score`/`currentStreak` were last fetched, and
+`Widgets.answered` can record an answer with no network at all. A 9am tap in
+the shade moves the strip to today with no fetch behind it, and
+`record.date == today` then read as "everything here is current" for up to six
+hours, contradicting the strip cell beside it.
 
+`Record.figuresStale` is the second flag that needed: set on BOTH of
+`answered`'s branches — an answer recorded with no fetch behind it, so the
+branch that leaves `date` unchanged still sets it — cleared in
+`Widgets.refreshed`, and shown as its own sentence (`stats_figures_behind`)
+rather than the dated one, since naming a date would be false when only the
+score and streak are stale. `WidgetSync.noteRefused` leaves it untouched: a
+refusal never reached the server, so it is neither evidence of staleness nor
+of currency, and over-reporting staleness is the fail-safe direction.
+`docs/decisions/android-stats-screen.md` has the path-by-path argument.
 **`redraw` and `armMidnight` used to be hard-coded to `HabitWidget` alone, and
 the worse of the two failure modes was not "never redrawn."** Both asked
 `getAppWidgetIds(ComponentName(app, HabitWidget::class.java))` — the checkmark
@@ -551,57 +536,39 @@ the browser.
 
 **A typed amount has one reader, `parseAmount` in `ui/Amount.kt`, and it is a
 DEVICE-TIER decision rather than a sixth mirror.** Before #157 this client had
-three: `HabitFormScreen.parseAmount` and a bare `toDoubleOrNull` in both
-`CountEntryActivity`'s number pad and `MainActivity`'s day dialog
-(`CountDialog`) — which disagreed with each other about `8,5` before they could
-even disagree with the web. All three now call the one function, and what
-decides the thousands-separator convention is `deviceAmountFormat()` —
-`Locale.getDefault()`, asked again on every parse — never the account's
-`numberFormat` setting, which is why that key stays in `AppSettingsDefaultsTest`'s
-`notMirrored` rather than moving to `AppSettings`. `auto` — the setting's own
-default, and almost everybody's value — already means exactly this: the phone
-resolves its own locale and a browser on the same device would resolve the
-same one, with nothing to carry over the wire.
+three — `HabitFormScreen.parseAmount` and a bare `toDoubleOrNull` in both
+`CountEntryActivity`'s number pad and `MainActivity`'s `CountDialog` — which
+disagreed with each other about `8,5` before they could disagree with the web.
+What decides the thousands-separator convention is `deviceAmountFormat()`,
+asked again on every parse, never the account's `numberFormat` setting — which
+is why that key stays in `AppSettingsDefaultsTest`'s `notMirrored`.
 
-**One reader is not enough on its own if the platform deletes the character
-before the reader sees it.** `CountEntryActivity` is the only one of the three
-surfaces that is a platform `EditText`, and `inputType = TYPE_CLASS_NUMBER or
+**One reader is not enough if the platform deletes the character before the
+reader sees it.** `CountEntryActivity` is the only one of the three that is a
+platform `EditText`, and `inputType = TYPE_CLASS_NUMBER or
 TYPE_NUMBER_FLAG_DECIMAL` installs a `DigitsKeyListener` built with a NULL
-locale — accepted characters `0123456789.` whatever the phone is set to — as an
-`InputFilter` on the field. A typed comma was deleted as it was typed, so `8,5`
-reached `parseAmount` as `85` and a day was recorded ten times too large with a
-"Recorded" toast. `ui/Amount.kt`'s `AmountKeyListener` replaces it and accepts
-digits and BOTH separators, so `parseAmount` stays the one thing that decides;
-the locale-aware `DigitsKeyListener.getInstance(Locale, …)` was rejected because
-it only moves the deleted character. **Do not add an `inputType =` line back
-beside `keyListener =`** — `setInputType` installs a fresh `DigitsKeyListener`
-and puts the bug back. Two testing lessons rode with it: `setText` does not run
-a field's filters and `Editable.append` does, so a test that types with
-`setText` is not testing typing; and the shown toast cannot distinguish `8,5`
-from `85` here, because both parse and both toast `recorded_yes`. See
-`docs/decisions/amounts.md`.
+locale — accepted characters `0123456789.` whatever the phone is set to. A
+typed comma was deleted as it was typed, so `8,5` reached `parseAmount` as `85`
+and a day was recorded ten times too large with a "Recorded" toast.
+`AmountKeyListener` replaces it and accepts both separators. **Do not add an
+`inputType =` line back beside `keyListener =`** — `setInputType` installs a
+fresh `DigitsKeyListener` and puts the bug back.
 
-What that leaves open, plainly: an account that has explicitly CHOSEN `point`
-or `comma` is honoured in the browser and not here. **State that cost the way
-the second review round corrected it, not the flatter way it was first
-written.** The first version of this paragraph said a wrong guess at the
-convention "can only ever refuse a spelling loudly, never silently store a row
-out by a thousand", and concluded a mirror would buy only a better message.
-That is false for one input class, and it is the input class the issue is named
-for: `point` chosen on a comma-locale phone, typing `10,000` and meaning ten
-thousand. The web refuses it as ambiguous; `deviceAmountFormat()` says COMMA,
-so that is not a group here, and it is read as **ten** and stored. Silently.
-So a mirror would buy a correct ROW for that account, not merely a sentence.
+Two testing lessons rode with it: `setText` does not run a field's filters and
+`Editable.append` does, so a test that types with `setText` is not testing
+typing; and the shown toast cannot distinguish `8,5` from `85`, because both
+parse and both toast `recorded_yes`.
 
-What remains true, and is the actual reason the device tier was still the right
-call: under `auto` — the setting's own default and almost every account — the
-convention is resolved from the same device the typing happens on, so the
-reader and the typist agree by construction and the mismatch cannot arise at
-all. The exposure is explicit-choice accounts whose phone locale disagrees with
-what they chose, which is the half of #157 deliberately left open rather than a
-property the design lacks by accident. Anyone re-opening the mirror question
-should read this paragraph and `docs/decisions/amounts.md`'s `#157` section
-before re-deriving it.
+**What stays open, plainly: an account that has explicitly CHOSEN `point` or
+`comma` is honoured in the browser and not here** — and a mirror would buy a
+correct ROW rather than merely a better message, for one input class: `point`
+chosen on a comma-locale phone, typing `10,000` and meaning ten thousand. The
+web refuses it as ambiguous; `deviceAmountFormat()` says COMMA, so it is read
+as **ten** and stored, silently. The device tier was still the right call
+because under `auto` — the default, and almost every account — the reader and
+the typist resolve the same locale by construction. Anyone re-opening the
+mirror question should read `docs/decisions/amounts.md`'s `#157` section
+first; it has the correction this paragraph used to get wrong.
 
 **The habit ORDER and the reorder GATE used to arrive from two different
 requests, and there was a narrow window where they could disagree — fixed

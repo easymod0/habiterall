@@ -2100,3 +2100,114 @@ marks are read afterwards, because the value and the note travel through
 different fields of the host's model: mutating `noteText ?? undefined` to a bare
 `undefined` leaves the tick and drops the dot, and only the second assertion
 catches it.
+
+## `detailCards`: the object shape, and the legacy value it has to read (#163, #297)
+
+The stored shape is `{id, on}[]`, not a bare list of the ids that are on.
+Membership and order are two different decisions — hiding a card and moving it
+are not the same press — and a bare array of ids can only ever record one of
+them: normalising `['history','calendar']` down to canonical order to give the
+SERVER an opinion about ordering would throw the order away the moment anyone
+reordered anything. An object per id, always all of them, says which of the two
+questions each entry is answering, so an ELEVENTH card cannot later make "a
+bare id" ambiguous between "legacy, absent means hidden" and "new shape, absent
+means new and visible" — a marked string (`'!history'`) still faces exactly
+that question with a longer list of ids.
+
+`[]` is read as the LEGACY shape and means nothing visible; reading it as the
+new shape (nothing named, so nothing to hide) would invert unticking everything
+to everything shown, which is the one case `parseCardList`'s tests treat as the
+whole point of the change.
+
+### A legacy account is read tolerantly, and migrated only by a deliberate Done
+
+Nothing writes the new shape on its behalf: not a boot, not a `GET`, nothing
+scheduled. An account that saved `['history','calendar']` before this shipped
+keeps meaning exactly that for as long as it never opens the settings dialog.
+
+**But "exactly that" is not "and nothing added since is visible", and for one
+release it was** (#297). A bare id list cannot say why an id is missing, and
+there are two reasons: somebody unticked it, or it had not shipped yet. Reading
+both as *hidden* made every card added after an account's last save invisible
+to it — with no surface at all, because a hidden card and a card that does not
+exist look identical. `recentDays` shipped that way and nobody noticed; the
+notes card would have shipped that way too, and it is the card whose entire
+purpose is that a note could not be read back. A fix that stays unreachable for
+the accounts that once cared enough to configure the page is not a fix.
+
+So `LEGACY_ERA_CARDS` (`shared/src/validate.js`) freezes `DETAIL_CARDS` as #174
+left it — the ids a bare list could ever have named. An absent id of that era
+was unticked and stays off; an absent id outside it did not exist to tick and
+arrives **on**, which is the answer the object branch already gives the same
+question. Two reasons, told apart by the only evidence there is, instead of
+collapsed into the pessimistic one. `[]` is untouched and still means nothing
+visible: it is the one legacy value whose silence about a card is a statement
+rather than an accident, which is why the guard is `raw.length > 0` and not a
+bare default.
+
+**That list is frozen in time.** Appending a new card's id to it would claim a
+value written before the object shape could have named it, turning that card
+off for every legacy account and reintroducing exactly this bug.
+
+### Pressing Done rewrites it, even with nothing else changed
+
+That took a deliberate mechanism. `applyDraft` sends the keys whose draft
+differs from `load()`, and for `detailCards` those are two clones of the same
+NORMALISED array — `sanitise` ran the normaliser over the server's reply — so
+they never differ unless a tick or a position was touched. Without the extra
+pass the documented recovery was a no-op, which is the review finding this
+section exists because of.
+
+`storedShapeIsStale` (`ui/settings.js`) answers it from `ApplyMeta.stored`, the
+server's OWN reply, never from `load()`, since the cache is already normalised
+and would report staleness that is not there; an absent key answers false, or
+every fresh account would write its defaults on its first Done. It is generic
+over `def.normalise` rather than a `detailCards` special case, because the
+second normaliser should not have to find this.
+
+### A legacy list carries no order to honour
+
+It is read in `DETAIL_CARDS` order rather than the order it happens to list ids
+in. Master's own `parseCardList` was `DETAIL_CARDS.filter((id) =>
+raw.includes(id))`, so every legacy value that can be in storage is already a
+canonical-order subset — there is no ordering decision recorded in it to lose.
+Reading `['history', 'calendar']` as "history then calendar" read information
+into a value that never carried any: re-tick `strength` on such an account and
+the page would silently rearrange from what master drew (Habit strength,
+Calendar, History) to Calendar, History, Habit strength. `parseCardList` and
+`normaliseDetailCards` both return all nine in `DETAIL_CARDS` order, `on` set
+by membership, for a legacy input — which is exactly the page master drew,
+unchanged by a later re-tick.
+
+A card absent from a *new-shape* list is one that shipped after the account
+last saved the setting, and `parseCardList` reads that absence as "on,
+canonical position" rather than "off": inserted immediately after the nearest
+`DETAIL_CARDS` predecessor still present in the list. That is what lets a tenth
+card show up for an account that has an opinion about the other nine, with no
+migration and no write anyone had to schedule.
+
+Two things it deliberately does not do: it does not hide the four stat tiles,
+so unticking everything leaves a page rather than a blank one; and it does not
+reach `/habits/:id/stats`, because only three of the nine cards map to a field
+nothing else reads, and a `?cards=` parameter would be one service-worker
+data-cache entry per combination.
+
+### One table says both what to build and what to forget
+
+`CARDS` in `ui/detail.js` is one `Map` keyed by id — `build` and an optional
+`forget` — replacing what used to be two separate lists of the same nine ids
+answering two different questions: the nine `if (shows(id))` gates in source
+order, and `forgetHiddenPositions`'s own table of which ids own a paging
+position. Merging them is the point, not a side effect: two tables naming one
+set of ids is exactly the "two rules for one question" shape this project's
+other traps warn about, and only `ui/detail.js` knows the position mapping in
+the first place — the view keeps a position in **two** places,
+`state.chartOffsets` (keyed per card by `windowedChart`, two of whose four keys
+are built from the CURRENT granularity, session override included) and
+`state.calEnd`, and `forget` is that same knowledge attached to the id it
+belongs to instead of restated beside it.
+
+Both wrong versions shipped in one review round before this: clearing only
+`chartOffsets` left the calendar at its old date, and clearing both from
+`applyDraft` gated on "`detailCards` changed at all" sent a still-ticked
+History card back to today.

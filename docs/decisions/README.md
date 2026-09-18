@@ -35,6 +35,7 @@ are already answered here, usually because they were the first thing tried.
 | `site.md` | habiterall.ca: why the wiki is generated from the README, the link check, the changelog source |
 | `categories.md` | one category per habit, `ON DELETE SET NULL`, uncategorised as a state, the case-fold divergence |
 | `caching.md` | the `/overview` memo and every bound in it, the shared eviction policy, the pool timeouts, `users.data_version` and the pool cliff, and the `Vary` that cost the offline dashboard |
+| `cloud-backups.md` | #75/#194: why the nightly dump is instance-level, the measured role/flag table behind `--enable-row-security`, the per-run `.tmp` suffix and its age gate, and why there is no status table |
 | `materialized-figures.md` | #196: the materialised `habit_summary` table proposed and closed unbuilt once #184's two-column probe closed the gap, the three hard cases any such cache has to answer, and what was explicitly refused alongside it (SQL stats, bitmap storage, `worker_threads`) |
 | `phantom-dates.md` | #270: why a date that is not a real day cannot anchor a window, the six sites it was closed at, why `2026-02-30` moving too is correct rather than collateral, and why Site F has a behavioural test only in personal |
 | `runtime.md` | #199: why the backend is Node, the four-language measurement and the caveat that undoes it, the three-consumer cost of a rewrite, and what would change the answer |
