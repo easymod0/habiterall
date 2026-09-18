@@ -895,6 +895,30 @@ read at the range's far end where nothing is truncated. The read of
 `stats.test.js`'s counting-getter guard measures pass invocations through that
 property and a third unconditional read would stop it meaning what it says.
 
+**A `.check` cell SAYS its state, because the glyph alone lies — and the
+`aria-label` goes on the BOX, never on the button.** A button with no label of
+its own is named from its contents, so before this the dashboard announced
+`"✓ S"` for an in-run day nobody had logged: the app stating a habit was done
+on a day it was not, with `questionMarks` on or off. The faint tick and a solid
+one are one character. `paintCheckbox` therefore labels the `.check-box` in the
+SAME branch that decides the glyph — `says()`, and `ghostTick` takes the state
+as an argument — which is what keeps a glyph from disagreeing with its own
+description; a `describeDay()` mirroring the branch order would be two
+functions over one set of inputs, which is the drift this project keeps paying
+for. Labelling the box rather than the button is what preserves the weekday
+letter in `.check-day` as part of the computed name, and it is also the only
+option available: `dayCells` paints the box BEFORE `btn.append(box, day)`, so
+the button is not reachable from there. The vocabulary is Android's
+`describe()` (`ui/DayGrid.kt`) rather than a second one — "counted as kept, no
+entry", "no entry", "done", "not done", "clean", "slipped, N unit", "N of M
+unit" — plus the two in-run states, which Android will need when #247's other
+half lands. `gridcheck.mjs` reads the COMPUTED name over CDP
+(`Accessibility.getPartialAXTree`, the same shape `categorycheck.mjs` uses) and
+not the attribute, and asserts the name is PROSE rather than the raw glyph:
+with the label dropped the name falls back to `"✓ T"`, which still differs from
+a logged cell's name and still contains no "done", so neither of those two
+checks catches it and a third one has to.
+
 **The run set is exactly as stale as the rest of the row it draws.** It is the
 one `/overview` last answered with, so an offline tap that turns a day into a
 stored 0 keeps drawing that cell's in-run tick until the next load corrects

@@ -20,6 +20,27 @@ try{
   const ev=async e=>{const r=await send('Runtime.evaluate',{expression:e,awaitPromise:true,returnByValue:true},sessionId);
     if(r.exceptionDetails)throw new Error(r.exceptionDetails.exception?.description);return r.result.value;};
   await send('Page.enable',{},sessionId); await send('Network.enable',{},sessionId);
+  // For the accessible-name block at the end of this file. `Accessibility` needs
+  // `DOM` on first, per CDP's own docs on `Accessibility.enable` — the same pair
+  // and the same reason as `categorycheck.mjs`'s `axInfo`.
+  await send('DOM.enable',{},sessionId); await send('Accessibility.enable',{},sessionId);
+
+  /**
+   * The COMPUTED accessible name of one element, from the browser's own
+   * accessibility tree — never the `aria-label` attribute, which cannot show
+   * whether a real assistive technology is handed it. That distinction is the
+   * whole point here: `paintCheckbox` labels the `.check-box` SPAN, and what is
+   * being asserted is that the label reaches the BUTTON's name through
+   * name-from-contents, together with the weekday letter beside it.
+   */
+  const axName = async (selector) => {
+    const { root } = await send('DOM.getDocument', { depth: -1, pierce: true }, sessionId);
+    const { nodeId } = await send('DOM.querySelector', { nodeId: root.nodeId, selector }, sessionId);
+    if (!nodeId) return null;
+    const { nodes } = await send('Accessibility.getPartialAXTree',
+      { nodeId, fetchRelatives: false }, sessionId);
+    return nodes[0]?.name?.value ?? '';
+  };
 
   for (const [label,w,h] of [['desktop',1440,900],['phone',390,844]]) {
     await send('Emulation.setDeviceMetricsOverride',{width:w,height:h,deviceScaleFactor:1,mobile:w<500},sessionId);
@@ -1071,6 +1092,55 @@ try{
       await ev(`fetch('/api/settings', { method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ questionMarks: false }) })`);
+
+      /* ---- what a SCREEN READER is handed for the same three cells ----
+       *
+       * The faint tick and a solid one are the same glyph, so before this a
+       * `.check` button was named from its contents and announced "✓ S" for a
+       * day nobody logged — the app stating a habit was done on a day it was
+       * not. `paintCheckbox` labels the `.check-box`, which reaches the
+       * button's name through name-from-contents; these read the COMPUTED name
+       * over CDP rather than the attribute, because the attribute cannot show
+       * that the label survived the name computation at all.
+       */
+      await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+        reload: () => send('Page.navigate',{url:APP},sessionId),
+        what: 'the dashboard, for the accessible-name probe',
+      });
+      await sleep(600);
+
+      const sel = (date) => `.check[data-focus-key="check:${gym.id}:${date}"]`;
+      const ghostName = await axName(sel(unloggedInRun));
+      ck('an in-run day nobody logged does NOT announce as done',
+         !!ghostName && !/\bdone\b/.test(ghostName), JSON.stringify(ghostName));
+      ck('...it announces that it is in a run AND that there is no entry',
+         /in a run/.test(ghostName ?? '') && /no entry/.test(ghostName ?? ''),
+         JSON.stringify(ghostName));
+      // **The assertion that pins the ORIGINAL defect, and the reason it is
+      // written separately.** With the label dropped the name falls back to
+      // name-from-contents and reads `"✓ T"` — measured. That still satisfies
+      // "does not announce as done" and still differs from the logged cell's
+      // name, so neither of those two catches it; what is wrong is that the
+      // name is the raw GLYPH, which is the same character a done day draws.
+      ck('...and the name is prose rather than the raw glyph a done day also draws',
+         !(ghostName ?? '').includes('✓'), JSON.stringify(ghostName));
+
+      if (loggedDay) {
+        const doneName = await axName(sel(loggedDay));
+        ck('a logged day in the same row announces as done',
+           /\bdone\b/.test(doneName ?? ''), JSON.stringify(doneName));
+        ck('...so the two cells are told apart by NAME, not only by opacity',
+           doneName !== ghostName, `done=${JSON.stringify(doneName)} ghost=${JSON.stringify(ghostName)}`);
+      }
+
+      // The label went on the BOX, not on the button — so the weekday letter
+      // in `.check-day` is still part of the name. Labelling the button would
+      // have replaced its contents and silently dropped which day it is.
+      const letter = await ev(`document.querySelector(
+        ${JSON.stringify(sel(unloggedInRun))} + ' .check-day')?.textContent?.trim() ?? ''`);
+      ck('...and the weekday letter survives in the name, so the label sits on the box',
+         !!letter && (ghostName ?? '').includes(letter),
+         `letter=${JSON.stringify(letter)} name=${JSON.stringify(ghostName)}`);
     }
   }
 
