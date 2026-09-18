@@ -139,6 +139,97 @@ the recommended setup, missing the one credential a user cannot supply
 themselves, silent forever, and the settings dialog's test button says nothing
 either because it only reports on channels that are ready.
 
+## Per-weekday reminders: the gate, its clock, and where it sits (#72)
+
+A habit reminds on the weekdays its `reminder_days` mask names. The mask is a
+7-bit integer in which **bit N is JavaScript's own `getDay()` N** — bit 0 Sunday
+through bit 6 Saturday — defaulting to `127`, every day, which is what every
+habit written before the column existed was already doing. The rule itself is one
+declaration (`remindsOn` / `parseReminderDays` / `weekdayOf` in
+`shared/public/ui/time.js`), imported by `shared/src/notify.js`,
+`shared/src/validate.js`, `shared/src/import.js` and `shared/public/ui/nudge.js`
+alike, with Kotlin's `ReminderTime` as the only mirror. The Loop side of it —
+why the stored spelling is ours rather than Loop's Saturday-based one — is in
+`docs/decisions/import-and-loop.md`, and that is where the verification lives.
+
+**The gate reads `clock.date`, and asking any other clock is the defect.**
+`dueReminders` already resolves an account's own calendar day through
+`resolveTimeZone` before it decides anything, so `clock.date` IS the account's
+today; the weekday comes off that string, by arithmetic, with no zone re-entering
+the calculation (`weekdayOf` builds the date in UTC for that reason, and sets all
+three fields at once so a year under 100 is not silently read as 19xx). The
+alternative that looks identical from a desk in the same zone as the container is
+`new Date().getDay()`, and it is wrong the same way the pre-#157 `TZ` fallback
+was wrong: for an account far enough east or west the server's weekday and the
+user's are different days for several hours every single day. A Monday-only
+reminder would fire on Sunday evening in Auckland and be silent on Monday
+morning, weekly, with a perfectly correct-looking `07:00` beside it in the
+dialog. This is the same distinction `zonedClock` exists for — the zone decides
+which DAY it is, not only what o'clock — and the test that protects it is a
+`notify.test.js` case built at an instant that is still Sunday in UTC and already
+Monday in `Pacific/Auckland`. A weekday test run only in the runner's own zone is
+the test-that-cannot-fail shape here.
+
+**Its position in the gate order is an argument, not an accident.** The gate is
+asked beside `no_reminder_time` — ahead of `done_today`, `already_sent` and
+`too_late`. `notify.too_late` is a WARN whose whole meaning is *a reminder was
+LOST*, and the catch-up window closes half an hour after the minute, so any habit
+whose masked-out day is more than 30 minutes old is also past it. Put the weekday
+gate below the lateness check and every weekend, every weekdays-only habit
+reports itself as a lost reminder, once per habit per channel per day — which is
+the same failure the ordering of `done_today` / `already_sent` already exists to
+prevent, and is worse than not warning at all, because a genuine loss then
+arrives in a crowd. A day the habit does not remind on is not a lost reminder; it
+is a day with nothing to send. Its own reason, `not_this_weekday`, logs at debug
+like its neighbours and carries the normalised mask it judged on, for the reason
+`skip` reports the zone the clock USED rather than the one that was asked for.
+
+**`0` is a legal mask and nothing may repair it.** It means the habit reminds on
+no day, and the scheduler then simply never matches — no special case anywhere.
+Loop's own `EditHabitActivity` snaps an emptied picker back to every day, and
+that remains available to a PICKER; it must not migrate into `parseReminderDays`,
+because a validator that turns 0 into 127 is precisely the defect #78 refused to
+ship (a Loop mask of zero becoming a daily reminder). The web picker keeps the
+two apart by saying plainly, under the boxes, that nothing will be sent.
+
+**Both notifiers reach the column through `SELECT *`, and that is load bearing.**
+`habiterall-personal/src/notifier.js` and `habiterall-cloud/src/notifier.js` both
+select the whole `habits` row. Narrow either one to an explicit column list —
+which is a normal thing to do when tuning a query plan, and the cloud suite has a
+plans test that invites it — and `reminder_days` is simply absent from the object
+handed to `dueReminders`. `parseReminderDays` then answers its default, so the
+gate opens for every day of the week, for that edition only, with every test
+green and nothing in a log. It is the two-editions-disagree shape, arriving
+through a change that has nothing to do with reminders.
+
+**The browser's own channel carries the same gate.** `outstanding` in
+`shared/public/ui/nudge.js` asks `remindsOn(habit.reminder_days, date)` in the
+same position — after the time is read, before lateness — against the `date` the
+caller handed in, which is this device's own `todayISO()` and the same day the
+grid draws its last column from. Taking a fresh clock there is the defect
+`minutesNow` already warns about: a nudge judged against a different day than the
+row it is about. Adding the import cost `nudge.js` its "dependency-free"
+description; the property that actually mattered was always *loadable under Node
+by `shared/test/nudge.test.js`*, and a relative specifier to a sibling with no
+imports of its own keeps it, exactly as `ui/calendar.js` already reaches
+`./dates.js`.
+
+**The phone gates twice, on purpose, and one of those is what makes it work
+offline.** `Reminders.schedule` arms through `nextAllowedOccurrence`, which
+layers a weekday filter over `nextOccurrence` rather than replacing it —
+`nextOccurrence` is a wall-clock promise with DST guarantees pinned by their own
+tests, so each candidate day is still its answer — bounded to seven candidates,
+because seven consecutive days name every weekday and a mask of `0` must arm
+nothing rather than search forever. `needsReminder` then asks again when the
+alarm fires, for the same reason `stillAboutToday` beside it does: an inexact
+alarm on API 31–32 armed for an allowed 23:52 can be delivered at 00:03 on a day
+the mask does not name. `ReminderReceiver`'s offline branch reached neither until
+#72 — it answered a bare `true` when there was no API to ask, which is the right
+instinct (a redundant reminder beats a missed one) applied one level too high. It
+now errs toward notifying *through* `needsReminder` with an empty entry list, so
+the only thing left for it to refuse on is the weekday, which is exactly the
+question a phone with no network can still answer for itself.
+
 **A tick used to cost the SUM of its accounts, and the two channels do not want
 the same fix.** `collect` and delivery both went one item at a time, so an
 instance with 400 accounts paid for 400 sequential round trips even though

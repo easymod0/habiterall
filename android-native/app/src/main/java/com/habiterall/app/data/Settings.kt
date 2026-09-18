@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.habiterall.app.notify.ReminderTime
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -31,8 +32,7 @@ class Settings(private val context: Context) {
     private val serverUrlKey = stringPreferencesKey("server_url")
 
     /**
-     * Cached reminder schedule, as `id|HH:MM|name|type|target|unit|prompt`
-     * lines.
+     * Cached reminder schedule, one [reminderCacheLine] per habit.
      *
      * A flat string rather than a JSON blob or a database: it is written on
      * every successful sync and read on a cold boot with no network, so the
@@ -102,31 +102,7 @@ class Settings(private val context: Context) {
     suspend fun cacheReminders(habits: List<Habit>) {
         val line = habits
             .filter { !it.archived && it.reminderTime.isNotBlank() }
-            .joinToString("\n") {
-                // Fields the notification needs, with separators stripped from
-                // free text so a habit named "a|b" cannot corrupt the record.
-                listOf(
-                    it.id.toString(),
-                    it.reminderTime,
-                    // `Widgets.flatten`, because a bare `\r` splits a line as
-                    // surely as a `\n` does and this cache is read with
-                    // `lineSequence` too: a habit named "Run\rfast" wrote one
-                    // record and read back as two unparseable halves, taking
-                    // its alarm with it. One reader's bug, two caches.
-                    Widgets.flatten(it.name),
-                    it.type,
-                    it.targetValue.toString(),
-                    Widgets.flatten(it.unit),
-                    Widgets.flatten(it.reminderMessage),
-                    // Appended, never inserted: the reader below indexes by
-                    // position and tolerates a SHORT line, so a cache written
-                    // before this field existed still arms its alarms. Putting
-                    // it anywhere but the end would silently re-read every
-                    // other field one place over.
-                    it.showAs,
-                    it.targetType,
-                ).joinToString("|")
-            }
+            .joinToString("\n") { reminderCacheLine(it) }
         context.dataStore.edit { it[reminderCacheKey] = line }
     }
 
@@ -222,29 +198,83 @@ class Settings(private val context: Context) {
      */
     suspend fun cachedReminders(): List<Habit> {
         val raw = context.dataStore.data.first()[reminderCacheKey] ?: return emptyList()
-        return raw.lineSequence().mapNotNull { line ->
-            val f = line.split('|')
-            if (f.size < 6) return@mapNotNull null
-            val id = f[0].toLongOrNull() ?: return@mapNotNull null
-            Habit(
-                id = id,
-                name = f[2],
-                type = f[3],
-                targetValue = f[4].toDoubleOrNull() ?: 0.0,
-                unit = f[5],
-                reminderTime = f[1],
-                // getOrNull, not f[6]: a cache written before prompts existed
-                // has six fields, and losing every reminder on upgrade would be
-                // a far worse bug than a missing prompt for one sync.
-                reminderMessage = f.getOrNull(6) ?: "",
-                // The notification's own buttons depend on these — a habit
-                // shown as something to avoid is answered yes/no, not with a
-                // number pad — and the shade is built with no network, which is
-                // the whole reason this cache exists. Defaults match the
-                // server's, so an older cache posts what it always did.
-                showAs = f.getOrNull(7) ?: "amount",
-                targetType = f.getOrNull(8) ?: "at_least",
-            )
-        }.toList()
+        return raw.lineSequence().mapNotNull { reminderFromCacheLine(it) }.toList()
     }
+}
+
+/*
+ * The reminder cache's line format, apart from the DataStore that holds it.
+ *
+ * Pulled out of the two methods above so the rule can be asserted without a
+ * Context — the same shape `Widgets.encode`/`decodeAll` already has beside it,
+ * and for a sharper reason here: a round trip through `cacheReminders` and
+ * `cachedReminders` moves the writer and the reader TOGETHER, so it passes
+ * against a field inserted mid-line as happily as against one appended. The
+ * half that can fail is a SHORT line — one written by an older version of this
+ * app and read by this one after an upgrade — and reaching that means handing
+ * the decoder a line nothing here wrote. `RemindersTest` does.
+ */
+
+/**
+ * One habit as `id|HH:MM|name|type|target|unit|prompt|showAs|targetType|days`.
+ *
+ * Free text goes through `Widgets.flatten`, because a bare `\r` splits a line
+ * as surely as a `\n` does and this cache is read with `lineSequence` too: a
+ * habit named "Run\rfast" wrote one record and read back as two unparseable
+ * halves, taking its alarm with it. One reader's bug, two caches.
+ *
+ * **Every field after the sixth was APPENDED, never inserted**, and the next
+ * one must be too: [reminderFromCacheLine] indexes by position and tolerates a
+ * short line, which is what lets a cache written before a field existed still
+ * arm its alarms. Putting one anywhere but the end silently re-reads every
+ * field after it one place over — a habit's `showAs` read as its target type,
+ * on a phone that has just been upgraded and may have no network to correct
+ * itself with.
+ */
+internal fun reminderCacheLine(habit: Habit): String = listOf(
+    habit.id.toString(),
+    habit.reminderTime,
+    Widgets.flatten(habit.name),
+    habit.type,
+    habit.targetValue.toString(),
+    Widgets.flatten(habit.unit),
+    Widgets.flatten(habit.reminderMessage),
+    habit.showAs,
+    habit.targetType,
+    // Which weekdays that time fires on. Last, per the rule above, and it is
+    // this field that makes a rebooted phone with no network arm a
+    // weekdays-only reminder on weekdays rather than daily.
+    habit.reminderDays.toString(),
+).joinToString("|")
+
+/** One cached line back, or null when it is not one this app can use. */
+internal fun reminderFromCacheLine(line: String): Habit? {
+    val f = line.split('|')
+    if (f.size < 6) return null
+    val id = f[0].toLongOrNull() ?: return null
+    return Habit(
+        id = id,
+        name = f[2],
+        type = f[3],
+        targetValue = f[4].toDoubleOrNull() ?: 0.0,
+        unit = f[5],
+        reminderTime = f[1],
+        // getOrNull, not f[6]: a cache written before prompts existed has six
+        // fields, and losing every reminder on upgrade would be a far worse bug
+        // than a missing prompt for one sync.
+        reminderMessage = f.getOrNull(6) ?: "",
+        // The notification's own buttons depend on these — a habit shown as
+        // something to avoid is answered yes/no, not with a number pad — and
+        // the shade is built with no network, which is the whole reason this
+        // cache exists. Defaults match the server's, so an older cache posts
+        // what it always did.
+        showAs = f.getOrNull(7) ?: "amount",
+        targetType = f.getOrNull(8) ?: "at_least",
+        // An absent mask is every day, which is what `parseHabit` stores for a
+        // habit nobody has answered this about — so an upgraded phone keeps
+        // arming exactly the alarms it armed yesterday until the next sync
+        // narrows them. `ReminderTime.parseReminderDays` is the one place that
+        // default is decided.
+        reminderDays = ReminderTime.parseReminderDays(f.getOrNull(9)?.toIntOrNull()),
+    )
 }

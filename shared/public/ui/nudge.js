@@ -17,13 +17,17 @@
  * works offline because the answer is already in `state`, and the settings help
  * text says in one clause when it fires so that nobody plans a morning on it.
  *
- * **Dependency-free on purpose**, for the reason `ui/toggle.js` is: it is what
- * lets `test/nudge.test.js` run the rule AND the call site under Node, with no
- * browser and no module resolution — the absolute `/shared/...` specifiers the
- * rest of `public/ui` uses do not resolve there. Everything this needs from the
- * app arrives through `init()`: where the habits are and which days they can
- * speak for, which destinations are on, what day it is, and somewhere to say it
- * when the browser will not.
+ * **Loadable under Node on purpose**, for the reason `ui/toggle.js` is: it is
+ * what lets `test/nudge.test.js` run the rule AND the call site with no browser
+ * and no module resolution — the absolute `/shared/...` specifiers the rest of
+ * `public/ui` uses do not resolve there. That is the property, and it is what
+ * the one import below is measured against rather than a count of imports: a
+ * RELATIVE specifier for a sibling that has no imports of its own resolves
+ * under Node exactly as it does in the browser (`ui/calendar.js` and
+ * `ui/resample.js` already reach `./dates.js` this way). Everything else this
+ * needs from the app arrives through `init()`: where the habits are and which
+ * days they can speak for, which destinations are on, what day it is, and
+ * somewhere to say it when the browser will not.
  *
  * It is NOT DOM-free, and the distinction is worth keeping straight: it owns no
  * markup and reaches for no element, but `init` does register one listener on
@@ -33,12 +37,21 @@
  * anywhere.
  */
 
+// Which weekdays a habit's reminder fires on. Imported rather than mirrored —
+// unlike `YES` and `WEB_CHANNEL` below, which are declared here and pinned by a
+// test because their originals sit in `shared/src`, where the browser cannot
+// reach. `ui/time.js` is a sibling this module can simply have, so there is one
+// declaration for the browser, the server (`shared/src/notify.js` imports the
+// same file) and `parseHabit`, with the phone as the only mirror.
+import { remindsOn } from './time.js';
+
 /**
  * This destination's id, as `CHANNELS` in shared/src/notify.js spells it.
  *
- * Declared here rather than imported for the reason the whole module is
- * dependency-free, and pinned against the registry by `test/nudge.test.js` —
- * the same arrangement `ui/values.js` and `ui/toggle.js` already use.
+ * Declared here rather than imported because `CHANNELS` is in `shared/src`,
+ * which is not served to the browser — not because this module holds no imports
+ * at all — and pinned against the registry by `test/nudge.test.js`, the same
+ * arrangement `ui/values.js` and `ui/toggle.js` already use.
  */
 export const WEB_CHANNEL = 'web';
 
@@ -240,6 +253,13 @@ export function outstanding(habits, { date, minutes, loaded = null, already = []
 
     const at = minutesOfDay(habit.reminder_time);
     if (at === null) return false;              // '' — no reminder set
+    // Not a weekday this one fires on. Read against `date` — the day the caller
+    // handed in, which is this DEVICE's own (`todayISO`) — and never a fresh
+    // clock of this module's, for the reason `minutesNow` gives: the grid draws
+    // its last column from the same day, and a nudge judged against a different
+    // one disagrees with the row it is about. Same gate, same place in the
+    // order, as `dueReminders` (shared/src/notify.js).
+    if (!remindsOn(habit.reminder_days, date)) return false;
     if (minutes < at) return false;             // not yet, on this clock
 
     return !isDayAnswered(habit, entryOn(habit, date));

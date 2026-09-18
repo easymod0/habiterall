@@ -50,6 +50,12 @@ export const FIXTURE = [
     freq_denominator: 1,
     color: '#3b82f6',
     reminder_time: '07:30',
+    // Mon–Fri. NOT 127, which is the default AND a fixed point of the rotation
+    // into Loop's Saturday-based mask — at 127 this comparison would be a
+    // default against itself on one side and the identity function against a
+    // rotation on the other, and would pass with the field dropped from the
+    // export, from the import, or from both. 62 here is 124 in the file.
+    reminder_days: 62,
     reminder_message: 'Did you sit for ten minutes?',
     archived: false,
     icon: '🧘',
@@ -153,6 +159,11 @@ export const FIXTURE = [
     freq_denominator: 7,
     color: '#f59e0b',
     reminder_time: '18:00',
+    // Saturday alone — 1 in Loop's spelling, so the pair with Meditate's 62
+    // pins the rotation in both nibbles rather than at one bit. A second
+    // non-default also means no single wrong constant can satisfy the whole
+    // fixture, which 62 everywhere would let through.
+    reminder_days: 64,
     reminder_message: '',
     archived: false,
     // The second, different category — see Meditate's above.
@@ -264,8 +275,16 @@ export const LOOP_HABIT_FIELDS = [
  * `snapshot` rather than an entry here. Checkmarks.csv is a grid of values with
  * nowhere to hang one, which is why the CSV comparisons keep `notes: false`
  * and the .db comparisons no longer do.
+ *
+ * `reminder_days` is the third, and it travels with the time for the same
+ * reason: Loop's Habits *table* has the column and its Habits.csv has no
+ * reminder headers at all. So a CSV round trip correctly returns every habit's
+ * mask to the default 127 — the same asymmetry `icon` and `at_most_unlogged`
+ * have against both Loop formats — and only the .db lists watch it.
  */
-export const LOOP_DB_HABIT_FIELDS = [...LOOP_HABIT_FIELDS, 'reminder_time'];
+export const LOOP_DB_HABIT_FIELDS = [
+  ...LOOP_HABIT_FIELDS, 'reminder_time', 'reminder_days',
+];
 
 /**
  * ...and what only the CSV pair can carry: the colour, for the reason given

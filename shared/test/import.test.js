@@ -480,13 +480,16 @@ test('habit targets are NOT scaled, but entry values ARE', async () => {
   unlinkSync(path);
 });
 
-test('only an all-days Loop reminder comes across', async () => {
-  // reminder_days is a 7-bit weekday mask and habiterall has no concept of one.
-  // Importing the time alone turned a Monday-only reminder into seven
-  // notifications a week — and re-exporting wrote that widening back into the
-  // user's own Loop app. Missing is the honest answer until habiterall grows
-  // the concept; `days = 0` is the sharp case, a reminder that fires on no day
-  // becoming a daily one.
+test('a Loop weekday mask is rotated out of its Saturday-based spelling', async () => {
+  // Loop's bit 0 is SATURDAY (NotificationTray.shouldShowReminderToday indexes
+  // the array with `(daysSinceSunday + 1) % 7`; WeekdayPickerDialog labels the
+  // same array from SATURDAY). Ours is `getDay()`: bit 0 Sunday.
+  //
+  // Every number below is written as a LITERAL rather than built by calling
+  // the rotation, and none of the interesting ones is 127 or 0 — those two are
+  // fixed points, so a fixture made of them passes against the identity
+  // function and proves nothing at all. 124 is Loop's Mon–Fri and 62 is ours;
+  // Loop's 1 is Saturday alone, which is our 64.
   const path = join(tmpdir(), `loop-days-${process.pid}.db`);
   try { unlinkSync(path); } catch {}
 
@@ -501,21 +504,71 @@ test('only an all-days Loop reminder comes across', async () => {
   `);
   const ins = d.prepare(`INSERT INTO Habits VALUES (?,?,1,1,8,0,?)`);
   ins.run(1, 'EveryDay', 127);
-  ins.run(2, 'MondayOnly', 2);
-  ins.run(3, 'NoDaysAtAll', 0);
+  ins.run(2, 'Weekdays', 124);
+  ins.run(3, 'SaturdayOnly', 1);
+  ins.run(4, 'SundayOnly', 2);
+  ins.run(5, 'NoDaysAtAll', 0);
   d.close();
 
   const byName = Object.fromEntries(
     (await parseLoopDatabase(path)).map((h) => [h.name, h])
   );
-  assert.equal(byName['EveryDay'].reminder_time, '08:00', 'all seven bits: kept');
-  assert.equal(byName['MondayOnly'].reminder_time, '',
-    'a weekday-restricted reminder has no faithful form here');
-  assert.equal(byName['NoDaysAtAll'].reminder_time, '',
-    'a reminder that fires on no day must not become a daily one');
+
+  // The time comes across whatever the mask says now. It used to be dropped
+  // for anything but an all-days one, because there was nowhere to put the
+  // weekdays and taking the time alone widened a Monday-only reminder into
+  // seven a week — including back into the user's own Loop app on re-export.
+  for (const name of ['EveryDay', 'Weekdays', 'SaturdayOnly', 'SundayOnly', 'NoDaysAtAll']) {
+    assert.equal(byName[name].reminder_time, '08:00', `${name}: the time survives`);
+  }
+
+  assert.equal(byName['Weekdays'].reminder_days, 62, 'Loop 124 (Mon–Fri) is 62 here');
+  assert.equal(byName['SaturdayOnly'].reminder_days, 64, 'Loop 1 is Saturday, our bit 6');
+  assert.equal(byName['SundayOnly'].reminder_days, 1, 'Loop 2 is Sunday, our bit 0');
+  assert.equal(byName['EveryDay'].reminder_days, 127, 'every day is a fixed point');
+  // A reminder that fires on no day stays one. Normalising this to 127 is the
+  // defect #78 refused to ship — a mask of 0 becoming a daily reminder.
+  assert.equal(byName['NoDaysAtAll'].reminder_days, 0, 'no day is a fixed point too');
 
   unlinkSync(path);
 });
+
+test('a Loop habit with no reminder carries the default mask, not zero', async () => {
+  // Loop writes `reminder_days = 0` for a habit with no reminder — it is "no
+  // reminder", not "no day" — so importing that 0 as a mask would hand the
+  // habit a silent reminder the moment its owner sets a time. The default is
+  // the one value that changes nothing, and exporting it writes 0 back, so the
+  // cycle is stable.
+  const path = join(tmpdir(), `loop-nodays-${process.pid}.db`);
+  try { unlinkSync(path); } catch {}
+
+  const { DatabaseSync } = await import('node:sqlite');
+  const d = new DatabaseSync(path);
+  d.exec(`
+    CREATE TABLE Habits (id INTEGER PRIMARY KEY, name TEXT, freq_num INTEGER,
+      freq_den INTEGER, reminder_hour INTEGER, reminder_min INTEGER,
+      reminder_days INTEGER);
+    CREATE TABLE Repetitions (id INTEGER PRIMARY KEY, habit INTEGER,
+      timestamp INTEGER, value INTEGER);
+  `);
+  const ins = d.prepare(`INSERT INTO Habits VALUES (?,?,1,1,?,?,?)`);
+  ins.run(1, 'NoReminder', null, null, 0);
+  // A half-filled pair is no reminder either (`loopReminderToTime`), and it
+  // must reach the same answer rather than keeping the mask beside it.
+  ins.run(2, 'HalfFilled', 8, null, 124);
+  d.close();
+
+  const byName = Object.fromEntries(
+    (await parseLoopDatabase(path)).map((h) => [h.name, h])
+  );
+  assert.equal(byName['NoReminder'].reminder_time, '');
+  assert.equal(byName['NoReminder'].reminder_days, 127);
+  assert.equal(byName['HalfFilled'].reminder_time, '');
+  assert.equal(byName['HalfFilled'].reminder_days, 127);
+
+  unlinkSync(path);
+});
+
 
 test('a reminder column holding text is not coerced into a time', async () => {
   // `Number('')` is 0, so a bare `Number.isInteger(Number(x))` guard read an
@@ -1843,6 +1896,22 @@ test('an imported habit is clamped to the limits the API enforces', () => {
   assert.equal(clean.description.length, LIMITS.description);
   assert.equal(clean.unit.length, LIMITS.unit);
   assert.equal(clean.reminder_message.length, LIMITS.reminderMessage);
+});
+
+test('Loop\'s own Habits.csv has no reminder columns, so the mask is the default', () => {
+  // `parseLoopHabitsCSV` never produces a `reminder_days` key — Loop's CSV
+  // export carries no reminder columns at all — which is why the field joins
+  // LOOP_DB_HABIT_FIELDS and neither of the CSV lists. A CSV round trip has to
+  // return the mask to 127, not to 0 and not to whatever a caller left on the
+  // object, and 0 is the answer a `Number(...) || `-shaped normaliser gives.
+  const fromCsv = parseLoopHabitsCSV(
+    'Position,Name,Question,Description,FrequencyNumerator,FrequencyDenominator,Color\n' +
+    '001,Meditate,Did you sit?,Morning,1,1,11\n'
+  ).get('Meditate');
+  assert.ok(fromCsv, 'the fixture row parses');
+  assert.equal(Object.hasOwn(fromCsv, 'reminder_days'), false,
+    'the CSV parser must not invent a mask');
+  assert.equal(normaliseImportedHabit(fromCsv).reminder_days, 127);
 });
 
 test('no Loop format has anywhere to put an icon, so one always parses to \'\'', () => {

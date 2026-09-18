@@ -65,6 +65,9 @@ const HABIT_TYPES = {
   freq_denominator: 'number',
   color: 'string',
   reminder_time: 'string',
+  // A 7-bit weekday mask, bit N = getDay() N. A NUMBER on the wire, not a
+  // string: Kotlin's `Habit` declares an `Int` and kotlinx refuses "127".
+  reminder_days: 'number',
   // The three that were in Kotlin's `Habit` and not here. Every one of them
   // has a Kotlin default, so kotlinx substitutes it in silence when the server
   // omits the field — the "a field at its default everywhere compares equal to
@@ -110,6 +113,44 @@ checkShape('PUT /habits/:id', updated);
 ck('an archived habit reports archived: true',
   updated.archived === true, JSON.stringify(updated.archived));
 
+/**
+ * `reminder_days` all the way to storage and back, on both writes.
+ *
+ * `checkShape` above only asks the TYPE, and the column's default is 127 — so
+ * with the field dropped from either statement the response still carries a
+ * number and every shape check stays green. 62 is Mon-Fri: a non-default,
+ * non-symmetric value, which is the only kind that can tell a write that
+ * carried the field from one that fell back to the default. 0 goes with it
+ * because it is the value a "repair the mask" bug would turn into 127.
+ */
+const daysCreated = await (await fetch(`${base}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'Weekday reminder', type: 'boolean', reminder_days: 62 }),
+})).json();
+ck('POST /habits stores the weekday mask it was sent',
+  daysCreated.reminder_days === 62, JSON.stringify(daysCreated.reminder_days));
+
+const daysRead = await (await fetch(`${base}/api/habits/${daysCreated.id}`)).json();
+ck('GET /habits/:id reads it back', daysRead.reminder_days === 62,
+  JSON.stringify(daysRead.reminder_days));
+
+const daysUpdated = await (await fetch(`${base}/api/habits/${daysCreated.id}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'Weekday reminder', type: 'boolean', reminder_days: 0 }),
+})).json();
+ck('PUT /habits/:id stores a mask of 0 rather than repairing it to 127',
+  daysUpdated.reminder_days === 0, JSON.stringify(daysUpdated.reminder_days));
+
+const daysReplaced = await (await fetch(`${base}/api/habits/${daysCreated.id}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ name: 'Weekday reminder', type: 'boolean' }),
+})).json();
+ck('PUT /habits/:id REPLACES, so an omitted mask is back to every day',
+  daysReplaced.reminder_days === 127, JSON.stringify(daysReplaced.reminder_days));
+
 // Assert the habit is there rather than guarding on it: a route that regressed
 // to zero habits would DELETE the check below rather than fail it.
 const overview = await (await fetch(`${base}/api/overview?days=7&archived=true`)).json();
@@ -134,8 +175,8 @@ if (exported.habits.length) checkShape('GET /export', exported.habits[0]);
 const PORTABLE_HABIT_KEYS = [
   'archived', 'at_most_unlogged', 'category', 'category_id', 'color', 'created_at',
   'description', 'entries', 'freq_denominator', 'freq_numerator', 'icon', 'id', 'name',
-  'position', 'reminder_message', 'reminder_time', 'show_as', 'target_type',
-  'target_value', 'type', 'unit',
+  'position', 'reminder_days', 'reminder_message', 'reminder_time', 'show_as',
+  'target_type', 'target_value', 'type', 'unit',
 ];
 ck('THE assertion: GET /export describes a habit with EXACTLY these keys, ' +
   'not one more — the tripwire for best_streak/total_completed/summary_asof',

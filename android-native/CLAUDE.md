@@ -12,6 +12,29 @@ default. Each runs where there may be no network. Everything else is
 server-authoritative — the phone submits and renders whatever comes back,
 including the error.
 
+**`reminder_days` (#72) is still five, and saying otherwise would be the easier
+and less true version.** It is a new rule INSIDE two of the existing mirrors
+rather than a sixth beside them: `ReminderTime` gains `ALL_DAYS`,
+`parseReminderDays`, `weekdayOf` and `remindsOn` against the same
+`shared/public/ui/time.js` it already mirrors, and `needsReminder` gains one
+line asking them. It also puts a new FIELD on the offline reminder cache
+(`Settings.kt`), which is a cache and not a mirror — `HabitFilter` and the
+widget's figures have both been argued through that distinction already. What
+genuinely earns the offline copy is `Reminders.nextAllowedOccurrence`: arming
+tomorrow's alarm happens on a phone that may be in a tunnel, and a client that
+had to ask the server which day to arm for would not have reminders at all.
+That is the same test `needsReminder` passed.
+
+**`describeReminderDays` is deliberately NOT mirrored.** It is the sixth
+function in `time.js` and it stayed behind because no surface here names a
+weekday: this client carries no weekday picker, and the reminder mask reaches
+`Api.kt` as carry-through only (`Habit` → `toInput()` → `HabitInput`, and
+`Draft` → `toInput()` on the form screen — two write bridges, both of which
+would silently widen a browser-set mask back to every day by omitting it, which
+is the `icon` and `at_most_unlogged` defect twice). A mirror with no caller is
+a second thing to keep in step for nothing; if a weekday control is ever added
+here, that is when the localised names become this client's problem too.
+
 ## The grid
 
 **It runs whichever way `dayOrder` says, and only one direction is free.** With
@@ -214,6 +237,35 @@ records nothing. Two rules in it:
   asking `LocalDate.now()` silently changed the subject while the 16th went
   unanswered. Yes / No / Skip on that same stale notification write to the date
   it names; refusing costs nothing.
+
+**`nextAllowedOccurrence` LAYERS on `nextOccurrence`; do not fold it in.** The
+weekday mask is applied by asking `nextOccurrence` for each candidate day and
+taking the first one the mask names, with the instant it just returned as the
+cursor for the next — because `nextOccurrence` is the wall-clock promise above,
+with two DST guarantees written into its comments and pinned by their own tests,
+and the only way to keep them is to keep asking it. The search is bounded to
+**seven** candidates, which is both sufficient and necessary: seven consecutive
+days name every weekday, so any non-zero mask is hit inside it, and a mask of
+`0` is legal and must arm NOTHING rather than loop — it answers null and
+`schedule` cancels through the same branch an archived habit takes. The weekday
+is read off the local date the alarm would FIRE on, never off `now`, or a 00:30
+reminder is judged against the day before it goes off.
+
+**The offline branch of `ReminderReceiver` used to skip every gate it had.**
+With no API to ask it answered a bare `true` — the right instinct (a redundant
+reminder beats a missed one) applied one level too high, so the weekday mask
+could not reach it at all. It errs toward notifying *through* `needsReminder`
+with an empty entry list now, which leaves the weekday as the only thing left to
+refuse on. That is exactly the question a phone with no network can answer for
+itself, and it is why the mask is field **9** of the pipe-delimited reminder
+cache — **appended, never inserted**, like every field after the sixth, because
+the reader indexes by position and tolerates a short line so an upgraded phone
+keeps arming yesterday's alarms until the next sync. `reminderCacheLine` /
+`reminderFromCacheLine` are `internal` and free of a `Context` for one reason: a
+round trip through `cacheReminders` and `cachedReminders` moves writer and
+reader together, so it passes against a field inserted mid-line as happily as
+against one appended. The half that can fail is a SHORT line, and reaching it
+means handing the decoder a line nothing in this version wrote.
 
 **The manifest declares BOTH exact-alarm permissions, and that reverses a
 decision this file used to state the other way.** `USE_EXACT_ALARM` uncapped

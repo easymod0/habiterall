@@ -7,6 +7,7 @@ import android.content.Intent
 import com.habiterall.app.data.Habit
 import com.habiterall.app.notify.Notifications
 import com.habiterall.app.notify.ReminderReceiver
+import com.habiterall.app.notify.ReminderTime
 import com.habiterall.app.notify.Reminders
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -169,6 +170,74 @@ class ReminderWiringTest {
         assertEquals(2, alarms().size)
         assertTrue(Reminders.alarmUri(43, snoozed = false) in uris())
         assertTrue(Reminders.alarmUri(43, snoozed = true) in uris())
+    }
+
+    /* ---------- the weekday mask reaches AlarmManager, not just the walk ---------- */
+
+    /**
+     * `RemindersTest` pins [Reminders.nextAllowedOccurrence]; this pins that
+     * `schedule` is what calls it. The two are one line apart and that line is
+     * exactly where this package's bugs live — a correct pure function with a
+     * caller still asking the old one passes every assertion in the other file.
+     *
+     * The mask is built from the phone's OWN weekday rather than from a fixed
+     * date, because `schedule` reads `ZonedDateTime.now()` itself and takes no
+     * clock: whatever today is, the habit is told to remind three days from it
+     * and nothing else. A build that ignored the mask would arm today or
+     * tomorrow, and both fail.
+     */
+    @Test
+    fun `schedule arms on a weekday the mask names, not on the next day`() {
+        val now = ZonedDateTime.now()
+        val wanted = (ReminderTime.weekdayOf(now.toLocalDate().toString())!! + 3) % 7
+        val mask = 1 shl wanted
+
+        Reminders.schedule(app, habit().copy(reminderDays = mask), androidEnabled = true)
+
+        val firesOn = java.time.Instant.ofEpochMilli(alarms().single().triggerAtTime)
+            .atZone(now.zone).toLocalDate()
+        assertEquals(
+            "the alarm must land on the one weekday the mask names",
+            wanted,
+            ReminderTime.weekdayOf(firesOn.toString()),
+        )
+        assertTrue(
+            "a mask naming a day three off cannot be satisfied by today or tomorrow",
+            firesOn >= now.toLocalDate().plusDays(2),
+        )
+    }
+
+    @Test
+    fun `a mask of 0 arms no alarm at all, and drops one it already had`() {
+        // 0 is legal and means "no day". `schedule` runs on every fetch, so it
+        // is also the path by which a mask emptied in the browser has to take
+        // an armed alarm back off the phone.
+        Reminders.schedule(app, habit(), androidEnabled = true)
+        assertEquals(1, alarms().size)
+
+        Reminders.schedule(app, habit().copy(reminderDays = 0), androidEnabled = true)
+        assertEquals("a mask of 0 must arm nothing", 0, alarms().size)
+    }
+
+    @Test
+    fun `every day is still armed today or tomorrow`() {
+        // The control for the two above: the default mask must reach
+        // AlarmManager exactly as it always did, or this change moves every
+        // existing reminder rather than only the ones that asked. Asserted as
+        // the armed alarm's own wall clock and a two-day bound rather than
+        // against a second `nextOccurrence` call, which would disagree with
+        // the one inside `schedule` for the microsecond either side of 08:00.
+        val now = ZonedDateTime.now()
+        Reminders.schedule(app, habit(), androidEnabled = true)
+
+        val fires = java.time.Instant.ofEpochMilli(alarms().single().triggerAtTime)
+            .atZone(now.zone)
+        assertEquals(8, fires.hour)
+        assertEquals(0, fires.minute)
+        assertTrue(
+            "an unmasked reminder is today's or tomorrow's, never further out",
+            fires.toLocalDate() <= now.toLocalDate().plusDays(1),
+        )
     }
 
     /* ---------- soft, not loud: an inexact arm still arms, and says so ---------- */

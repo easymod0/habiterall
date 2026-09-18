@@ -131,19 +131,32 @@ class ReminderReceiver : BroadcastReceiver() {
             if (!Reminders.stillAboutToday(about, today)) {
                 return drop(habitId, "a snoozed reminder arrived after the day it was for")
             }
-            // Already answered today — a reminder would be noise. If the check
-            // itself fails we notify anyway: a redundant reminder is a far
+            // Already answered today, or not a weekday this habit reminds on —
+            // either way a notification would be noise. If the check itself
+            // fails we err toward notifying: a redundant reminder is a far
             // smaller harm than a missed one.
             //
             // `needsReminder`, not "a row exists for today": the two are not the
             // same question, and the difference silenced a day recorded as three
             // of eight glasses while the server went on asking about it.
-            val needed = if (api == null) true else try {
-                Reminders.needsReminder(habit, api.entries(habitId), today)
+            //
+            // Erring is done by asking it with NO entries rather than by
+            // answering `true` outright, and that is what puts the offline
+            // branch under the same weekday gate as the online one. With
+            // nothing known about today the only thing left for it to refuse on
+            // is `reminder_days` — which is exactly right, since a day the mask
+            // does not name is not a reminder worth erring toward, and a phone
+            // with no network is the case this whole path exists for.
+            val needed = try {
+                Reminders.needsReminder(
+                    habit,
+                    if (api == null) emptyList() else api.entries(habitId),
+                    today,
+                )
             } catch (e: Exception) {
-                true
+                Reminders.needsReminder(habit, emptyList(), today)
             }
-            if (!needed) return drop(habitId, "already answered today")
+            if (!needed) return drop(habitId, "already answered, or not a weekday it reminds on")
 
             Notifications.ensureChannel(applicationContext)
             Notifications.post(

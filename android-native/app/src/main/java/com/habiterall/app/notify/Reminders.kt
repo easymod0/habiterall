@@ -154,6 +154,42 @@ object Reminders {
         return next.toInstant().toEpochMilli()
     }
 
+    /**
+     * The next occurrence of [time] that falls on a weekday [days] names, or
+     * null when the mask names none at all.
+     *
+     * Layered ON TOP of [nextOccurrence] rather than folded into it, and that
+     * is deliberate: that function is a wall-clock promise with two DST
+     * guarantees written into its comments and pinned by four tests, and the
+     * only way to keep them here is to keep asking it. So each candidate day is
+     * its answer, and the cursor for the next candidate is the instant it just
+     * returned — which `nextOccurrence`'s own `!isAfter` branch rolls forward by
+     * one CALENDAR day, not by 24 hours.
+     *
+     * Bounded to seven candidates, which is both sufficient and necessary:
+     * seven consecutive days name every weekday, so any non-zero mask is hit
+     * inside it, and a mask of **0** must arm nothing rather than search
+     * forever. [schedule] cancels on the null.
+     *
+     * The weekday is read off the LOCAL DATE the alarm would fire on, in the
+     * zone the phone is in — not off `now` — or a reminder set for 00:30 would
+     * be judged against the day before it fires.
+     */
+    fun nextAllowedOccurrence(
+        time: LocalTime,
+        days: Int,
+        now: java.time.ZonedDateTime,
+    ): Long? {
+        var cursor = now
+        repeat(7) {
+            val at = nextOccurrence(time, cursor)
+            val firesOn = java.time.Instant.ofEpochMilli(at).atZone(now.zone)
+            if (ReminderTime.remindsOn(days, firesOn.toLocalDate().toString())) return at
+            cursor = firesOn
+        }
+        return null
+    }
+
     private fun parseTime(value: String): LocalTime? =
         runCatching { LocalTime.parse(value) }.getOrNull()
 
@@ -187,6 +223,16 @@ object Reminders {
      * imported history. For a measurable habit 3 is an amount.
      */
     fun needsReminder(habit: Habit, entries: List<Entry>, date: String): Boolean {
+        // Not a weekday this habit reminds on, so there is nothing to ask about
+        // however the day stands. [schedule] already declines to arm one, which
+        // makes this the second guard rather than the first — kept for the
+        // reason [stillAboutToday] beside it is: an inexact alarm on API 31-32
+        // armed for an allowed 23:52 can be delivered at 00:03 on a day the
+        // mask does not name. It is also the ONE place the rule sits for
+        // `NotifyWorker`'s offline branch, which errs toward notifying THROUGH
+        // this function rather than with a bare `true`.
+        if (!ReminderTime.remindsOn(habit.reminderDays, date)) return false
+
         val entry = entries.firstOrNull { it.date == date } ?: return true
         val skipped = entry.status == "skip" ||
             (!habit.isNumerical && entry.value == Sentinels.SKIP)
@@ -199,12 +245,24 @@ object Reminders {
         // The null check is stated again here rather than left to `wantsAlarm`
         // so `time` smart-casts below; the two cannot disagree.
         val time = parseTime(habit.reminderTime)
-        if (time == null || !wantsAlarm(habit, androidEnabled)) {
+        val at = if (time == null || !wantsAlarm(habit, androidEnabled)) {
+            null
+        } else {
+            // Through [nextAllowedOccurrence], never [nextOccurrence] directly:
+            // a habit reminding on weekdays only must skip the weekend rather
+            // than arm on it, and a mask of 0 answers null here and so cancels
+            // below with the same one branch an archived habit takes.
+            nextAllowedOccurrence(
+                time,
+                ReminderTime.parseReminderDays(habit.reminderDays),
+                java.time.ZonedDateTime.now(ZoneId.systemDefault()),
+            )
+        }
+        if (at == null) {
             cancel(context, habit.id)
             return
         }
 
-        val at = nextOccurrence(time, java.time.ZonedDateTime.now(ZoneId.systemDefault()))
         // Non-null: this call creates.
         setAlarm(context, at, pendingIntent(context, habit.id)!!)
     }

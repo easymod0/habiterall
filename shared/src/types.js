@@ -41,6 +41,11 @@
  * @property {number} freq_denominator m, in "n times per m days"
  * @property {string} color            #rrggbb
  * @property {string} [reminder_time]  local 'HH:MM', or '' for no reminder
+ * @property {number} [reminder_days]  which weekdays that time fires on: a
+ *   7-bit mask where bit N is `getDay()` N, so bit 0 is Sunday and bit 6 is
+ *   Saturday. 127 (every day) is the default and 0 (no day) is legal — NOT
+ *   Loop's own mask, which is Saturday-based. See `ALL_DAYS` in
+ *   shared/public/ui/time.js
  * @property {string} [reminder_message] what the reminder asks, e.g. 'Did you
  *   exercise today?'; '' falls back to a sentence built from the habit
  * @property {string} [at_most_unlogged] what a day with NO ROW is worth on an

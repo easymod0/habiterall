@@ -130,16 +130,17 @@ const q = {
   insertHabit: db.prepare(`
     INSERT INTO habits (name, description, type, unit, target_value, target_type,
                         freq_numerator, freq_denominator, color, reminder_time,
-                        reminder_message, at_most_unlogged, show_as, icon,
-                        category_id, position)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        reminder_days, reminder_message, at_most_unlogged,
+                        show_as, icon, category_id, position)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
   `),
   updateHabit: db.prepare(`
     UPDATE habits SET name = ?, description = ?, type = ?, unit = ?,
       target_value = ?, target_type = ?, freq_numerator = ?,
-      freq_denominator = ?, color = ?, reminder_time = ?, reminder_message = ?,
-      at_most_unlogged = ?, show_as = ?, icon = ?, category_id = ?, archived = ?
+      freq_denominator = ?, color = ?, reminder_time = ?, reminder_days = ?,
+      reminder_message = ?, at_most_unlogged = ?, show_as = ?, icon = ?,
+      category_id = ?, archived = ?
     WHERE id = ?
   `),
   deleteHabit: db.prepare(`DELETE FROM habits WHERE id = ?`),
@@ -347,7 +348,8 @@ api.post('/habits', (req, res) => {
   const info = q.insertHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value,
     h.target_type, h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-    h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, categoryId
+    h.reminder_days, h.reminder_message, h.at_most_unlogged, h.show_as, h.icon,
+    categoryId
   );
   res.status(201).json(toApiHabit(q.habitById.get(info.lastInsertRowid)));
 });
@@ -367,8 +369,8 @@ api.put('/habits/:id', (req, res) => {
   q.updateHabit.run(
     h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
     h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-    h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, categoryId,
-    h.archived, id
+    h.reminder_days, h.reminder_message, h.at_most_unlogged, h.show_as, h.icon,
+    categoryId, h.archived, id
   );
   // This route REPLACES (root CLAUDE.md), so `type` and `target_*` can move —
   // which changes what counts as completed, and so what the cached pair means.

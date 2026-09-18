@@ -13,7 +13,7 @@ are already answered here, usually because they were the first thing tried.
 | file | covers |
 |---|---|
 | `day-states.md` | the four day states, at-most habits, `show_as`, the score |
-| `import-and-loop.md` | merge rules, Loop fidelity, parse ceilings, export skips |
+| `import-and-loop.md` | merge rules, Loop fidelity, Loop's Saturday-based weekday mask, parse ceilings, export skips |
 | `awards.md` | the whole awards card, and what was refused from it |
 | `dashboard-and-detail.md` | the `/overview` window, grid columns, `detailCards` |
 | `settings-and-mirrors.md` | client mirrors, `notMirrored`, the theme record |
@@ -24,7 +24,7 @@ are already answered here, usually because they were the first thing tried.
 | `notifications-web.md` | the `web` channel, the nudge, the settings dialog |
 | `discord.md` | bot mode, the gateway, interaction handling |
 | `timezones.md` | `resolveTimeZone` vs `callerDay`, the device clock header |
-| `reminders.md` | the tick, `notify_log`, `notify_status`, the two warnings |
+| `reminders.md` | the tick, `notify_log`, `notify_status`, the two warnings, the per-weekday gate |
 | `outbound-urls.md` | Discord webhooks, the ntfy allowlist, gateway frames |
 | `ntfy-answers.md` | reversing "ntfy is notify-only": the HMAC capability, the button table, the query-string code, the inline limiters |
 | `connectivity.md` | `/healthz`, the connectivity watcher, bounded requests |

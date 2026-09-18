@@ -144,10 +144,10 @@ the page says how many.
 
 **Undo** — deleting a habit offers an Undo that restores every entry and note.
 
-**Reminders, where you want them** — set a time on a habit, choose what it
-*asks* ("Did you exercise today?"), and pick where it goes: the Android app, a
-Discord channel, an ntfy topic, or any combination. In Discord you answer with a
-button without leaving the chat. See
+**Reminders, where you want them** — set a time on a habit and tick the days of
+the week it should fire on, choose what it *asks* ("Did you exercise today?"),
+and pick where it goes: the Android app, a Discord channel, an ntfy topic, or any
+combination. In Discord you answer with a button without leaving the chat. See
 [Reminders and notifications](#reminders-and-notifications).
 
 **Works offline** — check off habits with no signal and they queue on the device,
@@ -1824,10 +1824,24 @@ logged-in browser as a lever. Neither gets safer on a VPN.
 
 A reminder has two halves, set in two places:
 
-1. **When** — a time on the habit itself, on its edit screen. Pick it from the
-   hour and minute dropdowns, or type it: `8:30`, `8:30 pm`, `830` and `8` all
-   work, and become `08:30`. No time, no reminder. It is a wall-clock time —
-   08:00 means eight in the morning, and stays there across a DST change.
+1. **When** — a time on the habit itself, on its edit screen, and the days of the
+   week it fires on. Pick the time from the hour and minute dropdowns, or type
+   it: `8:30`, `8:30 pm`, `830` and `8` all work, and become `08:30`. No time, no
+   reminder — whatever the days say. It is a wall-clock time — 08:00 means eight
+   in the morning, and stays there across a DST change.
+
+   The seven day boxes start with all of them ticked, which is what every habit
+   has always done. Untick Saturday and Sunday and a 07:00 reminder is a
+   weekday-only one; the field tells you which days it will use as you change
+   them. The days are checked against **your** calendar day and never the
+   server's — a server-sent reminder uses your
+   [reminder timezone](#both-editions-the-reminder-scheduler), and the phone and
+   the browser use the device's own clock — so "Mondays" is Monday where you are,
+   not wherever the instance is hosted. Clearing
+   every box is allowed and means what it says: nothing is sent for that habit,
+   and the field says so rather than quietly putting the ticks back. The boxes
+   stay usable with no time set, because they are the second half of the answer
+   and the time is the half that decides whether there is a reminder at all.
 2. **Where** — under ⚙ → **Notifications**, as a list of destinations. They are
    not exclusive; pick as many as you like.
 
@@ -2081,11 +2095,13 @@ told Loop you had missed, which stays distinct from a day you never answered.
 Skips are preserved, and backups predating Loop's `unit`, `target_type` or
 `notes` columns import fine.
 
-Reminders come across in both directions: Loop's question becomes *What the
-reminder asks*, in every format. The reminder **time** is `.db` only, since
-Loop's `Habits.csv` has no columns for it, and only for a reminder Loop had set
-on **all seven days** — there is no weekday mask here, and inventing a daily one
-would put a notification on your phone that Loop never had.
+Reminders come across in both directions, whole: Loop's question becomes *What
+the reminder asks*, in every format, and a reminder's **time and its days** both
+travel — a Monday-and-Thursday reminder in Loop is a Monday-and-Thursday reminder
+here, and goes back out as one. Those two are `.db` only, since Loop's
+`Habits.csv` has no columns for them, so a CSV round trip leaves every habit
+reminding on all seven days. Earlier versions took an all-days Loop reminder and
+dropped the rest, because there was no weekday mask on this side to put them in.
 
 Loop keeps its *preferences* in Android rather than in the backup, so nothing in
 the file can set yours: "Enable skip days" and "Show question marks" start off,

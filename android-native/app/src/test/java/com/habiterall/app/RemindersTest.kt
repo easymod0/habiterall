@@ -4,6 +4,8 @@ import com.habiterall.app.data.AppSettings
 import com.habiterall.app.data.Entry
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.Sentinels
+import com.habiterall.app.data.reminderCacheLine
+import com.habiterall.app.data.reminderFromCacheLine
 import com.habiterall.app.notify.Reminders
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -130,6 +132,161 @@ class RemindersTest {
         val now = at(2026, 3, 10, 23, 50)
         val next = Reminders.nextOccurrence(LocalTime.of(0, 0), now)
         assertEquals(at(2026, 3, 11, 0, 0).toInstant().toEpochMilli(), next)
+    }
+
+    /* ---------- and only on the weekdays the habit asks for ---------- */
+
+    /*
+     * The masks are the same literals the rest of this change is pinned with —
+     * bit 0 Sunday … bit 6 Saturday, so 62 is Mon-Fri, 64 Saturday only and 1
+     * Sunday only — and none of them is 127, which is the default AND fires on
+     * every day, so a walk that ignored the mask entirely would pass.
+     *
+     * September 2026: the 13th is a Sunday and the 19th the Saturday after it.
+     */
+    private fun firesOn(millis: Long) =
+        ZonedDateTime.ofInstant(java.time.Instant.ofEpochMilli(millis), toronto)
+
+    @Test
+    fun `a masked-out weekday is skipped and the next allowed one is armed`() {
+        // Sunday morning, on a habit that reminds Mon-Fri: today is out, so the
+        // alarm belongs on Monday — not on Sunday, which is what
+        // `nextOccurrence` alone answers.
+        val sundayMorning = at(2026, 9, 13, 6, 0)
+        val fired = firesOn(
+            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 62, sundayMorning)!!
+        )
+        assertEquals(14, fired.dayOfMonth)
+        assertEquals(8, fired.hour)
+        assertEquals(30, fired.minute)
+    }
+
+    @Test
+    fun `the walk crosses as many masked-out days as it has to`() {
+        // Monday, Saturdays only: five days of skipping, which is what says the
+        // search advances rather than checking tomorrow and giving up.
+        val mondayMorning = at(2026, 9, 14, 6, 0)
+        val fired = firesOn(
+            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 64, mondayMorning)!!
+        )
+        assertEquals(19, fired.dayOfMonth)
+        assertEquals(8, fired.hour)
+
+        // And the far edge of the bound: Saturday, after the time has passed,
+        // on a Saturday-only habit is a whole week out. Seven candidate days
+        // are needed for this one and no more are ever needed.
+        val saturdayEvening = at(2026, 9, 19, 20, 0)
+        val nextWeek = firesOn(
+            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 64, saturdayEvening)!!
+        )
+        assertEquals(26, nextWeek.dayOfMonth)
+        assertEquals(8, nextWeek.hour)
+    }
+
+    @Test
+    fun `a mask of 0 arms nothing rather than searching forever`() {
+        // 0 is legal — it means the habit reminds on no day — so this must
+        // terminate with an answer of "no alarm", on every day of the week.
+        var cursor = at(2026, 9, 13, 6, 0)
+        repeat(7) {
+            assertNull(
+                "a mask of 0 must arm nothing, failed on ${cursor.toLocalDate()}",
+                Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 0, cursor),
+            )
+            cursor = cursor.plusDays(1)
+        }
+    }
+
+    @Test
+    fun `every day is exactly the schedule this client has always armed`() {
+        // The degeneration case: with 127 the weekday walk must be the identity
+        // over `nextOccurrence`, or this change moves every existing reminder.
+        // Walked across a fortnight that contains a DST boundary, which is
+        // where an implementation that added 24 hours' millis would part
+        // company with one that takes a calendar day.
+        var cursor = at(2026, 2, 28, 12, 0)
+        repeat(14) {
+            assertEquals(
+                "127 must be the identity, failed at $cursor",
+                Reminders.nextOccurrence(LocalTime.of(8, 30), cursor),
+                Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 127, cursor),
+            )
+            cursor = cursor.plusDays(1)
+        }
+    }
+
+    @Test
+    fun `a weekday reminder keeps its local time across a DST boundary`() {
+        // Toronto springs forward on 2026-03-08, a Sunday. A Mon-Fri habit
+        // asked on the Friday before it must land on Monday the 9th at 08:30
+        // LOCAL — the wall-clock promise `nextOccurrence` makes, which is the
+        // whole reason the weekday filter is layered on top of that function
+        // rather than folded into it.
+        val fridayBefore = at(2026, 3, 6, 9, 0)
+        val fired = firesOn(
+            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 62, fridayBefore)!!
+        )
+        assertEquals(9, fired.dayOfMonth)
+        assertEquals(8, fired.hour)
+        assertEquals(30, fired.minute)
+    }
+
+    @Test
+    fun `an allowed weekday later today still fires today`() {
+        // The ordinary case, stated so a walk that always advanced a day would
+        // fail: Monday at 06:00 on a Mon-Fri habit is Monday at 08:30.
+        val fired = firesOn(
+            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 62, at(2026, 9, 14, 6, 0))!!
+        )
+        assertEquals(14, fired.dayOfMonth)
+    }
+
+    /* ---------- the offline cache, which is what arms all of the above ---------- */
+
+    @Test
+    fun `the cached reminder line carries the weekday mask`() {
+        val habit = Habit(
+            id = 4,
+            name = "Meditate",
+            reminderTime = "08:30",
+            reminderMessage = "Did you sit?",
+            reminderDays = 62,
+        )
+        val line = reminderCacheLine(habit)
+
+        assertEquals(62, reminderFromCacheLine(line)!!.reminderDays)
+        // APPENDED, never inserted — the assertion a round trip through
+        // DataStore could not make, because there the writer and the reader
+        // move together and a field put in the middle passes just as happily.
+        assertEquals("the mask must be the LAST field", "62", line.split('|').last())
+        assertEquals(10, line.split('|').size)
+    }
+
+    @Test
+    fun `a line written before the mask existed still arms, every day`() {
+        // The case the append rule exists for: an upgraded phone reads a cache
+        // its previous version wrote, possibly with no network to correct it.
+        // Every field before the mask must still be read from its own position,
+        // and the absent mask must mean every day — which is what that phone
+        // was already arming yesterday.
+        val nineFields = "4|08:30|Meditate|numerical|8.0|glasses|Did you sit?|avoid|at_most"
+        val upgraded = reminderFromCacheLine(nineFields)!!
+        assertEquals(127, upgraded.reminderDays)
+        assertEquals("08:30", upgraded.reminderTime)
+        assertEquals("avoid", upgraded.showAs)
+        assertEquals("at_most", upgraded.targetType)
+        assertEquals("glasses", upgraded.unit)
+
+        // And the oldest shape this reader has ever tolerated, six fields, is
+        // unaffected by the new one.
+        val sixFields = "4|08:30|Meditate|boolean|0.0|"
+        val ancient = reminderFromCacheLine(sixFields)!!
+        assertEquals(127, ancient.reminderDays)
+        assertEquals("08:30", ancient.reminderTime)
+
+        // Junk in the mask's own position is not a reason to lose the alarm.
+        assertEquals(127, reminderFromCacheLine("$nineFields|banana")!!.reminderDays)
+        assertEquals(127, reminderFromCacheLine("$nineFields|999")!!.reminderDays)
     }
 
     /* ---------- ask me later ---------- */
@@ -332,5 +489,45 @@ class RemindersTest {
         val smoking = countHabit(target = 2.0, type = "at_most")
         assertFalse(Reminders.needsReminder(smoking, listOf(entry(1.0)), today))
         assertTrue(Reminders.needsReminder(smoking, listOf(entry(5.0)), today))
+    }
+
+    @Test
+    fun `a day the mask does not name needs no reminder, however it stands`() {
+        // The second guard, and the one `NotifyWorker` leans on when it has no
+        // network: there it errs toward notifying by asking this with NO
+        // entries, so the mask is the only thing left that can say no.
+        //
+        // 2026-08-14 is a Friday and 2026-08-15 the Saturday after it, so 62
+        // (Mon-Fri) names the first and not the second.
+        val friday = "2026-08-14"
+        val saturday = "2026-08-15"
+        val weekdaysOnly = Habit(id = 1, name = "Meditate", reminderDays = 62)
+
+        assertTrue("Friday is on 62", Reminders.needsReminder(weekdaysOnly, emptyList(), friday))
+        assertFalse(
+            "Saturday is not on 62, so there is nothing to ask about",
+            Reminders.needsReminder(weekdaysOnly, emptyList(), saturday),
+        )
+        // An unanswered day on a masked-out weekday is still not a reminder —
+        // the gate is asked before anything about the entries is.
+        assertFalse(
+            "an unanswered Saturday is still not a Saturday reminder",
+            Reminders.needsReminder(
+                weekdaysOnly, listOf(entry(Sentinels.UNSET, date = saturday)), saturday
+            ),
+        )
+        // And an alarm that arrives on a day the mask names is unaffected.
+        assertTrue(
+            "an unanswered Friday must still be asked about",
+            Reminders.needsReminder(
+                weekdaysOnly, listOf(entry(Sentinels.UNSET, date = friday)), friday
+            ),
+        )
+        // A mask of 0 is never asked about at all.
+        val never = Habit(id = 1, name = "Meditate", reminderDays = 0)
+        assertFalse(
+            "a mask of 0 names no day, so no day needs a reminder",
+            Reminders.needsReminder(never, emptyList(), friday),
+        )
     }
 }
