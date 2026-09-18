@@ -33,7 +33,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { LOCAL_ISO_SRC } from './browser/fixtures.mjs';
+import { daysAgo, LOCAL_ISO_SRC } from './browser/fixtures.mjs';
 
 const browserDir = join(dirname(fileURLToPath(import.meta.url)), 'browser');
 
@@ -785,10 +785,55 @@ const UTC_DATE_READS = {
     why: 'the control in the DST/clock-shim block, compared against the UTC `nowISO` the shim itself installed — a LOCAL read there would not answer the question being asked',
   },
   'resiliencecheck.mjs': {
-    count: 2,
-    why: 'both anchor on `Date.UTC(n.getFullYear(), n.getMonth(), n.getDate())` — the LOCAL calendar date re-based at UTC midnight — and then walk and read entirely in UTC (`getUTCDay`), so the two zones are never mixed',
+    count: 6,
+    why: 'both blocks anchor on `Date.UTC(n.getFullYear(), n.getMonth(), n.getDate())` — the LOCAL calendar date re-based at UTC midnight — and then walk and read entirely in UTC, so the two zones are never mixed: two `toISOString` reads and four `getUTCDay` calls, two per block, all on that one clock',
   },
 };
+
+/**
+ * ...and the SECOND shape of the same defect, which the scan above cannot see.
+ *
+ * `today.getTime() - n * 86400000` off a local midnight steps by fixed 24-hour
+ * blocks, and a local calendar day spanning a spring-forward is 23 hours — so
+ * the walk drifts an hour and then skips a date outright. It contains no UTC
+ * read at all, so it is invisible to `UTC_DATE_READS`, and `atmost.mjs` and
+ * `rendercheck.mjs` both carried it while that guard reported them clean. That
+ * is what the inventory line below is for: an empty offender list means nothing
+ * until you know the guard was looking for the right thing in the first place.
+ *
+ * The pattern is deliberately `getTime()` followed by day-scale multiplication,
+ * not a bare `86400000` — which appears in four comments and in two shapes that
+ * are RIGHT. `resiliencecheck` walks `Date.UTC(...) - i * 86400000`, and UTC has
+ * no transitions, so there the arithmetic is exact; `feat4` divides a difference
+ * between two UTC-parsed dates by it. Neither steps a LOCAL `Date`, which is the
+ * whole of what goes wrong.
+ *
+ * Empty on purpose. An entry here needs the reason its walk cannot meet a
+ * transition — otherwise the answer is `daysAgo` (`browser/fixtures.mjs`), which
+ * takes calendar steps.
+ */
+const LOCAL_EPOCH_DAY_STEPS = {};
+
+/**
+ * The source with its COMMENT LINES dropped, for the two scans below.
+ *
+ * Both of them fired on this very change, against the comments explaining the
+ * fix they exist to enforce — a paragraph naming `today.getTime() - n *
+ * 86400000` as the thing no longer done is not an instance of doing it. A guard
+ * that cannot tell prose from code teaches the next person to reword a comment
+ * rather than to fix a defect.
+ *
+ * Whole-line only: a line whose trimmed form opens a comment is dropped, a line
+ * of code carrying a trailing comment is kept and scanned whole. That is the
+ * safe direction — the failure mode is a guard that fires and has to be
+ * answered, never one that goes quietly blind. Stripping `//` to end of line
+ * instead would eat `'http://…'` inside a string and could take a real match
+ * off the same line with it.
+ */
+const codeOnly = (src) => src
+  .split('\n')
+  .filter((l) => !/^\s*(\/\/|\/?\*)/.test(l))
+  .join('\n');
 
 test('a suite dates its days on the local calendar, the one the fixtures seeded', () => {
   const suites = readdirSync(browserDir)
@@ -797,12 +842,20 @@ test('a suite dates its days on the local calendar, the one the fixtures seeded'
   /** @type {Record<string, number>} */
   const found = {};
   for (const file of suites) {
-    const src = readFileSync(join(browserDir, file), 'utf8');
+    const src = codeOnly(readFileSync(join(browserDir, file), 'utf8'));
+    // **Both spellings, and that symmetry is the point.** The declaration check
+    // at the bottom of this test was widened to `getUTC` on the argument that
+    // UTC has more than one spelling; this scan — the one that decides whether
+    // a SEVENTH offender exists — was left on `toISOString` alone, so a suite
+    // pairing `setDate(d.getDate() - n)` with `getUTCFullYear`/`getUTCMonth`/
+    // `getUTCDate` reproduced the exact defect and did not appear here at all.
+    // Measured: 21 tests still passing, `found` still `{}`.
+    //
     // OCCURRENCES, not lines holding one. A second UTC read added to a line
     // that already had one is invisible to a per-line count, and both exempt
     // files below build their page-side source as concatenated string
     // fragments, where several reads on one line is the ordinary shape.
-    const hits = (src.match(/toISOString\s*\(/g) ?? []).length;
+    const hits = (src.match(/toISOString\s*\(|getUTC[A-Za-z]*\s*\(/g) ?? []).length;
     if (hits) found[file] = hits;
   }
 
@@ -827,6 +880,26 @@ test('a suite dates its days on the local calendar, the one the fixtures seeded'
   for (const [file, { why }] of Object.entries(UTC_DATE_READS)) {
     assert.ok(why && why.length > 20, `UTC_DATE_READS['${file}'] carries no usable reason`);
   }
+
+  // The second shape: a LOCAL `Date`'s epoch value stepped by whole days.
+  /** @type {Record<string, number>} */
+  const stepped = {};
+  for (const file of suites) {
+    const src = codeOnly(readFileSync(join(browserDir, file), 'utf8'));
+    const hits = (src.match(/getTime\(\)\s*[-+][^;\n]*\*\s*864/g) ?? []).length;
+    if (hits) stepped[file] = hits;
+  }
+  console.log(`scanned ${suites.length} suites for a local epoch day-step`);
+  for (const [file, n] of Object.entries(stepped)) {
+    console.log(`  ${file}: ${n} — ${LOCAL_EPOCH_DAY_STEPS[file] ? 'exempt' : 'NOT EXEMPT'}`);
+  }
+  assert.deepEqual(
+    stepped,
+    Object.fromEntries(Object.entries(LOCAL_EPOCH_DAY_STEPS).map(([f, e]) => [f, e.count])),
+    'a suite steps a LOCAL date by a fixed 24 hours, which skips a calendar day '
+    + 'across a spring-forward — use `daysAgo` (browser/fixtures.mjs), which takes '
+    + 'CALENDAR steps, or register it with the reason its walk cannot meet a '
+    + 'transition');
 
   // The rule is only worth having if the shared spelling is what it points at.
   // Scoped to the DECLARATION rather than to everything after it: split on the
@@ -900,10 +973,13 @@ test('LOCAL_ISO_SRC answers the LOCAL calendar day, in a zone that disagrees wit
   const isoIn = (utcMillis, offsetMinutes) => new Function(
     'Date', `${LOCAL_ISO_SRC} return iso;`)(zonedDateClass(utcMillis, offsetMinutes));
 
-  // The reported case: 21:30 on the 17th at -05:00, where UTC is already the
+  // The reported case: 21:30 on the 17th at -04:00, where UTC is already the
   // 18th. This is what the original helper got wrong, and it got it wrong for
-  // the whole local evening of every day.
-  const evening = isoIn(Date.UTC(2026, 8, 18, 1, 30), -300);
+  // the whole local evening of every day. `-04:00` and not `-05:00`: September
+  // in New York is EDT, and an earlier draft of this line named the offset and
+  // the wall clock inconsistently, which is the sort of thing a reader checks
+  // this file's arithmetic against.
+  const evening = isoIn(Date.UTC(2026, 8, 18, 1, 30), -240);
   assert.equal(evening(0), '2026-09-17',
     'a date read in UTC through a local-evening clock names TOMORROW');
   assert.equal(evening(1), '2026-09-16');
@@ -922,4 +998,32 @@ test('LOCAL_ISO_SRC answers the LOCAL calendar day, in a zone that disagrees wit
   assert.equal(isoIn(Date.UTC(2026, 0, 1, 2, 0), -300)(31), '2025-11-30');
   assert.equal(isoIn(Date.UTC(2026, 0, 6, 1, 0), -300)(4), '2026-01-01',
     'the month is zero-padded too');
+});
+
+test('LOCAL_ISO_SRC and `daysAgo` answer the same day, which is the whole reason both exist', () => {
+  // The invariant the browser suites rest on: a page-side helper names the days
+  // a node-side one seeded. Nothing held it — the two are separate spellings of
+  // one algorithm, and the source guard above can only see that neither reads
+  // UTC, not that they AGREE. Run under the host's real clock and zone, so it
+  // says nothing about any other zone; the fake-clock test above is what covers
+  // those. What it catches is the two drifting apart, which is the failure that
+  // would otherwise surface as five red suites and no explanation.
+  const iso = new Function('Date', `${LOCAL_ISO_SRC} return iso;`)(Date);
+
+  // The clock can tick past local midnight between two calls, and then the two
+  // disagree for a reason that is not a defect. Bracket the comparison and redo
+  // it once if the day moved under it — a retry rather than a tolerance,
+  // because a tolerance would also accept a real one-day disagreement.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const before = daysAgo(0);
+    const pairs = [0, 1, 2, 7, 30, 400].map((n) => [n, daysAgo(n), iso(n)]);
+    if (daysAgo(0) !== before) continue;  // rolled over mid-run; take it again
+    for (const [n, node, page] of pairs) {
+      assert.equal(page, node,
+        `LOCAL_ISO_SRC and daysAgo disagree at n=${n}: the suites would name days `
+        + 'the fixtures never seeded');
+    }
+    return;
+  }
+  assert.fail('the local day rolled over twice during this test, which cannot happen');
 });

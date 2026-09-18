@@ -5,6 +5,7 @@ import { pathToFileURL as _p2u } from 'node:url';
 /** Resolve a module in shared/public relative to this file, not the cwd. */
 const sharedPublic = (name) =>
   _p2u(_jn(_dn(_f2u(import.meta.url)), '..', '..', 'public', name)).href;
+import { daysAgo } from './fixtures.mjs';
 // Render streakChart in a minimal fake DOM and inspect the SVG it produces.
 // Verifies the chart code actually runs and emits sane geometry/labels.
 
@@ -203,11 +204,11 @@ check('fewer streaks than limit renders only what exists',
 
 /* --- issue #297: the calendar's note dot --- */
 {
-  const todayN = new Date();
-  todayN.setHours(0, 0, 0, 0);
-  const isoN = (d) =>
-    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  const agoN = (n) => isoN(new Date(todayN.getTime() - n * 86400000));
+  // `daysAgo` from the fixtures, not a local copy: this was `isoN(new
+  // Date(todayN.getTime() - n * 86400000))` off a local midnight, which steps
+  // by fixed 24-hour blocks and so skips a calendar day across a
+  // spring-forward. See `daysAgo`'s own comment for the measured dates.
+  const agoN = daysAgo;
 
   const dNoted = agoN(5);    // has a note
   const dPlain = agoN(6);    // logged, no note
