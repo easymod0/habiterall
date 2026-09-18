@@ -370,3 +370,195 @@ windowSum / target)` stays continuous, so it never had a cliff to round
 against and this bug never touched it. The fix brings `onPaceSeries` in line
 with `computeScores`'s existing behaviour rather than changing both to match
 some third answer.
+
+---
+
+# The trailing window became an interval model — #346
+
+Everything above describes a TRAILING WINDOW: each day was judged by asking
+whether the `den` days ending on it held enough completions. #346 replaces that
+question. The rounding fix, the floor and the birth gate above are all history
+as of this section — they were fixes to a mechanism that no longer exists — and
+they are kept because the fixtures they measured are the fixtures this model is
+held to.
+
+## What was reported
+
+A 4×/7 habit, kept at roughly three and a half sessions a week, drew on the
+Recent days strip as three broken fragments:
+
+```
+2026-08-29..2026-09-01 (4)   2026-09-10..2026-09-11 (2)   2026-09-15..2026-09-16 (2)
+```
+
+Loop Habit Tracker, given byte-identical data and the same 4×/7 setting, draws
+one run of thirteen days. The days the user pointed at — 09-07, 09-08, 09-12,
+09-13 — were drawn blank between check-offs that were, by the habit's own rate,
+being kept.
+
+The per-day verdicts were not wrong under the old rule. On 09-14 the trailing
+seven days (09-08..09-14) held three completions against a bar of four, so it
+genuinely was a miss. The rule itself was the disagreement.
+
+## How Loop actually computes it
+
+From `uhabits@dev`, `EntryList.recomputeFrom` → `StreakList.recompute`:
+
+1. `buildIntervals` — every group of `num` CONSECUTIVE completions spanning
+   fewer than `den` days earns the block `[oldest of the group, oldest + den - 1]`.
+2. `snapIntervalsTogether` — older blocks slide backwards to close gaps.
+3. `buildEntriesFromInterval` — unlogged days inside a block become `YES_AUTO`.
+4. `StreakList.recompute` — a streak is a maximal run of days with `value > 0`.
+
+The block runs FORWARD from the oldest completion of the group, so four
+completions on 09-05, 09-06, 09-09 and 09-10 buy 09-05..09-11 — including the
+two days on which the work had not yet been done. Loop is retroactive where the
+trailing window was real-time. That is the whole of the difference.
+
+## The invariant that was retired, and the claim that was wrong about it
+
+`must-stay-fixed.md` item 2 held that `onPaceSeries` and `computeScores` must
+ask the same question so strength and streaks cannot disagree about a day. An
+early draft of this change asserted that Loop upholds the same invariant by a
+different route, because `ScoreList.recompute` is handed the `YES_AUTO`-filled
+entry list. **That is wrong, and it was load-bearing.** Its boolean branch reads:
+
+```kotlin
+if (values[offset] == Entry.YES_MANUAL) { rollingSum += 1.0 }
+```
+
+`YES_AUTO` is not counted. Loop's score is a trailing-window rate over manual
+completions while its streak is interval coverage — two questions, by design.
+So the invariant is not something the port preserves; it is something the port
+spends. It is retired deliberately: **a streak measures CONTINUITY and a score
+measures RATE.** `scoresOver` is untouched by #346 and remains what Loop's own
+score is. `stats.test.js`'s `#223 / #346` case is the fixture that states it —
+one habit, streaks agreeing and scores not.
+
+## Two divergences from Loop, both measured
+
+**1. `snapIntervalsTogether` is not ported.** It is bad on its own terms — the
+slide is bounded only by the block's own newest completion, so a block can open
+before the oldest completion that earned it, crediting days inside a genuine
+multi-day gap. On the reported data it covered 08-23 and 08-24, which sit in a
+five-day stretch with nothing logged.
+
+The disqualifying part is not that, though. The slide depends on which OTHER
+blocks are in the list, and a bounded caller has fewer of them. Ported whole,
+#340's own fixture read:
+
+```
+computeStats  (full history)      currentStreak = 302
+summaryStats  (400-day slice)     currentStreak = 301
+```
+
+Two surfaces disagreeing about one habit — the exact bug class the sections
+above exist to close, reintroduced by the fix for #346. Anchoring every block to
+a real completion instead makes coverage a pure function of the completions
+inside the walk, so the surfaces agree by construction and no birth-clamp is
+needed to hold them together.
+
+An intermediate version DID use a clamp, flooring blocks at the habit's `birth`,
+and it was wrong twice over: `birth` is the earliest row of ANY kind, so a habit
+whose first row is a skip got credit on days it completed nothing; and
+`computeStats` derives a `birth` where a direct `computeStreaks` call does not,
+so one window answered 72 days through one entry point and 68 through the other.
+`stats.test.js`'s field-for-field agreement case caught that one.
+
+Measured cost of dropping the snap: a run opens up to `den - 1` days later than
+Loop would draw it. The reported habit reads `09-05..09-16` where Loop reads
+`09-04..09-16`.
+
+**2. A completion that earned no block does not count.** Loop keeps any
+`value > 0`, so a manual completion is never a miss there. Applied here, a 3×/7
+habit managing only two days a week read as sixteen one-day runs broken by
+seventeen lapses of at most four days — where the truth it exists to report is
+one unbroken 60-day failure. `onPaceSeries` feeds `missRunsFrom` as well as
+`streaksFrom`, and Loop has no equivalent of a miss run, so this is a question
+Loop never had to answer. Measured both ways:
+
+```
+3x/7 habit kept Mon+Wed only, 60 days
+  credit a lone completion:  16 runs,  17 lapses, longest lapse  4 days
+  interval coverage only:     0 runs,   1 lapse,  longest lapse 60 days
+```
+
+The reported habit is identical under both, which is what makes this a free
+choice on the evidence that prompted the change and a real one everywhere else.
+
+## Skips, which Loop cannot express at all
+
+Loop's `buildIntervals` filters to `YES_MANUAL`; a skip buys nothing. In this
+app a skip means the day did not happen and lowering the bar is its entire
+purpose, so a block's period demands `floor(num × active / den)` completions
+rather than `num`, where `active` is the period less the skips inside it.
+
+That is the trailing window's own pro-rating expression and the same FLOOR the
+section above settled, so the skip semantics carry over rather than being
+reinvented. `x.xsss.` — two sessions over four active days on a 3×/7 habit — is
+on pace; `x.x....` is two over seven and is not. Without the discount those two
+fixtures are indistinguishable, which is the mutation `resilience.test.js` and
+`streaks.test.js` both hold.
+
+The old `Math.max(1, ...)` floor on that expression is NOT carried over, and its
+absence is an invariant rather than a relaxation: `begin` is drawn from the
+completions list, so a period always holds at least one, and a `required` of 0
+and of 1 admit exactly the same periods. Mutation-testing it proved it could not
+fail — it was removed rather than left looking like a guard.
+
+## What moved, measured
+
+| fixture | trailing window | intervals |
+|---|---|---|
+| five 3×/7 schedules (above) | 91, 90, 87, 91, 91 | **unchanged** |
+| daily 1/1 and twice-a-day 2/1 | 4, 5 | **unchanged** |
+| skip inversion (3×/7, two skips) | 1 + 26 off-birth | **one run of 31** |
+| slice edge (Sat+Sun+Mon) | 2 + 85 off-birth | **one run of 91** |
+| #340 agreement fixture | 296 | **301, all three call paths** |
+| the reported 4×/7 habit | 4, 2, 2 | **8, 12** |
+
+The two "off-birth" rows are the birth gate's own fixtures. It existed to make a
+slice edge read differently from a birth; with coverage window-independent there
+is nothing to tell apart, and both now read as the unbroken runs they are.
+
+## Consequences, accepted
+
+**Streaks are retroactive.** Logging a day can extend a run backwards. Nothing
+did that before. This is inherent to a model where a block is earned by a group
+of completions and opens at the oldest of them.
+
+**A habit younger than its own period reads as lapsing.** Three days into a 3×/7
+habit with two sessions, no block has been earned, so those days are a lapse
+where the trailing window's pro-rating said "not born already failing". Accepted
+rather than patched, because it corrects ITSELF backwards the moment the third
+session lands. The rejected alternative is recorded because it is the obvious
+one: any birth leniency has to be anchored to the first completion IN THE WALK,
+which differs between a full history and a bounded slice — which is exactly how
+the snap reintroduced #340's disagreement.
+
+**An award can no longer be taken away by logging an older day.** That was
+mechanism 1 in `awards.js`'s header and it was a direct consequence of the
+leniency re-judging the first `den - 1` days. Window-independence closes it:
+21 → 17 is now 21 → 21. `MAX_RANGE_DAYS` (mechanism 2) is untouched and remains
+the only way an award shrinks, so the file's "nothing here is permanent" framing
+still stands on one leg rather than two.
+
+**`birth` is no longer read by `onPaceSeries`.** It stays in the signature —
+`summaryStats` reads it for the `runs` floor (#247), and both routes already
+fetch it from the `MIN(date)` query that feeds `creditAnchor`, so nothing is
+queried for a dead parameter. `computeCategoryStats`'s `memberBirth` fed nothing
+else and was deleted outright; the case that pinned that wiring now pins the
+property which made it deletable, because a test that pins dead wiring is the
+"guard that cannot fail" shape the root `CLAUDE.md` warns about. Removing
+`birth` from `computeStreaks`/`computeMissRuns` entirely is follow-up work and
+deliberately not in this change.
+
+## The slice-edge bound that remains
+
+A bounded slice cannot see completions before its own opening, so the first
+`den - 1` days of one are under-covered — a block that a pre-slice completion
+would have earned is simply not built. This is a real bound and is asserted as
+one in `streaks.test.js` rather than left to look like window-dependence:
+a range opening ON a day may not hold it, a range opening `den - 1` days earlier
+does. `summaryStats` already floors its `runs` window at `from + (den - 1)` for
+exactly this reason (#247), and that floor is unchanged.

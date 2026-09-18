@@ -14,20 +14,27 @@
  * false, and it is false through the ordinary API. Two mechanisms, neither
  * patchable from here:
  *
- * 1. `computeStats` starts its window at `start ?? firstEntry`, and
- *    `onPaceSeries` pro-rates the requirement near the start of that window —
- *    deliberately, so a habit is not judged against history it does not have
- *    yet. Move the earliest entry EARLIER and the first `den - 1` days are
- *    re-judged against a full requirement they now fail. So logging one
- *    forgotten session takes a 3×/week habit from `bestStreak` 21 to 17, and
- *    the badge from "21-day streak" to "14-day streak". Daily habits
- *    (`num >= den`) have no leniency window and are immune; every other
- *    frequency is exposed.
+ * 1. ~~Logging an older day re-judges the first `den - 1` days.~~ **CLOSED by
+ *    #346, and left here because the reasoning is what the rest of this comment
+ *    rests on.** Under the trailing window `computeStats` started at
+ *    `start ?? firstEntry` and `onPaceSeries` pro-rated the requirement near
+ *    that start, so moving the earliest entry EARLIER re-judged those days
+ *    against a full requirement they now failed: remembering one forgotten
+ *    session took a 3×/week habit from `bestStreak` 21 to 17 and the badge from
+ *    "21-day streak" to "14-day streak". The interval model makes coverage a
+ *    pure function of the completions in the walk, so an added row cannot
+ *    re-judge days it does not itself cover — that fixture now reads 21 → 21.
+ *    `awards.test.js` pins the closure rather than the defect, because this is
+ *    the user-facing face of the property that keeps `computeStats` and
+ *    `summaryStats` agreeing, and it is what fires if window-dependence returns.
  * 2. `MAX_RANGE_DAYS` clamps that window start to `end - 3660`, so a habit
  *    older than ten years — or one carrying a single ancient row from an
  *    import — has a SLIDING window rather than a growing one. Awards then
  *    shrink and vanish with no user action at all, purely as the calendar
- *    moves.
+ *    moves. **This is now the ONLY mechanism**, so the paragraph below stands
+ *    on one leg rather than two — which weakens the evidence for the framing,
+ *    not the framing itself: one unpatchable mechanism is still one too many
+ *    for "you have earned this".
  *
  * So the framing is not "you have earned this" but **what this habit's history
  * currently shows**, which is the position `computeSurvival`'s docstring

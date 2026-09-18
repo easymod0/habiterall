@@ -1172,21 +1172,26 @@ try {
     }
 
     // The `MIN_STREAK` gate: a probe habit with exactly one entry ~12 days ago
-    // and a 2/3 frequency makes `onPaceSeries` a run of exactly 2 days (the
+    // and a **1/2** frequency makes `onPaceSeries` a run of exactly 2 days (the
     // entry day plus the day after) — one below `MIN_STREAK` — so the day
-    // after the entry must draw empty rather than a tick. The frequency is
-    // FIXTURE-CHOSEN, not incidental, and this is the whole reason it is 2/3
-    // and not some rounder ratio: on the day after the entry `activeDays` is
-    // 2, so the raw requirement is `2 * 2 / 3 = 1.333…` — genuinely
-    // fractional, which is the whole point. `onPaceSeries` floors that to 1,
-    // and `windowDone` (the one completion still inside the trailing 2-day
-    // window) meets it, so the day after the entry is on pace and the run
-    // reaches 2 days. A ratio whose arithmetic never lands on a fraction at
-    // that day — 1/2 was tried and rejected here for exactly this reason —
-    // cannot tell the floored rule apart from the raw, un-floored one, so a
-    // later edit that swaps in a "rounder" frequency would silently stop this
-    // block testing anything. Verified against `/api/habits/:id/stats` rather
-    // than assumed.
+    // after the entry must draw empty rather than a tick.
+    //
+    // The frequency is FIXTURE-CHOSEN and #346 changed which one works. It was
+    // 2/3, picked because the old trailing window's requirement on the day
+    // after the entry was a genuinely fractional `2 * 2 / 3 = 1.333…` that the
+    // floor brought down to 1. The interval model has no such day-by-day
+    // requirement: one completion on a 2/3 habit fills no period at all (a
+    // period wants two), so that fixture now yields NO run, and the second
+    // assertion below went on passing — the day drew empty because nothing was
+    // ever drawn, not because `MIN_STREAK` suppressed it. A block-length probe
+    // has to be built out of `den` now, because a single block IS `den` days
+    // long: at 1/2 the one entry earns `[entry, entry + 1]`, a run of exactly
+    // 2, which is the shortest run that is real and still under the gate.
+    //
+    // The first assertion is what keeps the second honest, and it is the whole
+    // reason it exists — verified against `/api/habits/:id/stats` rather than
+    // assumed, so a future model change that stops producing a 2-day run here
+    // fails loudly instead of quietly un-testing the gate.
     // `daysAgo` from the fixtures, not a fourth copy: this block is node-side,
     // so it can call the function the fixtures seeded these days with instead
     // of restating it. The three page-side blocks in this file use
@@ -1198,7 +1203,7 @@ try {
       const h = await (await fetch('/api/habits', {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ name: 'Strip run-length probe', type: 'boolean',
-          freq_numerator: 2, freq_denominator: 3, color: '#3b82f6' }),
+          freq_numerator: 1, freq_denominator: 2, color: '#3b82f6' }),
       })).json();
       await fetch('/api/habits/' + h.id + '/entries/${probeEntryDate}', {
         method: 'PUT', headers: { 'content-type': 'application/json' },

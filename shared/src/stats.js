@@ -888,79 +888,47 @@ function regularityOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
  * A day used to count only if the habit was completed on it. That is right for
  * a daily habit and wrong for every other kind: a 3×/week habit kept perfectly
  * has four off-days a week, and asking "was it done today?" reports the best
- * possible behaviour as a streak of one and a lapse every other day. The score
- * has always known better — it measures adherence over a trailing window the
- * length of the frequency period — so this asks the same question the same way
- * and the two numbers stop contradicting each other.
+ * possible behaviour as a streak of one and a lapse every other day.
  *
- * The window is `denominator` days ending on the day being judged, and the
- * requirement is pro-rated by any skips inside it, exactly as `computeScores`
- * does: a week with two skipped days only demands its share of the target.
- * That requirement FLOORS rather than rounding up, so a pro-rated window never
- * demands a higher rate than the habit's own — `>=` against the raw ratio used
- * to round the demand up to the next whole day, which made two skip days
- * HARDER to keep up with than none. And a window that has not filled yet is
- * not judged at all while it can still reach the target, provided at least one
- * completion is already in it — so near `start`, where the window is short, a
- * habit is not judged against a week of history it does not have yet.
+ * **This is Loop's INTERVAL model, not a trailing window (#346).** Until #346
+ * this asked, at each day, whether the trailing `den` days held `num`
+ * completions — retrospective, judged in real time. Loop asks a different
+ * question, and the app it is modelled on is the one that has to win on a
+ * disagreement about the same data: whether some group of `num` CONSECUTIVE
+ * completions landed close enough together to buy a `den`-day block covering
+ * this day, where the block runs FORWARD from the oldest of the group. So four
+ * completions on Sep 5, 6, 9 and 10 buy Sep 5–11 at 4×/7 — including Sep 7 and
+ * 8, days on which the work had not yet been done. The trailing window read the
+ * same fortnight as three broken fragments where Loop reads one 13-day run, and
+ * that is the shape a user reported. See
+ * `docs/decisions/on-pace-and-frequency.md` for the measured comparison and the
+ * uhabits source this is a port of (`EntryList.buildIntervals`,
+ * `snapIntervalsTogether`).
  *
- * **That leniency is sound only at the habit's genuine BIRTH, and `birth` is
- * what tells the two apart (#340's review round).** A short window near the
- * start of `dates` means "the habit has no history here" only when `dates[0]`
- * IS that first day — a caller who merely fetched a bounded SLICE (both
- * editions' `/overview` over `SUMMARY_WINDOW_DAYS`, `recomputeBestStreak` over
- * `STREAK_HISTORY_DAYS`, a narrowed `?start=`) opens its range somewhere the
- * habit was already alive, and the days the window reaches back into DID
- * happen and DO have rows the caller just did not fetch — crediting them made
- * a 3×/7 habit kept perfectly for 400 days read `currentStreak` 301 on the
- * dashboard against 296 on its own page (`docs/decisions/on-pace-and-frequency.md`,
- * #340). So: while `dates[0] === birth`, this is the habit's own start and the
- * leniency above applies exactly as written. Once the range opens somewhere
- * ELSE — `birth` supplied, real, and different from `dates[0]` — a short window
- * is merely a slice edge, not missing history, and every day the window is
- * still partial is judged by the plain, unfloored, unclaused ratio instead: the
- * expression this rule replaces everywhere else. A `birth` that is not a real
- * day (#340's second review round: both editions hand this straight from SQL's
- * `MIN(date)`, exactly as phantom-capable as the raw reads `creditAnchor` and
- * `warmAnchor` already refuse) is treated as absent rather than as a real,
- * non-matching one — the lenient branch, not the strict one — because a
- * phantom row is lexically the minimum and can never equal `dates[0]`, so an
- * unfiltered `birth` collapsed the gate to the strict branch for the WHOLE
- * slice of any phantom-carrying habit.
+ * **The score is deliberately NOT this question any more.** `scoresOver` stays
+ * a trailing-window rate, which is what Loop's own `ScoreList.recompute` is —
+ * its boolean branch counts `YES_MANUAL` only, so Loop's score never sees the
+ * `YES_AUTO` days its streaks are made of. Streak measures CONTINUITY, score
+ * measures RATE, and they are different questions that may legitimately
+ * disagree about one day. That retires the invariant `must-stay-fixed.md` item
+ * 2 used to state; read it there before restoring anything.
  *
- * **A day once the window has FILLED (`windowDays === den`) is judged the same
- * way either way, but NOT because a full window "needs no leniency and floors
- * to the same whole number the raw ratio does" — that is false under skips.**
- * A full window with two skips still has `activeDays < den`, so 3×/7 with two
- * skips demands a floored 2 against a raw, unfloored 2.143 (which rounds up to
- * 3) — the two branches disagree, and that disagreement is this rule's own
- * headline fixture. The two are equal only STRUCTURALLY: the branch below reads
- * `windowDays < den && !opensAtBirth`, so a full window (`windowDays === den`)
- * never reaches the strict branch no matter what `opensAtBirth` says. Do not
- * simplify that condition to `!opensAtBirth` alone — it would revert the floor
- * for every full window, with no test that fails, since the birth-opening case
- * is exactly where `windowDays < den` and the two conditions look
- * interchangeable. Omitting `birth` behaves as `dates[0] === birth` always — the
- * pre-review, always-lenient shape — which is right for a caller (a direct
- * test, `computeStats`) that has already opened its window at the habit's own
- * first row and wrong for a caller holding a bounded slice, which must supply
- * the real one (see `summaryStats`'s own JSDoc for what happens if it does
- * not). The property this buys is about the PARTIAL window ONLY: outside a
- * habit's genuine birth, a day whose window has not FILLED is judged by
- * master's own expression, so nothing moves at a SLICE EDGE. It is NOT a
- * property of this change as a whole, and an earlier draft of this comment
- * claimed it was — the floor above applies at every FULL window whatever the
- * gate says, so any non-daily habit whose window holds a SKIP moves wherever
- * it is read from, birth or no birth. That follows from the paragraph above
- * and contradicted the sentence that used to stand here. Measured on this
- * rule's own headline fixture (3×/7 Mon/Wed/Fri, two skips, a `birth` earlier
- * than `dates[0]` so the gate is shut): master gives runs of 1 / 14 / 5 where
- * this gives 1 / 26, and `streaks.test.js` pins that second pair so the wider
- * claim cannot be restated without a test failing.
+ * Three properties worth stating because they are what keep the change
+ * conservative — each is pinned in `streaks.test.js`:
  *
- * For a habit asking for something every day (`num >= den`) the window is one
- * day and the requirement clamps to it, so this reduces exactly to
- * `isCompleted` and daily habits behave precisely as they always have.
+ * 1. **`num >= den` short-circuits to per-day `isCompleted`.** Not tidiness: at
+ *    2×/1 no two distinct dates span `< 1` day, so the interval builder emits
+ *    nothing at all and a twice-a-day habit could never hold a streak. Daily
+ *    habits behave precisely as they always have.
+ * 2. **Skips stay transparent.** A skip is `null` — it neither counts as a
+ *    completion when building intervals nor breaks a run when folding them.
+ * 3. **Every block is anchored to a real completion, so this is WINDOW-
+ *    INDEPENDENT.** Loop's `snapIntervalsTogether` is deliberately not ported;
+ *    `buildIntervals` below carries the measurement, but the property it buys
+ *    belongs here: coverage depends only on the completions inside the walk, so
+ *    `computeStats` over a habit's whole history and `summaryStats` over a
+ *    bounded 400-day slice cannot disagree about the same day. Ported whole,
+ *    they did — 302 against 301 on #340's own fixture.
  *
  * @param {string} [creditFrom] see `answeredBy`.
  * @param {string[]} dates already-clamped, oldest first. `onPaceSeries` is
@@ -975,13 +943,15 @@ function regularityOver(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
  *   call over `start, end`) and hands it in; because this function is not
  *   exported and has no `dates` parameter reachable from outside `stats.js`,
  *   there is no second way to reach it with an unclamped range.
- * @param {string|null} [birth] the habit's LIFETIME earliest real row — see
- *   the note above. `undefined` and a non-real STRING both mean "treat the
- *   range as opening at birth"; an explicit `null` — both routes' spelling
- *   for "no `MIN(date)` row for this habit at all" — takes the strict
- *   branch instead, deliberately: a phantom is a real row this file cannot
- *   admit as an anchor, where a lookup miss is "no anchor exists to be
- *   lenient about". Compared against `dates[0]` as a plain string.
+ * @param {string|null} [birth] **accepted and no longer read (#346).** It gated
+ *   the leniency for a PARTIAL trailing window; there is no partial window under
+ *   intervals, and property 3 is what replaces the job it was doing — a floor
+ *   derived from `birth` would be exactly the caller-dependence that property
+ *   rules out, since `computeStats` derives one and a direct `computeStreaks`
+ *   call does not. Kept in the signature because `summaryStats` still reads
+ *   `birth` for its own `runs` floor (#247) and both editions' routes already
+ *   supply it from the `MIN(date)` query that feeds `creditAnchor`, so nothing
+ *   is fetched for this alone. Removing it from the chain is a separate change.
  * @returns {{date: string, ok: boolean|null}[]} `null` on a skipped day, which
  *   is transparent: it neither starts, extends nor breaks a run.
  */
@@ -990,97 +960,156 @@ function onPaceSeries(habit, entryMap, dates, unlogged = UNLOGGED_DEFAULT,
   const num = Math.max(1, Number(habit.freq_numerator) || 1);
   const den = Math.max(1, Number(habit.freq_denominator) || 1);
 
-  // See the doc comment above: undefined behaves as "the range opens at the
-  // habit's own birth", which is the only shape a caller not supplying this
-  // could honestly mean. A `birth` that IS a string but not a real day gets
-  // the same treatment rather than the strict branch: both editions hand
-  // this straight from SQL's `MIN(date)` (personal's `q.firstEntryPerHabit`,
-  // cloud's grouped `MIN(date)`), which is exactly as phantom-capable as the
-  // raw reads `creditAnchor`, `firstStatedAnswer` and `warmAnchor` already
-  // refuse for the same reason — a phantom row is lexically the minimum and
-  // can never equal `dates[0]`, so an unfiltered `birth` collapsed the gate
-  // to the strict branch for the WHOLE slice of any phantom-carrying habit
-  // (`docs/decisions/on-pace-and-frequency.md`, #340 review round 2:
-  // measured 95 against a detail view of 101). Treating it as absent means
-  // "assume the range opens at the habit's birth", which is right whenever
-  // the phantom IS the earliest row and only narrowly wrong — the gate
-  // withdrawn one slice-edge too many — for a habit that carries a phantom
-  // row AND has real rows before the slice edge; SQL cannot tell the two
-  // apart (no `GLOB`/`LIKE` rejects February 30th), and that residue is
-  // strictly better than the guaranteed disagreement this replaces.
-  //
-  // `typeof birth === 'string'` gates that check deliberately, rather than
-  // `!isRealDay(birth)` alone: both routes hand a birth-less habit `null`
-  // (`birthById.get(h.id) ?? null` — a lookup MISS, meaning the habit has no
-  // row in `MIN(date)` at all), and `isRealDay(null)` is also false. Folding
-  // that into this clause would flip a lookup miss from strict to lenient
-  // too, which is a different question with a different right answer: a
-  // phantom is a real row this file simply cannot admit as an anchor, where
-  // a miss is "no anchor exists to be lenient about" and stays on the
-  // conservative, no-leniency branch it already took.
-  const opensAtBirth = birth === undefined
-    || (typeof birth === 'string' && !isRealDay(birth))
-    || (dates.length > 0 && dates[0] === birth);
-
   const done = dates.map(
     (date) => isCompleted(habit, entryMap.get(date), unlogged, answeredBy(date, creditFrom))
   );
 
-  const out = [];
-  let windowDone = 0;
-  let windowSkips = 0;
+  // Property 1 above. `done[i]` is already `true`/`false`/`null`, which is
+  // exactly this function's return shape, so the degenerate case is the
+  // identity rather than a second implementation of it.
+  if (num >= den) return dates.map((date, i) => ({ date, ok: done[i] }));
 
+  // A completion is a day `isCompleted` answered true for — NOT a raw `YES`
+  // row. That is what carries the interval model across habit TYPES: Loop's
+  // `EntryList.recomputeFrom` builds intervals for boolean habits only and
+  // copies numerical entries untouched, which would leave a numerical 4×/7
+  // habit with no frequency-aware streak at all. Reading `done` instead covers
+  // boolean, numerical and at-most uniformly, with no second branch and no
+  // second definition of "kept" to drift from `isCompleted` (#346).
+  const completions = [];
+  const skipped = [];
   for (let i = 0; i < dates.length; i++) {
-    if (done[i] === null) windowSkips++;
-    else if (done[i]) windowDone++;
+    if (done[i] === true) completions.push(dates[i]);
+    else if (done[i] === null) skipped.push(dates[i]);
+  }
 
-    // Drop the day that just fell out of the trailing `den`-day window.
-    const outgoing = i - den;
-    if (outgoing >= 0) {
-      if (done[outgoing] === null) windowSkips--;
-      else if (done[outgoing]) windowDone--;
+  const intervals = buildIntervals(num, den, completions, skipped);
+
+  // Linear rather than `intervals.some(...)` per day: both lists are sorted
+  // ascending by `begin`, so one cursor walks them together. `buildIntervals`
+  // can emit one interval per completion, and a habit with a decade of rows
+  // inside `MAX_RANGE_DAYS` would otherwise make this quadratic — the same
+  // event-loop concern the `dates` parameter above exists for.
+  const out = [];
+  let cursor = 0;
+  let reach = null; // furthest `end` among intervals already opened
+  for (let i = 0; i < dates.length; i++) {
+    const date = dates[i];
+    while (cursor < intervals.length && intervals[cursor].begin <= date) {
+      if (reach === null || intervals[cursor].end > reach) reach = intervals[cursor].end;
+      cursor++;
     }
+    if (done[i] === null) { out.push({ date, ok: null }); continue; }
+    // Coverage ALONE — `done[i]` is deliberately not an escape hatch here, and
+    // this is the second place #346 declines to follow Loop. Loop's
+    // `StreakList.recompute` keeps any value > 0, so a manual completion is
+    // never a miss there; a 3×/7 habit managing only two days a week would read
+    // as sixteen one-day runs broken by seventeen lapses of at most four days,
+    // where the truth it is meant to report is one unbroken 60-day failure. A
+    // completion that earned no block is a day the habit was worked at and
+    // still fell behind its own rate, and `missRunsFrom` reads this same series
+    // — so crediting it here is what would understate the lapse on the Miss
+    // distribution chart. A completion inside a group that DID fit is covered
+    // by that group's own block anyway (the block opens on the group's oldest
+    // member), so this costs nothing for a habit keeping its pace.
+    out.push({ date, ok: reach !== null && date <= reach });
+  }
+  return out;
+}
 
-    if (done[i] === null) { out.push({ date: dates[i], ok: null }); continue; }
+/**
+ * The `den`-day blocks a habit's completions have earned — uhabits'
+ * `EntryList.buildIntervals`, WITHOUT its `snapIntervalsTogether` pass.
+ *
+ * Every group of `num` CONSECUTIVE completions that spans fewer than `den` days
+ * earns the block `[oldest of the group, oldest + den - 1]`. A group spread too
+ * thin earns nothing, which is what makes a lapse a lapse.
+ *
+ * **The snap is deliberately not ported, and dropping it is what makes this
+ * model window-INDEPENDENT (#346).** Loop's `snapIntervalsTogether` slides an
+ * older block backwards to close the gap to the next newer one, bounded only by
+ * its own newest completion — so a block can open before the oldest completion
+ * that earned it, crediting days on which nothing happened and which may sit in
+ * a genuine multi-day gap. That is bad on its own terms, but the disqualifying
+ * part is that the slide depends on which OTHER blocks are in the list, and a
+ * bounded caller has fewer of them: ported whole, the #340 fixture read
+ * `currentStreak` 302 through `computeStats` against 301 through `summaryStats`
+ * over the same habit — two surfaces disagreeing, which is the exact bug class
+ * #340 exists to close, reintroduced by the fix for #346. Anchoring every block
+ * to a real completion instead makes coverage a pure function of the
+ * completions inside the walk, so the two surfaces agree by construction and no
+ * birth-clamp is needed to hold them together. Measured cost: a run opens up to
+ * `den - 1` days later than Loop would draw it. Measured benefit: the five
+ * schedules in `docs/decisions/on-pace-and-frequency.md` read 91/90/87/91/91,
+ * which is what that record already settled is correct.
+ *
+ * Loop's 30/31-day month special case is not ported either: it exists so a
+ * "monthly" habit tracks calendar month LENGTH, and this app has no monthly
+ * frequency preset to reach it — a `den` of 30 here means thirty days.
+ *
+ * Returned sorted ascending by `begin`, which `onPaceSeries` relies on to walk
+ * the two lists with one cursor.
+ *
+ * **Skips pro-rate what a block costs, and the expression is the trailing
+ * window's own.** Loop has no equivalent — its `buildIntervals` filters to
+ * `YES_MANUAL` and a skip buys nothing — but in this app a skip means the day
+ * did not happen, and lowering the bar is its entire purpose (`x.xsss.` is two
+ * sessions over four active days on a 3×/7 habit, which is on pace, and must
+ * not read the same as `x.x....`, which is two over seven and is not). So a
+ * block's period demands `floor(num × active / den)` completions rather than
+ * `num`, where `active` is the period's length less the skips inside it — the
+ * identical pro-rating `scoresOver` applies and the identical FLOOR #340
+ * settled, so a skip cannot make a habit harder to keep than no skip would
+ * (`docs/decisions/on-pace-and-frequency.md`). Never below 1, or a period of
+ * nothing but skips and a single stored lapse would earn a block out of
+ * silence (#223's shape).
+ *
+ * Expressed as "enough completions inside `[begin, begin + den - 1]`" rather
+ * than Loop's "`num` CONSECUTIVE completions spanning `< den` days". With no
+ * skips the two are the same statement — consecutive sorted completions inside
+ * a window ARE the window's count — but only this one has somewhere to put a
+ * pro-rated requirement.
+ *
+ * @param {number} num
+ * @param {number} den
+ * @param {string[]} completions ascending, oldest first.
+ * @param {string[]} skipped ascending, oldest first.
+ * @returns {{begin: string, end: string}[]}
+ */
+function buildIntervals(num, den, completions, skipped) {
+  const out = [];
+  // Three cursors, none of which ever moves backwards: `begin` only increases,
+  // so the window `[begin, begin + den - 1]` only slides forward and each bound
+  // can be advanced in place. That keeps this linear in the number of rows —
+  // the same event-loop concern the `dates` parameter on `onPaceSeries` exists
+  // for, since a decade of history inside `MAX_RANGE_DAYS` is a long list.
+  let cEnd = 0;    // first completion index past the window
+  let sStart = 0;  // first skip index at or after `begin`
+  let sEnd = 0;    // first skip index past the window
 
-    const windowDays = Math.min(i + 1, den);
-    const activeDays = windowDays - windowSkips;
+  for (let j = 0; j < completions.length; j++) {
+    const begin = completions[j];
+    const limit = addDays(begin, den - 1);
 
-    let ok;
-    if (windowDays < den && !opensAtBirth) {
-      // The window is short because the SLICE opens here, not because the
-      // habit does — the days it reaches back into already happened, so no
-      // leniency: master's own expression, unfloored and unclaused.
-      const required = Math.min(activeDays, (num * activeDays) / den);
-      ok = activeDays <= 0 || windowDone + 1e-9 >= required;
-    } else {
-      // `num * activeDays` before the division, so a whole-number requirement
-      // stays whole: 3 × 7 / 7 is exactly 3, where 3 × (7/7) can float.
-      // Capped at the days available, which is what keeps a "twice a day"
-      // habit — more than the one row a day can hold — from being impossible
-      // to meet.
-      // The requirement is a ratio and the count is not, so it FLOORS. `>=`
-      // against the ratio silently rounded it UP to the next whole day: a
-      // window pro-rated to 2.143 asked for 3, which is 60% of its active
-      // days on a habit set to 43%, so two skip days made a habit HARDER and
-      // the first `den - 1` days of every range demanded a weekly quota
-      // inside three days. Never below 1, or a window holding no completion
-      // at all reads as kept.
-      const required = Math.max(1, Math.floor(Math.min(activeDays, (num * activeDays) / den) + 1e-9));
-      // A window that has not FILLED yet cannot put the habit behind: with
-      // days still to come it can still reach `num`. Gated on a completion
-      // already in hand, so a lone imported lapse cannot manufacture a run
-      // out of silence (#223's shape) — ungated it reports a 4-day streak
-      // from one stored 0.
-      const potential = windowDone + (den - windowDays);
+    if (cEnd < j) cEnd = j;
+    while (cEnd < completions.length && completions[cEnd] <= limit) cEnd++;
+    while (sStart < skipped.length && skipped[sStart] < begin) sStart++;
+    if (sEnd < sStart) sEnd = sStart;
+    while (sEnd < skipped.length && skipped[sEnd] <= limit) sEnd++;
 
-      // A hair of tolerance on both comparisons: `required` is derived from a
-      // division and the count is not.
-      ok = activeDays <= 0 || windowDone + 1e-9 >= required
-        || (windowDone >= 1 && potential + 1e-9 >= Math.min(activeDays, num));
-    }
-
-    out.push({ date: dates[i], ok });
+    const have = cEnd - j;              // completions inside the period
+    const active = den - (sEnd - sStart); // days the period actually asks about
+    // **No `Math.max(1, ...)` here, unlike the trailing window's version of
+    // this expression, and the difference is an invariant rather than a
+    // relaxation.** There `windowDone` could be 0, so a requirement that
+    // pro-rated to 0 would have let a period of pure silence read as kept
+    // (#223's shape) and the floor to 1 was load-bearing. Here `begin` IS a
+    // completion by construction — it is drawn from `completions` — so `have`
+    // is at least 1 and a `required` of 0 and of 1 admit exactly the same
+    // periods. Adding the floor back is harmless and untestable, which is
+    // worse than either: it would read as a guard against something.
+    const required = Math.floor((num * active) / den + 1e-9);
+    if (have >= required) out.push({ begin, end: limit });
   }
   return out;
 }
@@ -3035,31 +3064,19 @@ export function computeCategoryStats(categories, members,
       // `computeScores` above keeps its own, wider, per-member walk
       // (`[memberWarm, end]`), which is not this range and must not share it.
       //
-      // `firstEntry` — the member's own LIFETIME earliest row, already
-      // supplied or derived above — is `onPaceSeries`'s `birth` (#340): this
-      // axis is a comparison window the route was asked for, not the member's
-      // own history, so `dates[0]` opens at the member's birth only when the
-      // comparison's own `start` happens to coincide with it. Deriving one
-      // from `dates` instead would mistake every comparison's own edge for
-      // the member's birth and re-introduce the leniency `onPaceSeries`'s doc
-      // comment describes for a bounded slice.
-      //
-      // **`firstEntry` itself is exactly as phantom-capable as `warmAnchor`
-      // exists to filter, and handing it to `onPaceSeries` raw was review
-      // round 2's second site.** Both editions' `MIN(date)` read reaches this
-      // parameter the same way it reaches `warmAnchor` a few lines up — but
-      // this is a different question from that one: `warmAnchor` is a WARM-UP
-      // start and degrades to `earliestRealDay(entryMap.keys())`, the earliest
-      // real row the fetched SLICE can prove, when `firstEntry` is a phantom.
-      // `birth` asks "is this the member's genuine lifetime start", and a
-      // slice's own earliest real row is not an honest answer to that — it is
-      // exactly the slice-edge `onPaceSeries`'s birth gate exists to tell
-      // apart from a true birth. So a non-real `firstEntry` here degrades to
-      // `undefined`, never to `warmAnchor`'s fallback: "the member's lifetime
-      // first row, or nothing if it is not a real day."
-      const memberBirth = firstEntry !== null && isRealDay(firstEntry) ? firstEntry : undefined;
+      // **No `birth` is threaded here any more (#346), and its absence is
+      // deliberate rather than an oversight.** Until #346 this passed the
+      // member's LIFETIME earliest row as `onPaceSeries`'s `birth`, because a
+      // comparison axis is a window the route was ASKED for and its `dates[0]`
+      // is not the member's own start — so the trailing window's leniency had
+      // to be told to stay shut at that edge. The interval model has no such
+      // leniency and `onPaceSeries` no longer reads `birth` at all, so
+      // computing one here would be a phantom-filtered read of `firstEntry`
+      // feeding a parameter nothing consumes. `warmAnchor` a few lines up is a
+      // DIFFERENT question — a warm-up start for `computeScores`, which still
+      // needs it — and is deliberately left alone.
       rate = computeRecovery(
-        missRunsFrom(onPaceSeries(habit, entryMap, dates, unlogged, memberCredit, memberBirth)),
+        missRunsFrom(onPaceSeries(habit, entryMap, dates, unlogged, memberCredit)),
         end
       ).rate;
     }

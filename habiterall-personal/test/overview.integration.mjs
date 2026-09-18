@@ -472,13 +472,18 @@ ck('...and all three figures agree with the habit\'s own page',
  * completions) with the completions clustered late in each cycle: the shape
  * #340's own fix names as the one that survives even against the unfixed,
  * un-floored ratio only when it is front-loaded, and fails otherwise.
- * `computeStats`, over the WHOLE history, opens at the true 2000-day-back row
- * and reads both figures at 295. Routed through this SAME habit's
- * `/overview` row, each bounded slice's own earliest fetched row is the
- * 300-day-back restart — not the habit's real birth — so a route that forgot
- * to hand over the lifetime `birth` to either pass would apply the leniency
- * there too, over-crediting the slice's own first six days by two and
- * reading 297 instead of 295.
+ * Under the trailing window this read 295 through the whole history and 297
+ * through either bounded slice when the lifetime `birth` was not threaded —
+ * the slice's own edge being mistaken for the habit's start. #346 removes the
+ * leniency that made those two numbers different: coverage is anchored to real
+ * completions, so every path reads 297 and the fixture's job changes from
+ * "prove `birth` is wired" to "prove the three paths cannot diverge".
+ *
+ * The literals below are therefore deliberately NOT the interesting assertion
+ * any more — the third check is, and it compares `/overview` against the
+ * habit's own `/stats` rather than against a number. Both are kept: a literal
+ * that nobody reads drifts, and an agreement check alone would pass if all
+ * three paths moved together to something wrong.
  */
 const birthWiring = await post('/habits', {
   name: 'BirthWiring', type: 'boolean', freq_numerator: 3, freq_denominator: 7,
@@ -505,12 +510,12 @@ const birthWiringRow = withBirthWiring.habits.find((h) => h.id === birthWiring.i
 const birthWiringStats = await fetch(`${base}/api/habits/${birthWiring.id}/stats`)
   .then((r) => r.json());
 
-ck('a bounded 400-day slice does not mistake its own edge for this habit\'s ' +
-  'birth — currentStreak, from summaryStats (#340 review round)',
-  birthWiringRow.currentStreak === 295, String(birthWiringRow.currentStreak));
-ck('...nor does the bounded 1830-day streak scan — bestStreak, from ' +
+ck('a bounded 400-day slice reads this habit the same as its whole history ' +
+  'does — currentStreak, from summaryStats (#340 wiring, #346 model)',
+  birthWiringRow.currentStreak === 297, String(birthWiringRow.currentStreak));
+ck('...and so does the bounded 1830-day streak scan — bestStreak, from ' +
   'recomputeBestStreak',
-  birthWiringRow.bestStreak === 295, String(birthWiringRow.bestStreak));
+  birthWiringRow.bestStreak === 297, String(birthWiringRow.bestStreak));
 ck('...and /overview agrees with the habit\'s own page, which reads the ' +
   'whole history and so always opens at the genuine birth',
   birthWiringRow.currentStreak === birthWiringStats.currentStreak

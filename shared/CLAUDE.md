@@ -365,43 +365,50 @@ reads as a leaderboard and hides whether the good runs were recent. Note the
 bar scale must come from `Math.max(...top)`, not `top[0]` — that stopped being
 the longest row the moment the ordering changed.
 
-**A streak and a lapse are made of "on pace", not "done today".** `onPaceSeries`
-asks whether the trailing `denominator`-day window holds enough completions,
-pro-rated by any skips inside it — the same window and the same pro-rating
-`computeScores` uses, so strength and streaks cannot disagree about whether a
-habit is being kept. For `num >= den` the window is one day and the
-requirement clamps to it, so this reduces exactly to `isCompleted` and daily
-habits behave as they always have; that degeneration is what makes the change
-safe, and `test/resilience.test.js` pins it.
+**A streak and a lapse are made of "on pace", not "done today" — and since #346
+"on pace" is INTERVAL COVERAGE, not a trailing window.** `onPaceSeries` earns a
+`den`-day block for every group of completions that fills one period, running
+FORWARD from the oldest of them, so the days between check-offs are held by the
+block rather than drawn as holes. A period holding skips demands
+`floor(num × active / den)` completions instead of `num` — the trailing window's
+own pro-rating, kept. For `num >= den` this short-circuits to `isCompleted` and
+daily habits behave as they always have; that degeneration is what makes the
+change safe, and `test/resilience.test.js` pins it.
 
-This did disagree once: `onPaceSeries` compared an integer count against a
-raw fractional requirement with `>=`, which rounds the demand UP to the next
-whole day for every window short of a full one, while `computeScores` stayed
-continuous and never rounded at all. On a 3×/7 habit with two skip days inside
-the window, the streak called three days a lapse while the score kept
-climbing across them — measured, not hypothetical: 0.466383 on the last day
-both agreed on, then rising through 0.507831, 0.522427 and 0.550135 on the
-three days they disagreed about. `docs/decisions/on-pace-and-frequency.md`
-(#340) closes it by flooring the requirement instead of rounding it up. **The
-FLOOR is not birth-gated and the UNFILLED-WINDOW leniency is** — say it that
-way round, because the paragraph above is itself a full-window case and an
-earlier draft of this sentence gated both. A window that has FILLED
-(`windowDays === den`) is floored wherever it is read from, which is what fixes
-the two skip days above; skips pull `activeDays` below `den`, so the floor is
-no no-op there. Only a still-PARTIAL window is gated, and it is gated because a
-bounded caller's range often opens somewhere the habit was already alive and
-the days before THAT edge already happened — a review round found the dashboard
-and the detail view disagreeing about one habit's streak for exactly this
-reason (`docs/decisions/on-pace-and-frequency.md`, review rounds 1 and 3).
+**Streak and score now answer DIFFERENT questions, deliberately.** The streak is
+continuity; the score (`scoresOver`, untouched) is a trailing-window rate. That
+retires the invariant `docs/decisions/must-stay-fixed.md` item 2 used to state,
+and it follows Loop, whose `ScoreList` counts `YES_MANUAL` only and so never
+sees the auto-filled days its own streaks are made of. Do not "fix" one to agree
+with the other — `stats.test.js`'s `#223 / #346` case exists to stop that.
+
+**Coverage is WINDOW-INDEPENDENT, and that is the property to protect.** A block
+is anchored to a real completion, so `computeStats` over a full history and
+`summaryStats` over a 400-day slice cannot disagree about a day. Loop's
+`snapIntervalsTogether` is deliberately not ported because it breaks exactly
+this — ported verbatim it read 302 against 301 on #340's own fixture. Anything
+that makes coverage depend on where the caller opened its range, or on `birth`,
+reintroduces the bug #340 exists to close. The one real bound: a bounded slice
+cannot see completions before its opening, so its first `den - 1` days are
+under-covered, which is why `summaryStats` floors its `runs` window (#247).
+
+The trailing window's own rules — the rounding fix, the floor, the birth gate —
+are HISTORY as of #346 and live in `docs/decisions/on-pace-and-frequency.md`
+under their own heading. Read them before re-deriving any of this: the fixtures
+they measured are the fixtures the interval model is still held to, and three of
+them (the five 3×/7 schedules, the two degeneration cases, the skip inversion)
+are why the change is known to be conservative rather than believed to be.
 
 Consequences worth knowing. A streak counts CALENDAR days, so a 3×/week habit
 kept for a month is a 30-day streak rather than a 12-day one — that is what
 "I have kept this up for a month" means, and it keeps the number comparable
-with a daily habit's. The window is rolling, not calendar-aligned: three
-sessions crammed into Mon–Wed satisfy every day that week and then fall short
-the following Monday, because by then the trailing seven days hold only two.
-And this is a computation change only — nothing about storage, the schema or
-the Loop export moved.
+with a daily habit's. **Streaks are RETROACTIVE**: a block opens at the oldest
+completion of the group that earned it, so logging a day can extend a run
+backwards, and a habit younger than its own period reads as lapsing until it has
+earned its first block (which then corrects those days backwards). Both are
+consequences of the model rather than bugs in it, and both are recorded in the
+archive with the alternatives that were rejected. And this is a computation
+change only — nothing about storage, the schema or the Loop export moved.
 
 **Resilience applies at any frequency.** It used to return
 `{applicable: false}` for non-daily habits, because a miss meant "a day it was

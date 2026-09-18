@@ -298,12 +298,34 @@ test('resilience now applies to a non-daily habit', () => {
   assert.ok(resilience.survival.length > 0, 'streaks reach the survival curve');
 });
 
-test('a short history is judged against what there is, not a full week', () => {
-  // Three days in, a 3x/week habit cannot have done three sessions yet. The
-  // requirement is pro-rated by the window actually available, so a habit is
-  // not born already failing.
-  const { missRuns } = run(GYM, 'x.x');
-  assert.deepEqual(missRuns, [], 'no lapse in the first three days');
+test('a habit younger than its own period has not earned a block yet, and ' +
+     'that reads as a lapse until it does (#346)', () => {
+  // Three days in with two sessions, a 3x/week habit has not yet completed a
+  // period. The trailing window pro-rated the requirement down so this read as
+  // no lapse at all — "not born already failing". The interval model has no
+  // requirement to pro-rate against a SHORT period, only against a skipped one:
+  // a block is earned by completions or it is not earned.
+  //
+  // Accepted rather than patched, because the state is transient and corrects
+  // ITSELF backwards — the moment the third session lands, its block opens at
+  // the first completion and covers the whole week, lapse included. The two
+  // assertions below are one claim in two halves, and the second is the one
+  // that makes the first tolerable; delete it and this reads as a plain
+  // regression.
+  //
+  // The rejected alternative is recorded because it is the obvious one: a
+  // birth leniency has to be anchored to the first completion IN THE WALK,
+  // which differs between a full history and a bounded slice, and that is
+  // exactly how #346 briefly reintroduced #340's two-surfaces-disagree bug.
+  assert.deepEqual(run(GYM, 'x.x').missRuns.map((m) => m.length), [3],
+    'unearned, so far');
+
+  const settled = run(GYM, 'x.x.x');
+  assert.deepEqual(settled.missRuns, [],
+    'the third session retroactively covers the days before it — the lapse ' +
+    'above is not a scar, it is a habit that had not finished a period yet');
+  assert.equal(settled.streaks[0].start, '2026-01-01',
+    'and the run opens at the FIRST completion, not the third');
 });
 
 test('a skipped day pro-rates the requirement rather than counting against it', () => {

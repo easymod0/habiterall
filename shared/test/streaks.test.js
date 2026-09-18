@@ -300,17 +300,26 @@ test('a 3x/7 habit done only 2 times a week has no current streak', () => {
     if ([1, 3].includes(dow)) entries.set(d, YES); // Mon+Wed only, under target
   }
   const streaks = computeStreaks(habit, entries, start, end);
-  // `currentStreak` alone is 0 under both the fix and the unfixed code —
-  // measured, the unfixed code produces ZERO runs at all from this fixture
-  // (`[]`), because the un-floored, un-clamped ratio never falls low enough
-  // for two days a week to clear it even once. It is the STRUCTURE that
-  // differs: fixed, every trailing window this schedule can ever fill floors
-  // to a requirement of 1, which the first Monday alone already meets, so the
-  // two on-days a week accumulate into a single one-day streak instead of
-  // none at all.
-  assert.deepEqual(streaks,
-    [{ start: '2026-01-05', end: '2026-01-05', length: 1, skips: 0 }]);
+  // NOTHING, and the emptiness is the assertion (#346). Two completions a week
+  // can never fill a group of three inside seven days — Mon, Wed and the NEXT
+  // Mon span exactly 7, which `buildIntervals` rejects — so this schedule earns
+  // no block anywhere and every day of it is a lapse.
+  //
+  // The two ways this could wrongly pass are both live options that were
+  // measured and declined, so assert the whole array rather than
+  // `currentStreak` alone:
+  //   - Crediting a completion that earned no block (Loop's own rule, where any
+  //     value > 0 is a streak day) gives SIXTEEN one-day runs here, and turns
+  //     one 60-day failure into seventeen lapses of at most four days.
+  //   - The trailing-window model this replaced gave exactly one one-day run,
+  //     an artifact of its leniency at the range's opening edge.
+  assert.deepEqual(streaks, []);
   assert.equal(currentStreak(streaks, end), 0);
+  assert.equal(bestStreak(streaks), 0);
+  // The lapse this habit really is: one run of it, not a scatter of short ones.
+  const misses = computeMissRuns(habit, entries, start, end);
+  assert.equal(misses.length, 1);
+  assert.equal(misses[0].length, 60);
 });
 
 test('daily and twice-a-day habits split at a miss exactly as before (num >= den degenerates)', () => {
@@ -341,12 +350,19 @@ test('daily and twice-a-day habits split at a miss exactly as before (num >= den
 
 // A 3x/7 habit with one row 900 days before `end`, then silence, then a
 // restart 300 days before `end` kept perfectly at Mon/Wed/Fri ever since.
-// `computeStats` (no `start`) opens at the habit's own lifetime first row —
-// its genuine birth — so it always agreed. `summaryStats` over a bounded
-// 400-day slice opens at the RESTART instead, which is not a birth: the days
-// before it already happened, they are simply outside the slice the caller
-// fetched. Without the gate the restart's own first six days were pro-rated
-// as if the habit had no history there, adding five days nothing earned.
+// `computeStats` (no `start`) opens at the habit's own lifetime first row; the
+// dashboard's `summaryStats` opens at the RESTART, 300 days back, because that
+// is the earliest row inside the 400-day slice it fetched.
+//
+// #340 held these together with a birth GATE: the slice edge had to be told
+// from a real birth so the trailing window's leniency could be withheld at one
+// and not the other. #346 removes the need for the gate rather than tuning it —
+// an interval model anchored to real completions makes coverage a pure function
+// of the completions inside the walk, so the two surfaces agree by construction
+// however the range was opened. The figure moved from 296 to 301 with the
+// model; the PROPERTY this test exists for is the agreement, and asserting it
+// three ways is what keeps a future change from restoring the disagreement
+// while all three numbers drift together.
 test('#340 review: a bounded slice must not mistake its own edge for the ' +
      'habit\'s birth — computeStats and summaryStats must agree', () => {
   const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
@@ -362,7 +378,7 @@ test('#340 review: a bounded slice must not mistake its own edge for the ' +
 
   // The detail view: the whole history, no `start`, opens at `trueBirth`.
   const detail = computeStats(habit, entries, { end });
-  assert.equal(detail.currentStreak, 296);
+  assert.equal(detail.currentStreak, 301);
 
   // The dashboard: a bounded 400-day slice, so the earliest row IN the slice
   // is the restart — 300 days back, well inside the fetched 400. `birth` is
@@ -372,8 +388,17 @@ test('#340 review: a bounded slice must not mistake its own edge for the ' +
   const cutoff = addDays(end, -400);
   const windowed = entries.filter((e) => e.date >= cutoff);
   const dashboard = summaryStats(habit, windowed, { end, birth: trueBirth });
-  assert.equal(dashboard.currentStreak, 296,
+  assert.equal(dashboard.currentStreak, 301,
     'the dashboard must agree with the detail view about this habit (#340)');
+
+  // And the third call path, which is the one that actually bites: WITHHOLDING
+  // `birth` must not move the answer either. Porting Loop's
+  // `snapIntervalsTogether` verbatim failed exactly here — the slide depends on
+  // which other blocks are in the list and a bounded caller has fewer, so this
+  // read 302 / 301 / 301 across the three (`#346`).
+  assert.equal(summaryStats(habit, windowed, { end }).currentStreak, 301,
+    'coverage must be a pure function of the completions in the walk — a ' +
+    'caller that supplies no birth may not get a different habit');
 });
 
 // The contract test: `summaryStats` with `birth` WITHHELD. This is the same
@@ -402,16 +427,21 @@ test('#340 review: summaryStats withholding birth is a stated contract, not a bu
     'exactly as creditFrom already documents — this is the pre-#340 number');
 });
 
-// ...and the other half of that contract, which the sentence above only names:
-// an explicit `null` is NOT a withheld one. `summaryStats` folded the two with
-// `??` for two review rounds — the exact collapse its own JSDoc, and
-// `onPaceSeries`'s, warn against — so a caller that obeyed the documented
-// contract got the lenient branch it was explicitly declining. Unreachable
-// through either route today (a `null` there means the habit has no rows at
-// all, and then the slice is empty and the derived birth is independently
-// `null`), which is why only a test at this boundary can hold it.
-test('#340: summaryStats treats an explicit birth of null as a stated answer, ' +
-     'never as an absent one', () => {
+// #340 needed `birth` to carry THREE distinguishable answers into the streak —
+// absent, an explicit `null` meaning "`MIN(date)` returned no row", and a real
+// date — because each landed on a different branch of the trailing window's
+// leniency, and folding absent into `null` with `??` handed back the leniency a
+// caller had explicitly declined. #346 removes that machinery: `onPaceSeries`
+// no longer reads `birth` at all, so the three must now be INDISTINGUISHABLE in
+// `currentStreak`. That is the same window-independence the agreement test
+// above pins, reached from the other side — there by varying the WINDOW with
+// `birth` fixed, here by varying `birth` with the window fixed.
+//
+// `birth` is still live, and this test must not be read as saying otherwise:
+// `summaryStats` reads it for the `runs` floor (#247), which is why the
+// parameter stays in the chain and why both routes still fetch it.
+test('#346: birth no longer moves the streak — absent, null and a real date ' +
+     'are one answer', () => {
   const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
   const start = '2026-01-05', end = '2026-04-05'; // Monday .. Sunday, 91 days
   const entries = [];
@@ -420,15 +450,19 @@ test('#340: summaryStats treats an explicit birth of null as a stated answer, ' 
     if (dow === 6 || dow === 0 || dow === 1) entries.push({ date: d, value: YES });
   }
 
-  // Absent: "no override — treat the range as opening at the habit's birth."
+  // The literal, not a constant: Sat+Sun+Mon kept perfectly for the whole 91.
+  // Under the trailing window this fixture answered 91 / 85 / 85 across the
+  // three, which is what made `??` a live defect; it is now 91 three times.
   assert.equal(summaryStats(habit, entries, { end }).currentStreak, 91);
-  // Explicit null: "`MIN(date)` returned no row at all" — a stated answer, so
-  // the strict branch, exactly as a real date that differs from `dates[0]`.
-  assert.equal(summaryStats(habit, entries, { end, birth: null }).currentStreak, 85,
-    'an explicit null must not fall back to the derived birth — `??` here ' +
-    'hands back the leniency the caller just declined');
-  assert.equal(summaryStats(habit, entries, { end, birth: '2025-01-01' }).currentStreak, 85,
-    'and it must land on the same branch a real, non-matching birth does');
+  assert.equal(summaryStats(habit, entries, { end, birth: null }).currentStreak, 91,
+    'an explicit null is no longer a different question from an absent one');
+  assert.equal(summaryStats(habit, entries, { end, birth: '2025-01-01' }).currentStreak, 91,
+    'nor is a real date earlier than the range');
+  // The one that would catch `birth` creeping back in as an interval floor: a
+  // birth LATER than the first completion would clip the opening block.
+  assert.equal(summaryStats(habit, entries, { end, birth: '2026-02-01' }).currentStreak, 91,
+    'a birth inside the range must not clip coverage either — that is the ' +
+    'caller-dependence #346 removed');
 });
 
 // The other half: a habit whose range genuinely DOES open at its own birth
@@ -482,60 +516,60 @@ test('#340 review 3: the floor applies at a FULL window off-birth too, so the ' 
   entries.set('2026-01-21', SKIP);
   entries.set('2026-01-22', SKIP);
 
-  const offBirth = '2025-01-01'; // a year before `start`: the gate is shut
+  const offBirth = '2025-01-01'; // a year before `start`
   const streaks = computeStreaks(
     habit, entries, start, end, UNLOGGED_DEFAULT, undefined, offBirth);
 
-  // Not the 31-day single run the birth-opening case gives (the leniency at
-  // the slice edge is correctly withheld), and NOT master's 1 / 14 / 5 either:
-  // the two skips sit inside a window that has long since filled, so the floor
-  // bridges them here exactly as it does at a birth.
+  // ONE run, and the skips are inside it. #340 reached this only at a habit's
+  // genuine birth and left `1 + 26` at a slice edge; #346 has no slice-edge
+  // branch to get wrong, so the skip inversion is closed in one answer rather
+  // than in two that have to be kept in step.
   assert.deepEqual(streaks, [
-    { start: '2026-01-02', end: '2026-01-02', length: 1, skips: 0 },
-    { start: '2026-01-07', end: '2026-02-01', length: 26, skips: 2 },
-  ], 'the skip inversion is fixed everywhere, not only at a habit\'s birth — ' +
-     'master gives 1 / 14 / 5 here');
+    { start: '2026-01-02', end: '2026-02-01', length: 31, skips: 2 },
+  ], 'one unbroken run — the trailing window gave 1 / 26 here and master 1 / 14 / 5');
 
-  // The days the skips made master call a lapse are inside the long run, with
-  // the gate shut. This is the assertion that fails if anyone re-narrows the
-  // floor to births, or "simplifies" the branch condition to `!opensAtBirth`.
-  const [, run] = streaks;
+  // The days the two skips once manufactured a lapse out of.
+  const [run] = streaks;
   for (const d of ['2026-01-23', '2026-01-24', '2026-01-26']) {
     assert.ok(d >= run.start && d <= run.end,
-      `${d} must sit inside the off-birth run, not be split out of it`);
+      `${d} must sit inside the run, not be split out of it`);
   }
 
-  // The miss-run half of the same claim, through the sibling wrapper: master
-  // reports THREE lapses over this fixture and this reports two, so `lastMiss`
-  // — which both editions' `/overview` sorts by — moves off-birth as well.
-  // The one that goes is `2026-01-23`..`2026-01-27`, the lapse the two skips
-  // manufactured. `computeMissRuns` takes `birth` for exactly this reason.
+  // The property that replaces the gate: the SAME fixture read with no birth at
+  // all must give the same answer, run for run. This is what fails if `birth`
+  // is ever wired back into coverage — and it is a stronger check than the
+  // literal above, which a caller-dependent floor could satisfy on one branch.
+  assert.deepEqual(
+    computeStreaks(habit, entries, start, end, UNLOGGED_DEFAULT, undefined, undefined),
+    streaks,
+    'birth may not move the streak (#346)');
+
+  // The miss-run half, through the sibling wrapper: the skip-bridged lapse of
+  // 2026-01-23..27 is gone, and so is the 2026-01-03..06 opening lapse the
+  // slice-edge branch used to produce. Only the single unearned day before the
+  // first completion remains.
   const missRuns = computeMissRuns(
     habit, entries, start, end, UNLOGGED_DEFAULT, undefined, offBirth);
   assert.deepEqual(missRuns.map((r) => ({ start: r.start, end: r.end })), [
     { start: '2026-01-01', end: '2026-01-01' },
-    { start: '2026-01-03', end: '2026-01-06' },
-  ], 'two miss runs off-birth where master has three — the skip-bridged lapse ' +
-     'of 2026-01-23..27 is gone, with no birth anywhere near it');
+  ], 'one lapse: the day before the habit had completed anything at all');
 });
 
-// And the property that IS true, stated as its own case so the corrected
-// sentence has something behind it: at a SLICE EDGE — a day whose window has
-// not filled — a shut gate reproduces master's plain unfloored ratio exactly.
+// The same comparison, inverted by #346. Under the trailing window these two
+// readings of one fixture had to DIFFER — that difference was the birth gate's
+// whole job, and this case existed to prove the gate was wired up. Under the
+// interval model they must be IDENTICAL, because coverage is a function of the
+// completions in the walk and of nothing else.
 //
-// This needs the Sat+Sun+Mon layout rather than Mon/Wed/Fri, and that choice
-// is the same one the fix's own tests document: Mon/Wed/Fri meets the
-// rounded-up requirement at every step because it is FRONT-LOADED, so it
-// cannot tell the two treatments apart at a slice edge at all. Kept Sat+Sun+Mon
-// from a range opening on a Monday, the next two completions do not arrive
-// until days 6 and 7, so the unfloored ratio calls day 3 a lapse (it demands
-// `3 × 3 / 7 = 1.29`, which an integer count of 1 cannot clear) where the
-// floored one demands 1 and is satisfied.
-//
-// The two literals below are master's own output over this fixture, measured
-// against `origin/master`, so this asserts "unchanged" against the real thing
-// rather than against a second copy of the branch's reasoning.
-test('#340 review 3: at a SLICE EDGE a shut gate really does reproduce master', () => {
+// The Sat+Sun+Mon layout is kept rather than Mon/Wed/Fri, and for the reason
+// the old comment gave: Mon/Wed/Fri is FRONT-LOADED and met the old rounded-up
+// requirement at every step, so it could not tell two treatments apart at a
+// range's opening edge at all. Sat+Sun+Mon from a range opening on a Monday
+// back-loads its first period — the next two completions do not land until days
+// 6 and 7 — so it is the layout with something to lose here. It reading 91
+// through both paths is therefore a real result and not a fixture that could
+// not have failed.
+test('#346: a slice edge and a birth are the same answer — the gate is gone', () => {
   const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
   const start = '2026-01-05', end = '2026-04-05'; // Monday .. Sunday, 91 days
   const entries = new Map();
@@ -546,22 +580,15 @@ test('#340 review 3: at a SLICE EDGE a shut gate really does reproduce master', 
 
   const offBirth = computeStreaks(
     habit, entries, start, end, UNLOGGED_DEFAULT, undefined, '2025-01-01');
-  assert.deepEqual(offBirth, [
-    { start: '2026-01-05', end: '2026-01-06', length: 2, skips: 0 },
-    { start: '2026-01-11', end: '2026-04-05', length: 85, skips: 0 },
-  ], 'master\'s own answer over this fixture, byte for byte — a slice edge ' +
-     'gets no leniency, so the opening days stay split exactly as they were');
-
-  // The same fixture opening at the habit's own birth is the fix's headline
-  // case (91 days, one run — the test near the top of this block). Asserted
-  // here beside its off-birth twin so the gate's whole job is one comparison:
-  // these two must NOT be equal, or the gate is doing nothing.
   const atBirth = computeStreaks(
     habit, entries, start, end, UNLOGGED_DEFAULT, undefined, start);
+
+  // The literal, written out: 91 days unbroken, which is what perfect
+  // adherence over this range is. The trailing window gave 2 + 85 off-birth.
   assert.deepEqual(atBirth, [{ start, end, length: 91, skips: 0 }]);
-  assert.notDeepEqual(offBirth, atBirth,
-    'a slice edge is not a birth — withholding the leniency here is the ' +
-    'whole difference the gate exists to make');
+  assert.deepEqual(offBirth, atBirth,
+    'a slice edge is not a different habit — an interval anchored to a real ' +
+    'completion cannot know which day the caller opened its range on');
 });
 
 /* ---------- #247: summaryStats' opt-in `runs`, clipped and true-length ---------- */
@@ -681,4 +708,131 @@ test('#247 case 5: a window INSIDE a run is clipped at both ends, and the ' +
     'still the whole run — 11 days of it are visible and 40 is what a client '
     + 'gates on, so an 11 here is a run that would survive MIN_STREAK anyway '
     + 'and tells you nothing; the mutation to watch is case 1\'s');
+});
+
+/* ---------- #346: the interval model itself ---------- */
+
+// A block is earned by `num` completions landing inside `den` days, and it runs
+// FORWARD from the oldest of them — so the days between check-offs are held by
+// the block rather than being drawn as holes. These cases pin the construction
+// directly, because everything above reads it only through a streak.
+
+test('#346: completions inside one period earn a block that covers the gap ' +
+     'days between them', () => {
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  // Mon, Wed, Fri of one week: three completions spanning 4 days, inside 7.
+  const entries = new Map([
+    ['2026-01-05', YES], ['2026-01-07', YES], ['2026-01-09', YES],
+  ]);
+  const streaks = computeStreaks(habit, entries, '2026-01-05', '2026-01-11');
+  // The whole period, not the three check-off days: 2026-01-06, -08, -10 and
+  // -11 are unlogged and inside the block the three completions bought.
+  assert.deepEqual(streaks,
+    [{ start: '2026-01-05', end: '2026-01-11', length: 7, skips: 0 }]);
+});
+
+test('#346: completions spread WIDER than the period earn nothing', () => {
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  // The same three completions, one day further apart each: Mon, Thu, Sun is a
+  // span of 7, which is one day too wide to be a single period.
+  const entries = new Map([
+    ['2026-01-05', YES], ['2026-01-08', YES], ['2026-01-12', YES],
+  ]);
+  assert.deepEqual(computeStreaks(habit, entries, '2026-01-05', '2026-01-12'), [],
+    'a span of exactly `den` is a lapse — the `< den` test is not `<= den`, ' +
+    'and widening it makes the previous case indistinguishable from this one');
+});
+
+// The reported fixture, written out as dates rather than derived, so the case
+// that motivated #346 is readable against the screenshot it came from. A 4x/7
+// habit logged Aug 25, 26, 27, 29, Sep 1, 5, 6, 9, 10, 14, 15, 16.
+test('#346: the reported 4x/7 habit reads as two runs, not five fragments', () => {
+  const habit = { ...boolHabit, freq_numerator: 4, freq_denominator: 7 };
+  const entries = new Map();
+  for (const d of ['2026-08-25', '2026-08-26', '2026-08-27', '2026-08-29',
+                   '2026-09-01', '2026-09-05', '2026-09-06', '2026-09-09',
+                   '2026-09-10', '2026-09-14', '2026-09-15', '2026-09-16']) {
+    entries.set(d, YES);
+  }
+  const streaks = computeStreaks(habit, entries, '2026-08-25', '2026-09-18');
+
+  // The trailing window gave three fragments over this stretch — 08-29..09-01
+  // (4), 09-10..09-11 (2) and 09-15..09-16 (2) — with 09-07, 09-08, 09-12 and
+  // 09-13 drawn as holes inside days the habit was being kept at its own rate.
+  assert.deepEqual(streaks, [
+    { start: '2026-08-25', end: '2026-09-01', length: 8, skips: 0 },
+    { start: '2026-09-05', end: '2026-09-16', length: 12, skips: 0 },
+  ]);
+
+  // The days the user reported as wrongly blank, named one by one so a
+  // regression says WHICH day came back rather than only that a length moved.
+  const held = new Set();
+  for (const s of streaks) {
+    for (let d = s.start; d <= s.end; d = addDays(d, 1)) held.add(d);
+  }
+  for (const d of ['2026-09-07', '2026-09-08', '2026-09-11',
+                   '2026-09-12', '2026-09-13']) {
+    assert.ok(held.has(d), `${d} is inside a kept period and must be held`);
+  }
+  // And the genuine gap between the two runs stays a gap: 09-02..09-04 has no
+  // period that reaches it, so this is not "cover everything".
+  for (const d of ['2026-09-02', '2026-09-03', '2026-09-04']) {
+    assert.ok(!held.has(d), `${d} earned no block and must stay a lapse`);
+  }
+});
+
+test('#346: a skipped day lowers what its period demands, and an unlogged ' +
+     'one does not', () => {
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const start = '2026-01-01', end = '2026-01-07';
+
+  // Two completions and three skips: the period asks about four active days,
+  // so it demands floor(3 x 4 / 7) = 1, which two completions clear.
+  const skipped = new Map([
+    ['2026-01-01', YES], ['2026-01-03', YES],
+    ['2026-01-04', SKIP], ['2026-01-05', SKIP], ['2026-01-06', SKIP],
+  ]);
+  assert.deepEqual(computeStreaks(habit, skipped, start, end),
+    [{ start, end, length: 7, skips: 3 }]);
+
+  // The same two completions with those three days merely unlogged: seven
+  // active days demand three, and two is short. Collapsing the skip count into
+  // the requirement makes these two fixtures agree, which is the mutation.
+  const unlogged = new Map([['2026-01-01', YES], ['2026-01-03', YES]]);
+  assert.deepEqual(computeStreaks(habit, unlogged, start, end), []);
+});
+
+test('#346: coverage does not depend on where the caller opened its range', () => {
+  const habit = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const end = '2026-04-05';
+  const entries = new Map();
+  for (const d of dateRange('2026-01-05', end)) {
+    const dow = new Date(d + 'T12:00:00').getDay();
+    if ([6, 0, 1].includes(dow)) entries.set(d, YES); // Sat+Sun+Mon, back-loaded
+  }
+
+  const holds = (from, day) => computeStreaks(habit, entries, from, end)
+    .some((s) => s.start <= day && day <= s.end);
+
+  // The same habit read from three different opening days, all of them more
+  // than `den` days before the day being probed. Every one must agree — this is
+  // the property Loop's `snapIntervalsTogether` broke when it was ported
+  // verbatim, and it broke it by ONE day, which no length assertion at a single
+  // opening would have caught.
+  assert.deepEqual(
+    ['2026-01-05', '2026-02-01', '2026-03-01'].map((from) => holds(from, '2026-03-20')),
+    [true, true, true],
+    'a day inside a kept run is inside it however the range was opened');
+
+  // And the boundary that is REAL, asserted rather than left to look like the
+  // same thing failing: a range opening ON the day cannot see the completions
+  // whose block would cover it, so the first `den - 1` days of any bounded
+  // slice are under-covered. That is why `summaryStats` floors its `runs`
+  // window at `from + (den - 1)` (#247) instead of trusting this.
+  assert.equal(holds('2026-03-20', '2026-03-20'), false,
+    'the slice-edge shortfall is a known bound, not window-dependence — ' +
+    'widening this assertion to `true` would be claiming the model sees ' +
+    'rows the caller never fetched');
+  assert.equal(holds('2026-03-13', '2026-03-20'), true,
+    'and it is exactly `den - 1` wide: seven days of lead-in is enough');
 });

@@ -829,11 +829,15 @@ const cloudBirthWiringRow = cloudBirthWiringView.habits.find((h) => h.id === bir
 const cloudBirthWiringStats = await fetch(`${overviewBase}/api/habits/${birthWiringHabit.id}/stats`)
   .then((r) => r.json());
 
-ck('a bounded 400-day slice does not mistake its own edge for this habit\'s ' +
-  'birth — currentStreak, from summaryStats',
-  cloudBirthWiringRow.currentStreak === 295, String(cloudBirthWiringRow.currentStreak));
-ck('...nor does the bounded 1830-day streak scan — bestStreak, from recomputeBestStreak',
-  cloudBirthWiringRow.bestStreak === 295, String(cloudBirthWiringRow.bestStreak));
+// 295 under the trailing window, 297 under #346's interval model: the figures
+// moved with the model, and the agreement check below is the assertion that
+// matters — it compares /overview against this habit's own /stats rather than
+// against a literal. Both kept; see the personal edition's twin for why.
+ck('a bounded 400-day slice reads this habit the same as its whole history ' +
+  'does — currentStreak, from summaryStats',
+  cloudBirthWiringRow.currentStreak === 297, String(cloudBirthWiringRow.currentStreak));
+ck('...and so does the bounded 1830-day streak scan — bestStreak, from recomputeBestStreak',
+  cloudBirthWiringRow.bestStreak === 297, String(cloudBirthWiringRow.bestStreak));
 ck('...and /overview agrees with the habit\'s own page, which reads the ' +
   'whole history and so always opens at the genuine birth',
   cloudBirthWiringRow.currentStreak === cloudBirthWiringStats.currentStreak

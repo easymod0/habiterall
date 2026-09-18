@@ -2637,23 +2637,25 @@ test('a member that has never missed is excluded from recoveryRate, and counted'
   assert.equal(result.categories[1].recoveryExcluded, 1);
 });
 
-test('#340: a member\'s recovery axis gets the member\'s LIFETIME birth, so a ' +
-     'comparison window\'s own edge is not mistaken for it', () => {
-  // The third `birth` call site (`computeCategoryStats`'s `memberBirth`), and
-  // the one #340's own review rounds left unpinned: both routes' mutation
-  // checks covered `summaryStats` and `recomputeBestStreak`, and dropping this
-  // wiring outright — `const memberBirth = undefined` — left all 1224 shared
-  // tests passing. A later edit could have deleted it in silence.
+test('#346: a comparison axis reads the same habit its own page does, with no ' +
+     'birth threaded to make it so', () => {
+  // This case used to pin the third `birth` call site
+  // (`computeCategoryStats`'s `memberBirth`), which existed because a
+  // comparison axis is a window the route was ASKED for: its `dates[0]` is
+  // `start` and has nothing to do with when the member began, so the trailing
+  // window's leniency had to be told to stay shut there.
   //
-  // `dates` here is the COMPARISON axis, a window this route was ASKED for, so
-  // `dates[0]` is `start` and has nothing to do with when the member began.
-  // Without the lifetime `birth` the leniency fires at that edge as if the
-  // member were newborn there, which is round 1's defect on a third surface.
+  // #346 deleted that wiring, and this now pins the property that made it
+  // deletable rather than the wiring itself — a test that pins dead wiring is
+  // the "guard that cannot fail" shape the root CLAUDE.md warns about. The
+  // member's coverage is a function of its own completions, so a comparison
+  // window cannot produce a lapse the member's own page does not have.
   //
   // The member is 3x/7, alive since a year before the window, and kept
   // LATE-CLUSTERED in each 7-day cycle — never Mon/Wed/Fri, the one layout that
-  // clears the unfloored ratio at every step and so cannot tell the two
-  // treatments apart (the same blindness `streaks.test.js` names).
+  // clears an unfloored ratio at every step and so cannot tell two treatments
+  // apart (the same blindness `streaks.test.js` names). Keeping that fixture
+  // matters: a front-loaded one would read identically under either model.
   const lifetime = '2025-06-01';
   const clustered = { ...boolHabit, id: 17, name: 'Row', category_id: 1,
     freq_numerator: 3, freq_denominator: 7 };
@@ -2666,20 +2668,26 @@ test('#340: a member\'s recovery axis gets the member\'s LIFETIME birth, so a ' 
   const health = computeCategoryStats(CATS,
     [{ habit: clustered, entries, firstEntry: lifetime }], CAT_WINDOW).categories[0];
 
-  // Measured both ways. WIRED: the window's opening days are judged by the
-  // plain unfloored ratio — a slice edge, not a birth — so the member carries
-  // a closed lapse there and is IN the rate, at 0 (it never recovered inside
-  // the window). UNWIRED: the leniency bridges that edge, the lapse never
-  // forms, and the member is excluded as "has never missed" — `null` beside a
-  // `recoveryExcluded` of 1. Those are two different sentences on the
-  // categories comparison, not two roundings of one number, which is why this
-  // is worth a case of its own.
-  assert.equal(health.recoveryRate, 0,
-    'the member is IN the rate: its lapse at the window edge is real, because ' +
-    'the days the trailing window reaches back into genuinely happened');
-  assert.equal(health.recoveryExcluded, 0,
-    'dropping memberBirth excludes this member as never-missed (null / 1) — ' +
-    'the #340 leniency firing at a comparison edge that is not a birth');
+  // The member keeps 3 completions in every 7-day cycle, so every block it
+  // earns abuts the next and its coverage is unbroken — it has no lapse, and
+  // is therefore EXCLUDED from the recovery rate as "has never missed" rather
+  // than carried in it at 0. Under the trailing window it read 0 / 0: the
+  // comparison window's own opening edge manufactured a lapse the member's own
+  // page did not have, which is the disagreement `birth` was threaded to
+  // prevent and which is now prevented by construction.
+  assert.equal(health.recoveryRate, null,
+    'no lapse, so no rate — a clustered-but-kept member must not acquire one ' +
+    'from the edge of a window it was merely compared inside');
+  assert.equal(health.recoveryExcluded, 1);
+
+  // The claim that makes the two numbers above mean something: the member's
+  // OWN page, over its own full history, must say the same. If a comparison
+  // axis could still differ from this, the property is not window-independence.
+  const own = computeMissRuns(clustered,
+    new Map(entries.map((e) => [e.date, { value: e.value, status: e.status }])),
+    lifetime, CAT_END);
+  assert.deepEqual(own.filter((r) => r.start >= '2026-04-01'), [],
+    'and its own page agrees — no lapse inside the compared range either');
 });
 
 test('a category of one is its own best and worst member', () => {
@@ -3449,24 +3457,41 @@ test('issue #223: at-least and at-most-`miss` habits do not move at all', () => 
   }
 });
 
-test('issue #223: a NON-daily at-most habit lands lower than an empty one, and why', () => {
-  // Stated rather than smoothed over. For a DAILY habit the skip-only reading
-  // becomes identical to the no-rows reading, which is the issue's own table.
-  // For a 3×/7 habit it does not: the window legitimately still reaches back a
-  // year, so the trailing seven days ask for three completions and the one
-  // credited day cannot meet it — where a habit with NO rows is read over a
-  // one-day window whose requirement pro-rates down to 3/7. Both figures
-  // measured; the difference is `onPaceSeries`' leniency window, not the credit
-  // rule, and it is the same asymmetry `shared/CLAUDE.md` records under
-  // "moving the earliest entry EARLIER re-judges the first `den - 1` days".
+test('issue #223 / #346: the STREAK asymmetry between a skip-only and an empty ' +
+     'at-most habit is closed; the SCORE one is not, and that is the point', () => {
+  // This case used to record an asymmetry as a wart: a 3×/7 at-most habit with
+  // one skip row read `currentStreak` 0 where the same habit with NO rows read
+  // 1, because the trailing window's requirement pro-rated down to 3/7 over a
+  // one-day range and a single credited day cleared it. `shared/CLAUDE.md`
+  // carried the same sentence under "moving the earliest entry EARLIER
+  // re-judges the first `den - 1` days".
+  //
+  // #346 closes it, in the direction the issue wanted: neither reading earns a
+  // block, because neither has three completions inside any seven days, so both
+  // are 0 and the wart is gone rather than merely documented.
+  //
+  // **The scores still differ, and this fixture is now the clearest statement
+  // of the retired invariant.** `scoresOver` is untouched by #346 — it remains
+  // a trailing-window RATE, which is what Loop's own `ScoreList` is — while the
+  // streak is interval coverage. Two figures over one habit, disagreeing
+  // because they answer different questions. Under the old rule
+  // (`must-stay-fixed.md` item 2) that disagreement was the bug; it is now the
+  // design, and asserting both here is what keeps someone from "fixing" one to
+  // match the other.
   const weekly = limit223({ freq_numerator: 3, freq_denominator: 7 });
   const skipOnly = computeStats(weekly, skipOnly223(), { end: END_223 });
   assert.equal(skipOnly.currentStreak, 0);
   assert.equal(skipOnly.score, 0.011434);
 
   const empty = computeStats(weekly, [], { end: END_223 });
-  assert.equal(empty.currentStreak, 1);
-  assert.equal(empty.score, 0.034303);
+  assert.equal(empty.currentStreak, 0, 'was 1 under the trailing window');
+  assert.equal(empty.score, 0.034303, 'the score is unmoved by #346');
+
+  assert.equal(skipOnly.currentStreak, empty.currentStreak,
+    'the streaks agree now...');
+  assert.notEqual(skipOnly.score, empty.score,
+    '...and the scores still do not, which is the retired invariant in one ' +
+    'fixture rather than in a paragraph');
 });
 
 test('issue #223: the credit date is derived from the deduped MAP, not the array', () => {

@@ -384,19 +384,26 @@ test('the long haul does not move as time passes without new entries', () => {
 
 /* ---------- what an award can and cannot promise ---------- */
 
-test('AN AWARD CAN BE TAKEN AWAY: logging an older day lowers a non-daily one', () => {
-  // The counterexample that killed this module's first organising rule, which
-  // was "only a monotone reading may be dressed as a trophy". `bestStreak` is a
-  // maximum and does only go up for a FIXED window — but the window is not
-  // fixed. `computeStats` starts at `start ?? firstEntry`, and `onPaceSeries`
-  // pro-rates the requirement near that start so a habit is not judged against
-  // history it does not have. Move the earliest entry earlier and the first
-  // `den - 1` days are re-judged against a full requirement they now fail.
+test('#346 CLOSED IT: logging an older day no longer lowers a non-daily award', () => {
+  // This case used to assert the opposite, and the reversal is the point.
   //
-  // So remembering one forgotten session — an ordinary, virtuous thing to do —
-  // takes the badge DOWN. Pinned as behaviour, not as a bug to fix here: the
-  // leniency is deliberate and correct, and it is the permanence claim that was
-  // wrong. See issue #141 for the ledger that would change the answer.
+  // Under the trailing window, `computeStats` started at `start ?? firstEntry`
+  // and `onPaceSeries` pro-rated the requirement near that start — so moving
+  // the earliest entry EARLIER re-judged the first `den - 1` days against a
+  // full requirement they now failed, and remembering one forgotten session (an
+  // ordinary, virtuous thing to do) took the badge from 21 down to 17. That was
+  // pinned here as deliberate behaviour, with the permanence claim being the
+  // thing that was wrong.
+  //
+  // #346's interval model makes coverage a pure function of the completions in
+  // the walk, so an added row cannot re-judge days it does not itself cover.
+  // The perverse drop is gone as a side effect of the property that keeps
+  // `computeStats` and `summaryStats` agreeing, which is why it is pinned HERE
+  // rather than only in `streaks.test.js`: this is the user-facing face of it,
+  // and the assertion below is what fires if window-dependence creeps back.
+  //
+  // An award can still be taken away — see the sibling case immediately below,
+  // which is now the ONLY mechanism. `awards.js`'s header documents both.
   const gym = {
     type: 'boolean', target_value: 0, target_type: 'at_least',
     freq_numerator: 3, freq_denominator: 7,
@@ -415,15 +422,20 @@ test('AN AWARD CAN BE TAKEN AWAY: logging an older day lowers a non-daily one', 
   assert.equal(before.bestStreak, 21);
   assert.equal(byFamily(computeAwards(before, end)).streak.value, 21);
 
-  // One session, a week before the habit's first stored day.
+  // One session, a week before the habit's first stored day. Too far from the
+  // Mon/Wed/Fri run to earn a block with it — so it adds nothing, and the
+  // assertion is that it also takes nothing.
   rows.unshift({ date: '2026-06-28', value: YES, status: '' });
 
   const after = computeStats(gym, rows, { end });
-  // Pinned exactly, not just "lower": 21 -> 17 is the figure the module header
-  // and the CLAUDE.md section both quote, and a documented number that no test
-  // holds is a number free to drift away from its prose.
-  assert.equal(after.bestStreak, 17, 'the measured drop, 21 -> 17');
-  assert.equal(byFamily(computeAwards(after, end)).streak.value, 14);
+  // Pinned exactly, not merely "not lower": 21 is what it was before the row
+  // was added, and the trailing window gave 17 here. Asserting `>= 21` would
+  // pass just as well if some future change made an added row INFLATE the
+  // streak, which is the same window-dependence wearing the other hat.
+  assert.equal(after.bestStreak, 21,
+    'unchanged — the trailing window dropped this to 17 (#346)');
+  assert.equal(byFamily(computeAwards(after, end)).streak.value, 21,
+    'and the badge with it: 14 under the old model');
 });
 
 test('AN AWARD CAN VANISH WITH NO USER ACTION: the window slides', () => {
