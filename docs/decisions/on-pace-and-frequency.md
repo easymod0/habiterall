@@ -562,3 +562,82 @@ one in `streaks.test.js` rather than left to look like window-dependence:
 a range opening ON a day may not hold it, a range opening `den - 1` days earlier
 does. `summaryStats` already floors its `runs` window at `from + (den - 1)` for
 exactly this reason (#247), and that floor is unchanged.
+
+`den - 1` is the SAFE bound and not the tight one, which matters because the
+first version of that test claimed otherwise. Where the shortfall actually ends
+depends on where the habit's own completions fall: on the Sat+Sun+Mon fixture,
+four days of lead-in already suffice. The tight boundary is not derivable
+without reading the rows a bounded caller does not have, which is the whole
+reason the safe one is what gets floored.
+
+## Review round: deleting `birth` deleted a floor that was still needed
+
+The first draft of #346 removed `computeCategoryStats`' `memberBirth` outright,
+on the reasoning that `onPaceSeries` no longer reads `birth` so computing one
+fed a parameter nothing consumed. That was half right. `onPaceSeries` does not
+read it — but the **edge floor** does, and a comparison axis is the shape that
+most needs one: `dates[0]` is a window the route was ASKED for, so a member
+alive long before it opens has completions the walk cannot see.
+
+Measured on the fixture that case already carried — a 3×/7 member kept
+late-clustered, never missing, `end` fixed, varying only the day the comparison
+window opens on across one 7-day cycle:
+
+| axis opens | `recoveryRate` | `recoveryExcluded` |
+|---|---|---|
+| 2026-06-01 | `null` | 1 |
+| 2026-06-02 | `null` | 1 |
+| 2026-06-03 | **0** | 0 |
+| 2026-06-04 | **0** | 0 |
+| 2026-06-05 | **0** | 0 |
+| 2026-06-06 | **1** | 0 |
+| 2026-06-07 | `null` | 1 |
+
+The member's own page has exactly one lapse, `2025-06-01`..`2026-04-04`, closing
+two months before any of these windows opens. So four of seven opening days
+report "never recovers" and a fifth "always recovers" about a habit whose own
+page says "has never missed" — a different SENTENCE, not a rounding difference,
+decided by nothing but the phase of a window that slides every day.
+
+The test could not see it because it asserted at a single `CAT_START` of
+`2026-06-01`, which for that fixture is a completion day (offset 61, `61 % 7 ===
+5`), so the axis earned a block on its first day. It is the "fixture that could
+not have failed" shape, and this time it was holding up a deletion. The case
+loops over a whole cycle of opening days now, and a sibling case asserts that a
+genuinely three-week lapse still reads 0 from every one of them — a floor that
+bought agreement by going blind would pass the first and fail the second.
+
+Two things fell out of fixing it:
+
+- **`edgeSafeStart` is one function, not two expressions.** `summaryStats` and
+  `computeCategoryStats` ask the identical question and the second copy is
+  always the one that does not get the fix.
+- **`clipRuns` folds miss runs now, so it must carry `open` through.**
+  `missRunsFrom` sets that flag where it knows the answer rather than leaving it
+  to be inferred from `end`, because skips are transparent and a lapse whose
+  final days were skipped stops short of the range's end. Dropping the flag in
+  the clip handed `computeRecovery` exactly that misreading and put an ONGOING
+  lapse into the recovery rate. Nothing in the suite caught it until a case was
+  written for it, which is the mutation that found it.
+
+## Why `currentStreak` is not floored, and what that costs
+
+`summaryStats`' `runs` is floored and its `currentStreak` is not, and the
+asymmetry is deliberate. `runs` is DRAWN — an affected day is a blank square
+inside a band on the dashboard while the calendar strokes through the same day.
+`currentStreak` walks BACK from `end`, so a floor cannot recover the days; only
+fetching further back could, which is the cost `summaryStats` exists to avoid.
+
+Measured, a 3×/7 Sat+Sun+Mon habit kept perfectly for 500 days, `end`
+`2026-06-30`, `birth` supplied:
+
+```
+computeStats, whole history      currentStreak 500
+summaryStats, 400-day slice      currentStreak 396
+```
+
+400 of the shortfall is the slice itself, which no floor could return; the
+remaining 4 is the under-covered head. The dashboard's streak is therefore a
+FLOOR on the habit's own page, never a contradiction of it. Both editions'
+`/overview` fixtures agree at 297 because 297 fits inside the 400-day slice —
+do not read those assertions as pinning equality for a longer run.

@@ -295,29 +295,16 @@ identical rows. `docs/decisions/phantom-dates.md` has the measured
 before/after, the year-padding trap that closed the same hole one step earlier,
 and why `2026-02-30` moving too is correct rather than collateral.
 
-**`onPaceSeries` pro-rates the requirement near the start, but only at a
-habit's own BIRTH** —
-`required = max(1, floor(min(activeDays, num*activeDays/den)))` — so a habit is
-not judged against history it does not have yet. It FLOORS rather than rounds
-up: `>=` against the raw ratio silently demanded the next whole day, which made
-a pro-rated window ask MORE than the habit's own rate. **The FLOOR itself is
-unconditional** — a FILLED window is floored wherever it is read from, birth or
-no birth, which is what fixes the skip case further down — and only the
-PARTIAL-window leniency is gated. The leniency fires only
-while the range being walked opens at the habit's own LIFETIME first row
-(`birth`); once it opens somewhere else — a bounded slice (`/overview`'s
-400-day window, `recomputeBestStreak`'s 1830-day one, a narrowed `?start=`) —
-a short window there is the slice's own edge rather than missing history, and
-is judged by the plain, unfloored expression instead (`docs/decisions/
-on-pace-and-frequency.md`, #340, review round 1). Consequence worth knowing
-before touching it: for a caller that walks a habit's WHOLE history with no
-override — `computeStats`, and so `/awards` — moving the earliest entry
-EARLIER re-judges the first `den - 1` days against a full requirement they now
-fail, so *remembering something you did* can lower a figure. A bounded caller
-supplying the real `birth` does not see this: its own slice never opened at
-the habit's birth to begin with, so the leniency was never there to lose.
-Daily habits (`num >= den`) have no leniency window and are immune, which is
-why a test suite built on one cannot see this.
+**`onPaceSeries`'s trailing window, its floor and its birth-gated leniency are
+HISTORY as of #346.** They were the rule here for #340 and are described in
+full — with the fixtures that settled each — in
+`docs/decisions/on-pace-and-frequency.md`. What replaced them is under
+"Scoring, streaks and stats" below, with the one live remnant of the arithmetic:
+a period holding skips still demands `floor(num × active / den)`, the same
+pro-rating and the same floor #340 settled. Nothing else in that paragraph
+survives — there is no partial window, no leniency, and `birth` reaches no
+verdict — so do not carry a sentence from the archive back up here without
+re-measuring it.
 
 **`computeCoverage` reports only the months the window entirely CONTAINS**, and
 that one rule does two jobs. A partial first month can never legitimately be
@@ -382,15 +369,31 @@ and it follows Loop, whose `ScoreList` counts `YES_MANUAL` only and so never
 sees the auto-filled days its own streaks are made of. Do not "fix" one to agree
 with the other — `stats.test.js`'s `#223 / #346` case exists to stop that.
 
-**Coverage is WINDOW-INDEPENDENT, and that is the property to protect.** A block
-is anchored to a real completion, so `computeStats` over a full history and
-`summaryStats` over a 400-day slice cannot disagree about a day. Loop's
-`snapIntervalsTogether` is deliberately not ported because it breaks exactly
-this — ported verbatim it read 302 against 301 on #340's own fixture. Anything
-that makes coverage depend on where the caller opened its range, or on `birth`,
-reintroduces the bug #340 exists to close. The one real bound: a bounded slice
-cannot see completions before its opening, so its first `den - 1` days are
-under-covered, which is why `summaryStats` floors its `runs` window (#247).
+**Coverage is WINDOW-INDEPENDENT from `from + (den - 1)` onward, and that is the
+property to protect.** A block is anchored to a real completion and begins no
+earlier than `den - 1` days before any day it covers, so past that point
+`computeStats` over a full history and `summaryStats` over a 400-day slice
+cannot disagree about a day. Loop's `snapIntervalsTogether` is deliberately not
+ported because it breaks even that — ported verbatim it read 302 against 301 on
+#340's own fixture. Anything that makes coverage depend on where the caller
+opened its range, or on `birth`, reintroduces the bug #340 exists to close.
+
+**The `den - 1` head of a bounded walk is the bound, and it is not cosmetic: it
+turns an unbroken habit into one carrying a lapse.** `edgeSafeStart` is the ONE
+expression for "where does this walk become trustworthy", gated on `birth` so a
+range opening at the habit's own first row is returned unmoved. Two callers
+floor through it and one deliberately does not, so know which before adding a
+fourth: `summaryStats`' `runs` (#247) floors because it is DRAWN;
+`computeCategoryStats`' recovery axis floors because unfloored it gave a
+never-missing member a recovery rate on four of seven possible opening days;
+`summaryStats`' `currentStreak` does not, because it walks back from `end` and
+only a wider fetch — the cost that function exists to avoid — could recover
+those days. So the dashboard's streak is a FLOOR on the habit's own page, never
+a contradiction of it, and equality between the two is not a property to assert
+for a run longer than the slice. A run straddling the boundary is kept, rightly,
+and keeps its true length, which still counts the under-covered days at its
+head. The measurements behind all of that, and the test that could not see it,
+are in `docs/decisions/on-pace-and-frequency.md`.
 
 The trailing window's own rules — the rounding fix, the floor, the birth gate —
 are HISTORY as of #346 and live in `docs/decisions/on-pace-and-frequency.md`
@@ -722,11 +725,15 @@ disagree about what "ever" means.
 
 **An award can be taken away.** Not because the figures move — `currentStreak`
 and the score's current value are refused precisely because they fall on an
-ordinary bad week — but because the **window** does. Moving `firstEntry` earlier
-re-judges the leniency window above (measured: a 3×/week habit's badge went 21 →
-14 for logging one forgotten session), and `MAX_RANGE_DAYS` makes a habit older
-than ten years slide rather than grow (watched over simulated weeks, a whole card
-emptied itself). So the framing is **what this habit's history currently shows**:
+ordinary bad week — but because the **window** does. `MAX_RANGE_DAYS` makes a
+habit older than ten years slide rather than grow (watched over simulated weeks,
+a whole card emptied itself). That is now the ONLY mechanism: moving `firstEntry`
+earlier used to re-judge the trailing window's first `den - 1` days and took a
+3×/week habit's badge from 21 to 14 for logging one forgotten session, and #346
+closed it — coverage is a function of the completions in the walk, so an added
+row cannot re-judge days it does not itself cover (`awards.test.js` pins 21 →
+21). One unpatchable mechanism is still one too many, so the framing is
+unchanged: **what this habit's history currently shows**:
 the card says so in its lead, the payload carries no `permanent` flag, and there
 is no second visual treatment implying some badges are safer. Durable awards mean
 a granted ledger with a first-earned date — **issue #141**, and the only thing
