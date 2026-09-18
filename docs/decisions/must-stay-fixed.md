@@ -47,28 +47,40 @@ would silently restate every figure.
   reading it. Cut rather than carried over — the conclusion never rested on
   them.)
 
-**2. What a streak is made of.** `onPaceSeries` (`stats.js`) asks the same
-trailing-window question the score does, deliberately, so that strength and
-streaks cannot disagree about the same day; and `computeStreaks` counts
-**calendar** days so a 3×/week habit kept for a month reads as 30 rather than
-12. That was the intent from the start, and it failed once anyway: `>=`
-against a raw fractional requirement rounded the streak's demand up while the
-score's own comparison never rounded at all, so on a measurable fixture (two
-skip days inside a 3×/7 habit's window) the two disagreed about three
-consecutive days — `docs/decisions/on-pace-and-frequency.md` (#340) is the
-record that measured it, and it is not closed by flooring the requirement
-alone. The review round that followed found the floor sound only where a
-range opens at the habit's genuine birth: a bounded slice (`/overview`'s
-400-day window, `recomputeBestStreak`'s 1830-day one) opens somewhere the
-habit was already alive, so the raw, unfloored comparison this fixed is
-DELIBERATELY back for the first `den - 1` days of every such slice — the
-gate, not the floor alone, is what closes it. `scoresOver` pro-rates
-continuously with no such gate, so the same cliff `onPaceSeries` now avoids
-at a habit's birth is still reachable there, on a payload carrying `score`
-and `currentStreak` side by side; that residual disagreement is known and
-accepted, not a second bug. An option for "count only the days I did it"
-puts those two back into contradiction on purpose, which is the bug
-`onPaceSeries` exists to fix.
+**2. What a streak is made of.** ~~`onPaceSeries` asks the same trailing-window
+question the score does, so strength and streaks cannot disagree about the same
+day.~~ **RETIRED by #346 — read this item as history, and the replacement rule
+below it as current.**
+
+The sameness requirement is gone on purpose. `onPaceSeries` is now an INTERVAL
+model — a `den`-day block earned by a group of completions, running forward from
+the oldest of them — while `scoresOver` remains a trailing-window rate,
+untouched. **A streak measures CONTINUITY and a score measures RATE, and they
+may legitimately disagree about one day.** That is also what Loop does: its
+`ScoreList.recompute` is handed the auto-filled entry list but its boolean
+branch counts `YES_MANUAL` only, so its score never sees the days its own
+streaks are made of. An early draft of #346 claimed the opposite and was
+corrected; `docs/decisions/on-pace-and-frequency.md` carries the Kotlin.
+
+What survives from this item, and is still fixed: `computeStreaks` counts
+**calendar** days, so a 3×/week habit kept for a month reads as 30 rather than
+12. And the replacement invariant, which is stronger and cheaper to check than
+the one it replaces — **coverage must be WINDOW-INDEPENDENT.** A block is
+anchored to a real completion, so a full-history read and a bounded-slice read
+of one habit cannot disagree. That is what the trailing window needed the whole
+birth-gate apparatus to approximate, and it is what Loop's
+`snapIntervalsTogether` breaks, which is why that pass is not ported. Anything
+making coverage depend on where a caller opened its range — or on `birth` —
+brings back the bug this item's history is mostly about.
+
+And the item's original conclusion still holds, on new grounds: an option for
+"count only the days I did it" stays refused. It used to be refused for putting
+streak and score into contradiction on purpose — which is no longer an argument,
+since they now answer different questions anyway. It is refused because it is
+wrong on the streak's own terms: it reports a 3×/week habit kept perfectly as a
+streak of one and a lapse every other day, which is the original defect
+`onPaceSeries` exists to fix and which no change to the model has made less
+true.
 
 **3. The four day states, and what a write does to storage.** `entryWrite` in
 `validate.js`: `PUT {value: 0}` records a stated lapse, `DELETE` is how a day
