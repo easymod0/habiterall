@@ -35,6 +35,11 @@ db.exec(`
     color         TEXT    NOT NULL DEFAULT '#3b82f6',
     -- local 'HH:MM' the mobile app schedules a reminder for; '' = none
     reminder_time TEXT    NOT NULL DEFAULT '',
+    -- which weekdays that time fires on: a 7-bit mask, bit N = getDay() N, so
+    -- bit 0 is Sunday and bit 6 is Saturday. 127 = every day (the default),
+    -- 0 = no day, which is legal and is never repaired to 127. NOT Loop's own
+    -- mask, whose bit 0 is Saturday — see ALL_DAYS in shared/public/ui/time.js
+    reminder_days INTEGER NOT NULL DEFAULT 127,
     -- what the reminder asks ('Did you exercise today?'); '' = a sentence
     -- built from the habit's own name and goal
     reminder_message TEXT NOT NULL DEFAULT '',
@@ -261,6 +266,12 @@ const habitColumns = new Set(
 if (!habitColumns.has('reminder_time')) {
   db.exec(`ALTER TABLE habits ADD COLUMN reminder_time TEXT NOT NULL DEFAULT ''`);
   console.log('migrated habits: added reminder_time');
+}
+if (!habitColumns.has('reminder_days')) {
+  // 127 for everything that already exists, which is the one value that changes
+  // nothing: those habits were reminding every day a moment before the upgrade.
+  db.exec(`ALTER TABLE habits ADD COLUMN reminder_days INTEGER NOT NULL DEFAULT 127`);
+  console.log('migrated habits: added reminder_days');
 }
 if (!habitColumns.has('reminder_message')) {
   db.exec(`ALTER TABLE habits ADD COLUMN reminder_message TEXT NOT NULL DEFAULT ''`);

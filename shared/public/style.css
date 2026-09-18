@@ -1324,6 +1324,19 @@ dialog input[type='color'] { height: 38px; padding: 3px; cursor: pointer; }
 .timefield .field-hint { display: block; margin-top: 7px; }
 .timefield .field-hint.error { color: var(--danger); }
 
+/* The seven weekday boxes. Each row is an ordinary `.checkbox`, so the box and
+   its caption sit together the way every other one in a dialog does; what this
+   adds is the WRAP, since seven captions in a locale spelling them `понеделник`
+   do not fit one line of a 360px dialog, and the removal of the per-row bottom
+   margin a stacked list wants and a wrapped row does not. */
+.timefield-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  margin-top: 8px;
+}
+.timefield-days .checkbox { margin-bottom: 0; }
+
 /* ---------- amount field ---------- */
 
 /* The same shape as .timefield above, and for the same reason: several

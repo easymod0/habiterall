@@ -307,7 +307,34 @@ const sw = self;
 // which is the #224 destruction the argument exists to prevent. Both halves
 // are exactly why a shell may not be allowed to mix these two modules across
 // this change. No file added or removed, so `SHELL` is unchanged.
-const CACHE_VERSION = 'v32';
+// v33: per-weekday reminders (#72), and it is three of this file's cases at
+// once rather than an argument about which one it is.
+//
+// It is v20's and v31's: `ui/reminder-field.js` gains an EXPORT,
+// `reminderDaysField`, imported STATICALLY by `ui/habit-dialog.js` — a shell
+// holding the new `habit-dialog.js` over a cached v32 `reminder-field.js` is
+// "does not provide an export named 'reminderDaysField'" at module LINK time,
+// before `start()` runs and so outside `#view-error`. `ui/time.js` gains five
+// of its own — `ALL_DAYS`, `parseReminderDays`, `weekdayOf`, `remindsOn` and
+// `describeReminderDays` — which both `reminder-field.js` and `ui/nudge.js`
+// now import, the same link error one module further upstream.
+//
+// It is v32's IMPORT EDGE case twice: `ui/nudge.js` now reaches `./time.js`,
+// which it had no import of at all, and `ui/reminder-field.js` now reaches
+// `ui/dates.js` and `ui/settings.js`. Every one of those files is already in
+// `SHELL`, so nothing is added or removed here; only the ordering is new.
+//
+// And it is v24's and v27's, on `index.html`, which is in `SHELL`: the habit
+// dialog's Reminder fieldset now carries `#reminder-days` and
+// `#reminder-days-hint`, which `reminder-field.js` looks up at MODULE scope
+// and builds into at every open. A cached v32 `index.html` under the new
+// module is `$('#reminder-days')` answering null and the habit dialog dead
+// from the first open. The reverse pairing is the quiet one and is the whole
+// reason the bump is not optional: a new `index.html` whose boxes nothing
+// populates, held against a cached v32 `habit-dialog.js` whose payload carries
+// no `reminder_days` — and `PUT /habits/:id` REPLACES, so every habit edited
+// from that shell has its mask silently reset to every day.
+const CACHE_VERSION = 'v33';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

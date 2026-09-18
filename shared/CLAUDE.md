@@ -43,8 +43,8 @@ Postgres one.
 | `public/ui/api.js` | every request, and what to do when one cannot be made |
 | `public/ui/connectivity.js` | the offline banner, the outbox badge, reconnect handling |
 | `public/ui/toast.js` | the transient message strip |
-| `public/ui/nudge.js` | the browser's own reminder — what is still outstanding, when to say it and where. Dependency-free (one `document` listener, handed in), mirroring `answeredIds` |
-| `public/ui/reminder-field.js` | the reminder time picker inside the habit dialog |
+| `public/ui/nudge.js` | the browser's own reminder — what is still outstanding, when to say it and where. Loadable under Node (one `document` listener, handed in; one relative import, `./time.js`), mirroring `answeredIds` |
+| `public/ui/reminder-field.js` | the reminder controls inside the habit dialog: the time picker (`reminderField`) and, as a sibling export rather than a widening of it, the seven-box weekday picker over `reminder_days` (`reminderDaysField`) |
 | `public/ui/amount.js` | reading, stepping and formatting an amount, DOM-free so it is testable |
 | `public/ui/count-field.js` | the amount control over those rules, in the day editor and over the grid |
 | `public/ui/settings.js` | the preference registry and its server sync |
@@ -52,7 +52,7 @@ Postgres one.
 | `public/ui/window.js` | how many columns a chart fits, and which slice to show |
 | `public/ui/resample.js` | thins the daily score series for the strength chart |
 | `public/ui/dates.js` | browser-side date helpers, and the label-width estimator every chart reserves space with |
-| `public/ui/time.js` | parsing and formatting a reminder time, DOM-free so it is testable |
+| `public/ui/time.js` | parsing and formatting a reminder time, and which weekdays it fires on (`parseReminderDays`, `weekdayOf`, `remindsOn`). DOM-free so it is testable — and so `src/validate.js`, `src/notify.js` and `src/import.js` can import it rather than re-declare the rule. Mirrored in Kotlin |
 | `public/ui/toggle.js` | what the next tap on a day records — Loop's cycle, and what each state is WORTH for this habit. DOM-free, mirrored in Kotlin |
 | `public/ui/theme.js` | light / dark / follow-the-device, as a stored preference. No redraw callback — see `themed` in charts.js |
 | `public/ui/values.js` | `UNSET` / `YES` / `SKIP` for the browser, mirroring `src/constants.js` |
@@ -902,11 +902,32 @@ fallback never fired there and the question was simply dropped. It fired only fo
 a file with `Question` and no `Description` — and there it was arguably right,
 since Loop's migration 23 is `update Habits set question = description`.
 
-**Only an ALL-DAYS Loop reminder is imported.** `reminder_days` is a 7-bit
-weekday mask and habiterall has no concept of one. Taking the time alone turned a
-Monday-only reminder into seven a week AND wrote that widening back into the
-user's Loop app; a mask of `0` became daily. On export the mask is `127` with a
-reminder and `0` without, which is what Loop's own writer stores.
+**Loop's weekday mask is SATURDAY-BASED and ours is not, so the two directions
+are a ROTATION** (`loopDaysToMask` / `maskToLoopDays`, kept as a pair in
+import.js so a reviewer reads each against its own inverse). Loop bit 0 is Sat,
+1 Sun, 2 Mon, … 6 Fri; ours is JS `getDay()` — bit 0 Sun … bit 6 Sat — so Loop's
+index for our weekday `w` is `(w + 1) % 7`. Verified from two independent places
+in uhabits' own source, because nothing about it is guessable:
+`NotificationTray.shouldShowReminderToday` indexes the bit array with
+`(date.dayOfWeek.daysSinceSunday + 1) % 7`, and `WeekdayPickerDialog` labels that
+same raw array with `longWeekdayNames(SATURDAY)`, whose sequence is Sat, Sun,
+Mon, Tue, Wed, Thu, Fri. **127 and 0 are FIXED POINTS of the rotation** — which
+is exactly why it went unverified for so long, since before #72 those were the
+only two masks this repo could produce, and they cannot tell a rotation from the
+identity. Anything pinning it uses a mask that is neither: **Mon–Fri is 62 here
+and 124 in Loop; Saturday alone is 64 here and 1 there.** We store ours rather
+than Loop's so that convention never reaches the schema, the JSON API or the
+phone.
+
+**Before #72 only an ALL-DAYS Loop reminder was imported**, because there was no
+mask on this side: taking the time alone turned a Monday-only reminder into seven
+a week AND wrote that widening back into the user's Loop app, and a mask of `0`
+became daily. Both gates are gone. The time now imports unconditionally
+(`loopReminderToTime`'s half-filled-pair rule is unchanged), and the mask comes
+across rotated. On export the mask is the habit's own, rotated back — `0` still
+means "no reminder", which is what Loop's own writer stores for one, and
+importing that `0` gives the habit the default `127` rather than no day at all,
+so the cycle is stable.
 
 **An export reports what it could not carry; it does not fail on it.**
 `isoToLoopTimestamp` is `Date.UTC`, which rolls a date over, so `2026-02-30` left
@@ -1017,6 +1038,31 @@ second send, past it `too_late` at warn. **Backward** moves it onto a day the lo
 already has, so the answer is `already_sent` — never `too_late`, because that
 gate is asked FIRST. The keying is deliberately left alone: adding the zone makes
 the duplicate certain instead of possible.
+
+**`reminder_days` is asked of the ACCOUNT's weekday, and it is asked EARLY.**
+A habit reminds on the days its 7-bit mask names — bit N is JS `getDay()` N, bit
+0 Sunday — and the gate reads `remindsOn(habit.reminder_days, clock.date)`.
+`clock.date` is already the local date in the zone `resolveTimeZone` picked; a
+`new Date()` of the scheduler's own would fire a Monday-only reminder on Sunday
+evening in Auckland and silence it on Monday morning, every week, with a
+correct-looking time beside it. Same argument as `zonedClock`: the zone decides
+which DAY this is, not only what o'clock it is. The gate sits beside
+`no_reminder_time` and deliberately AHEAD of `done_today` / `already_sent` /
+`too_late`, because a day the habit does not remind on is not a lost reminder —
+below the lateness gate every masked-out habit would emit the `too_late` WARN
+once per channel for the rest of its day. Its own skip reason is
+`not_this_weekday`, at debug. `0` is a legal mask meaning no day and is never
+repaired to 127 (`parseReminderDays`); a picker may snap an emptied set back,
+the validator may not. `ui/nudge.js`'s `outstanding` carries the same gate in
+the same position, against the device's own `date`.
+
+**Both notifiers reach this column through `SELECT *`** (`habits` in
+`habiterall-personal/src/notifier.js` and `habiterall-cloud/src/notifier.js`).
+Narrowing either one to a column list — a tempting thing to do for a plan —
+drops `reminder_days` from the row, `parseReminderDays` answers the default for
+the absent field, and the gate silently reverts to every day for that edition
+only. That is the shape this repo names most: two editions answering one request
+differently, with nothing red.
 
 **The two silences worth a warning**, both through the `once` dedupe.
 `notify.too_late` means a reminder was LOST, and that claim rests entirely on the

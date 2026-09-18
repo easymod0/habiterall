@@ -22,6 +22,11 @@ import {
 // stands on. `validate.js` -> `notify.js` -> `ui/toggle.js` adds no cycle:
 // nothing toggle.js imports reaches back here.
 import { DAY, valueForState } from '../public/ui/toggle.js';
+// Same grounds as the import above, and the same file the Kotlin `ReminderTime`
+// mirrors: `ui/time.js` is DOM-free by its own header, so the weekday rule the
+// browser reads and the one the server enforces are ONE declaration rather than
+// two that have to be pinned against each other.
+import { parseReminderDays } from '../public/ui/time.js';
 
 export const HABIT_TYPES = new Set(['boolean', 'numerical']);
 export const TARGET_TYPES = new Set(['at_least', 'at_most']);
@@ -489,6 +494,11 @@ export function parseHabit(body = {}) {
     // habit so it follows the account to a new device, and so the web UI can
     // set it too. '' means no reminder.
     reminder_time: TIME_RE.test(body.reminder_time ?? '') ? body.reminder_time : '',
+    // Which weekdays that time fires on — a 7-bit mask, bit N = `getDay()` N.
+    // The default is every day, so nothing moves for a habit written before
+    // this existed; 0 is a legal answer meaning no day and is never repaired.
+    // `parseReminderDays` (ui/time.js) has both rules and why they are apart.
+    reminder_days: parseReminderDays(body.reminder_days),
     // What the reminder asks — 'Did you exercise today?' rather than the habit
     // name. Newlines are flattened: this is a one-line prompt in a
     // notification, and the Android reminder cache is line-delimited, so a

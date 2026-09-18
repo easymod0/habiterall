@@ -989,8 +989,8 @@ ck('the JSON backup carries no user_id',
 const PORTABLE_HABIT_KEYS = [
   'archived', 'at_most_unlogged', 'category', 'category_id', 'color', 'created_at',
   'description', 'entries', 'freq_denominator', 'freq_numerator', 'icon', 'id', 'name',
-  'position', 'reminder_message', 'reminder_time', 'show_as', 'target_type',
-  'target_value', 'type', 'unit',
+  'position', 'reminder_days', 'reminder_message', 'reminder_time', 'show_as',
+  'target_type', 'target_value', 'type', 'unit',
 ];
 ck('and describes a habit exactly as the personal edition does',
   JSON.stringify(Object.keys(exported ?? {}).sort()) === JSON.stringify(PORTABLE_HABIT_KEYS),
@@ -1128,6 +1128,11 @@ const everyField = {
   freq_denominator: 7,
   color: '#ff00ff',
   reminder_time: '08:30',
+  // 62 is Mon-Fri. Never 127 here: that is the COLUMN DEFAULT, so a fixture at
+  // it compares a default with itself and would pass with `reminder_days`
+  // dropped from the INSERT and the UPDATE alike — the failure the paragraph
+  // above is about, on the one field that has a non-zero default to hide in.
+  reminder_days: 62,
   reminder_message: 'Did you do it?',
   at_most_unlogged: 'success',
   show_as: 'avoid',
@@ -1166,6 +1171,40 @@ ck('PUT /habits/:id replaces, and carries every OTHER field unchanged',
   wrongOnUpdate.length === 0, wrongOnUpdate.join('; '));
 ck('  and the one field that was meant to change, did',
   updated2.archived === false, JSON.stringify(updated2.archived));
+
+// `reminder_days` by VALUE, over the real routes, mirroring the block in
+// habiterall-personal/test/apishape.integration.mjs — the two editions promise
+// the same API, and this edition asserted only that the key reaches the export
+// list, which says nothing about what is stored under it.
+//
+// Three of these are invisible from the loop above even with 62 in
+// `everyField`: what the SELECT behind a GET reads back, that the legal mask 0
+// survives a write rather than being repaired to every day, and what the
+// column becomes when a REPLACING write omits the field. 127 appears once,
+// as the expected result of that last one and never as a fixture.
+const maskHabit = await postHabit(
+  { name: 'Weekday reminder', type: 'boolean', reminder_days: 62 });
+ck('POST /habits stores the weekday mask it was sent',
+  maskHabit.reminder_days === 62, JSON.stringify(maskHabit.reminder_days));
+
+const maskRead = await fetch(`${overviewBase}/api/habits/${maskHabit.id}`)
+  .then((r) => r.json());
+ck('GET /habits/:id reads it back off the row, not off the write',
+  maskRead.reminder_days === 62, JSON.stringify(maskRead.reminder_days));
+
+const maskEmptied = await putHabit(maskHabit.id,
+  { name: 'Weekday reminder', type: 'boolean', reminder_days: 0 });
+ck('PUT /habits/:id stores a mask of 0 rather than repairing it to 127',
+  maskEmptied.reminder_days === 0, JSON.stringify(maskEmptied.reminder_days));
+
+const maskOmitted = await putHabit(maskHabit.id,
+  { name: 'Weekday reminder', type: 'boolean' });
+ck('PUT /habits/:id REPLACES, so an omitted mask is back to every day',
+  maskOmitted.reminder_days === 127, JSON.stringify(maskOmitted.reminder_days));
+
+// Cleaned up, like the category rows above: every later block that reads the
+// account's whole list would otherwise read this one too.
+await fetch(`${overviewBase}/api/habits/${maskHabit.id}`, { method: 'DELETE' });
 
 /* ---------- categories over HTTP ---------- */
 

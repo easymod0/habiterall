@@ -76,6 +76,10 @@ class HabitFieldCoverageTest {
         color = "#ef4444",
         reminderTime = "08:30",
         reminderMessage = "Any soda today?",
+        // Mon-Fri. Not 127, which is both this field's Kotlin default and
+        // `parseHabit`'s, and so would compare equal to itself whether or not
+        // either bridge carries it.
+        reminderDays = 62,
         atMostUnlogged = "success",
         showAs = "avoid",
         icon = "🧘",

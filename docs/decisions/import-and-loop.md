@@ -183,15 +183,75 @@ moved it. Reading it as a description was true to what they wrote. Following
 Loop's reclassification is still correct — it shows that text in the
 notification — but this is a reassignment of existing prose, not purely a fix.
 
-**Only an ALL-DAYS Loop reminder is imported.** `reminder_days` is a 7-bit
-weekday mask (127 is every bit; `WeekdayList` in Loop's source) and habiterall
-has no concept of one, so a Monday-only reminder has no faithful form here.
-Taking the time alone turned it into seven notifications a week AND wrote that
-widening back into the user's own Loop app on the way out; a mask of `0` — a
+**Only an ALL-DAYS Loop reminder used to be imported, and #72 ended that.** For
+the record of what the old rule was and why it was defensible: `reminder_days` is
+a 7-bit weekday mask (127 is every bit; `WeekdayList` in Loop's source) and
+habiterall had no concept of one, so a Monday-only reminder had no faithful form
+here. Taking the time alone turned it into seven notifications a week AND wrote
+that widening back into the user's own Loop app on the way out; a mask of `0` — a
 reminder that fires on no day — became a daily one, which is exactly what the
-hour/minute rule above refuses to do. Missing is the honest answer until #72
-lands. On export the mask is `127` for a habit with a reminder and `0` for one
-without, which is what Loop's own writer stores.
+hour/minute rule above refuses to do. Missing was the honest answer while the
+concept was missing. On export the mask was a literal `127` for a habit with a
+reminder and `0` for one without, which is what Loop's own writer stores.
+
+Both halves are now honest. The time imports unconditionally — the
+half-filled-pair rule above is unchanged and still right — the mask comes across
+rotated, and the exporter writes the habit's real mask rotated back. A habit with
+no reminder still exports `0`, and importing that `0` gives the habit the default
+`127` rather than "no day at all", because Loop's `0` there means *no reminder*
+rather than *no weekday*: store it as 0 and every reminderless imported habit
+gets a mask that silences the first reminder its owner adds. That cycle is stable
+and the round-trip suites assert it.
+
+### Loop's weekday mask is Saturday-based, and the two fixed points hid it
+
+This is the part that was worth the whole issue, and it was **unverified in this
+repo until #72** — the code and its comments had simply never needed to know,
+because the only two masks habiterall could produce were 127 and 0.
+
+    Loop bit  0=Sat 1=Sun 2=Mon 3=Tue 4=Wed 5=Thu 6=Fri
+    ours      0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat   (JS `getDay()`)
+
+so Loop's index for our weekday `w` is `(w + 1) % 7`. `WeekdayList(packed)` fills
+`weekdays[i]` from bit `i`, LSB first.
+
+Verified from **two independent places** in iSoron/uhabits@dev, because one site
+is a reading and two agreeing is a fact:
+
+1. `uhabits-core/.../core/ui/NotificationTray.kt`, `shouldShowReminderToday()`:
+
+   ```kotlin
+   val reminderDays = reminder!!.days.toArray()
+   val weekday = (date.dayOfWeek.daysSinceSunday + 1) % 7
+   return reminderDays[weekday]
+   ```
+
+2. `uhabits-android/.../dialogs/WeekdayPickerDialog.kt` hands that same raw bit
+   array to `longWeekdayNames(DayOfWeek.SATURDAY)`, and `getWeekdaySequence(
+   SATURDAY)` in `platform/time/Dates.kt` yields Sat, Sun, Mon, Tue, Wed, Thu,
+   Fri. So the checkbox the user ticks for bit 0 is captioned *Saturday*.
+
+**127 and 0 are FIXED POINTS of this rotation.** That is the whole reason the
+mapping went unexamined for as long as it did, and it is the trap for anyone
+testing this: a fixture at 127 cannot tell the rotation from the identity, and
+would pass with `loopDaysToMask` deleted, with `maskToLoopDays` deleted, or with
+both. The fixtures that bite are the ones that are neither fixed point —
+**Mon–Fri is 62 here and 124 in Loop; Saturday alone is 64 here and 1 there;
+Sunday alone is 1 here and 2 there** — and the two rotations are kept as a
+reviewable pair in `import.js` rather than split across it and `export-loop.js`.
+
+We store **ours**, not Loop's. Loop's spelling would otherwise leak into the
+column, the JSON API, the Android client and every fixture, where each future
+reader would have to remember a convention nothing else in this codebase uses;
+and making the conversion a real, non-identity function is what forces a test to
+pin it at the one boundary where it matters. Bit N = `getDay()` N is also what
+the rest of the repo already thinks in (`weekOrder` in `charts.js` translates
+*from* `getDay()`; `weekdayNames` in `ui/dates.js` is indexed by it).
+
+`weekStart` has nothing to do with any of this. That setting says what a WEEK is,
+for aggregation and for display order; which weekday a DATE falls on is absolute,
+and so are the stored bits. The web picker reorders its seven boxes by
+`weekStart` and stores the same numbers either way.
 
 Two smaller traps in reading those columns, both of which produced a reminder
 out of nothing. `Number('')` is `0`, so an empty column passed a

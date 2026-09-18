@@ -168,11 +168,15 @@ the note to begin with. See `entryWrite` (`shared/src/validate.js`) and
 `docs/decisions/day-states.md`.
 
 **A new habit field has to be assigned to a fidelity list.** `LOOP_HABIT_FIELDS`
-is what both Loop formats carry, `LOOP_DB_HABIT_FIELDS` adds `reminder_time`
-(Loop's own `Habits.csv` has no reminder columns), and `JSON_HABIT_FIELDS` is
-habiterall's own backup. A field Loop cannot carry — `at_most_unlogged`,
-`show_as` — goes in the last and neither of the others, and a Loop round trip
-correctly returns it to its default.
+is what both Loop formats carry, `LOOP_DB_HABIT_FIELDS` adds the two reminder
+columns Loop's `.db` has and its `Habits.csv` does not — `reminder_time` and
+`reminder_days` — and `JSON_HABIT_FIELDS` is habiterall's own backup. A field
+Loop cannot carry — `at_most_unlogged`, `show_as` — goes in the last and neither
+of the others, and a Loop round trip correctly returns it to its default. A field
+Loop stores in a DIFFERENT SPELLING needs a conversion pinned at a value that is
+not a fixed point of it: Loop's weekday mask is Saturday-based where ours is
+Sunday-based, and 127 and 0 survive that rotation unchanged, so a fixture at
+either passes with the conversion deleted (`docs/decisions/import-and-loop.md`).
 
 **A README heading is a URL, and renaming one breaks the website.** `README.md`
 is the source the habiterall.ca wiki is generated from: `site/pages.js` claims

@@ -305,15 +305,16 @@ api.post('/habits', route(async (req, res) => {
     const { rows } = await db.query(
       `INSERT INTO habits (user_id, name, description, type, unit, target_value,
                            target_type, freq_numerator, freq_denominator, color,
-                           reminder_time, reminder_message, at_most_unlogged,
-                           show_as, icon, category_id, archived, position)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+                           reminder_time, reminder_days, reminder_message,
+                           at_most_unlogged, show_as, icon, category_id,
+                           archived, position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
                COALESCE((SELECT MAX(position) + 1 FROM habits), 0))
        RETURNING *`,
       [uid(req), h.name, h.description, h.type, h.unit, h.target_value,
        h.target_type, h.freq_numerator, h.freq_denominator, h.color,
-       h.reminder_time, h.reminder_message, h.at_most_unlogged, h.show_as,
-       h.icon, categoryId, h.archived]
+       h.reminder_time, h.reminder_days, h.reminder_message, h.at_most_unlogged,
+       h.show_as, h.icon, categoryId, h.archived]
     );
     return rows[0];
   });
@@ -337,13 +338,13 @@ api.put('/habits/:id', route(async (req, res) => {
       `UPDATE habits SET name=$1, description=$2, type=$3, unit=$4,
               target_value=$5, target_type=$6, freq_numerator=$7,
               freq_denominator=$8, color=$9, reminder_time=$10,
-              reminder_message=$11, at_most_unlogged=$12, show_as=$13,
-              icon=$14, category_id=$15, archived=$16
-       WHERE id = $17 RETURNING *`,
+              reminder_days=$11, reminder_message=$12, at_most_unlogged=$13,
+              show_as=$14, icon=$15, category_id=$16, archived=$17
+       WHERE id = $18 RETURNING *`,
       [h.name, h.description, h.type, h.unit, h.target_value, h.target_type,
        h.freq_numerator, h.freq_denominator, h.color, h.reminder_time,
-       h.reminder_message, h.at_most_unlogged, h.show_as, h.icon, categoryId,
-       h.archived, id]
+       h.reminder_days, h.reminder_message, h.at_most_unlogged, h.show_as,
+       h.icon, categoryId, h.archived, id]
     );
     return rows[0];
   // Narrowed: this route REPLACES, so `type`, `target_*` and `freq_*` can all
