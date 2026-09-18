@@ -18,7 +18,8 @@ import kotlinx.coroutines.withContext
 import java.time.LocalDate
 
 /**
- * Asks which habit a newly-placed widget is for.
+ * Asks which habit a newly-placed widget is for — and, for the one provider
+ * that needs no such question, seeds it anyway.
  *
  * A list of names in a dialog rather than a screen: it is one question, asked
  * once, from the launcher — the same shape `CountEntryActivity` uses, and for
@@ -32,6 +33,17 @@ import java.time.LocalDate
  * — a freshly placed STATS widget needs the whole strip populated on the
  * spot, and the checkmark widget draws no differently off a wider window than
  * it did off a narrow one, so there is no cost to widening the fetch for both.
+ * [OverviewWidget] draws at most [Widgets.MAX_STRIP_DAYS] columns too, so the
+ * same window fills its widest grid.
+ *
+ * [OverviewWidget] takes this activity's every failure path and none of its
+ * question. It names no habit, so there is nothing to pick — but it has the
+ * identical need of the server, and with no configuration step at all it would
+ * sit blank until `ScheduleWorker`'s six-hourly heartbeat, with nothing on
+ * screen to say that no server was ever configured. So the branch is one
+ * question of the launcher (which provider owns this id) and then a seed rather
+ * than a dialog, and `api == null`, a failed fetch and an empty account still
+ * report exactly as they do for the other two.
  */
 class WidgetConfigActivity : ComponentActivity() {
 
@@ -81,8 +93,34 @@ class WidgetConfigActivity : ComponentActivity() {
                 fail(R.string.widget_no_habits)
                 return@launch
             }
-            choose(widgetId, habits)
+            val manager = AppWidgetManager.getInstance(this@WidgetConfigActivity)
+            if (isOverview(manager, widgetId)) seed(widgetId, habits) else choose(widgetId, habits)
         }
+    }
+
+    /**
+     * Every non-archived habit, in the order the server served them, written as
+     * this widget's whole set.
+     *
+     * `reconcileOverview` from an EMPTY existing set rather than a hand-rolled
+     * loop here, so that placing a widget and refreshing one take the same
+     * decision about which habits, in what order and with what rank — the rule
+     * lives in one pure function, and this activity is not a second opinion
+     * about it.
+     */
+    private suspend fun seed(widgetId: Int, habits: List<Habit>) {
+        val today = LocalDate.now().toString()
+        withContext(Dispatchers.IO) {
+            Settings(applicationContext).putWidgetSet(
+                widgetId,
+                Widgets.reconcileOverview(emptyList(), widgetId, habits, today),
+            )
+            HabitWidget.redraw(applicationContext)
+        }
+        setResult(Activity.RESULT_OK, Intent().putExtra(
+            AppWidgetManager.EXTRA_APPWIDGET_ID, widgetId
+        ))
+        finish()
     }
 
     private fun choose(widgetId: Int, habits: List<Habit>) {
@@ -93,9 +131,18 @@ class WidgetConfigActivity : ComponentActivity() {
                 lifecycleScope.launch {
                     val today = LocalDate.now().toString()
                     val habit = habits[which]
-                    val record = Widgets.refreshed(blank(widgetId, habit.id), habit, today)
+                    val record =
+                        Widgets.refreshed(Widgets.blank(widgetId, habit.id), habit, today)
                     withContext(Dispatchers.IO) {
-                        Settings(applicationContext).putWidgets(listOf(record))
+                        // `putWidgetSet`, not `putWidgets`: this activity is
+                        // reachable a second time (`widgetFeatures="reconfigurable"`),
+                        // and pointing the widget at a different habit has to
+                        // take the old habit's record away with it. `putWidgets`
+                        // merges per (widget, habit), so it would leave both and
+                        // `cachedWidget`'s `firstOrNull` could answer the habit
+                        // this widget no longer shows — a tick painted for one
+                        // habit and recorded against another.
+                        Settings(applicationContext).putWidgetSet(widgetId, listOf(record))
                         HabitWidget.redraw(applicationContext)
                     }
                     setResult(Activity.RESULT_OK, Intent().putExtra(
@@ -114,29 +161,35 @@ class WidgetConfigActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    /**
-     * An empty record for [Widgets.refreshed] to fill.
-     *
-     * Every field it leaves alone is one the server is about to supply, so
-     * there is no second place that decides what a record starts as.
-     */
-    private fun blank(widgetId: Int, habitId: Long) = Widgets.Record(
-        widgetId = widgetId,
-        habitId = habitId,
-        name = "",
-        type = "boolean",
-        targetValue = 0.0,
-        targetType = "at_least",
-        showAs = "amount",
-        color = "",
-        unit = "",
-        date = "",
-        value = null,
-        skip = false,
-    )
-
     private fun fail(message: Int) {
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
         finish()
+    }
+
+    companion object {
+
+        /**
+         * Which of the three providers owns this id — asked of the LAUNCHER
+         * rather than of the intent, because the widget id is the only thing a
+         * configuration activity is told and `getAppWidgetInfo` is what turns
+         * it back into the provider that holds it.
+         *
+         * `internal`, and taking the manager rather than reading it off `this`,
+         * for the reason `HabitList` and `ManageScreen` are: this is the ONE
+         * path by which an overview widget ever acquires records, and a
+         * predicate embedded in an activity is a decision no test can reach.
+         * Every way of being wrong here is silent — `shortClassName` (`.widget
+         * .OverviewWidget`) rather than `className`, the ComponentName's own
+         * `toString`, or the other provider's name — and each one sends a
+         * freshly placed overview widget into the habit PICKER, which seeds it
+         * one single-habit record and leaves a grid with one row in it.
+         *
+         * A null info — an id the launcher has already dropped — answers false
+         * and falls through to the picker, which then finishes CANCELLED like
+         * any other failure path here.
+         */
+        internal fun isOverview(manager: AppWidgetManager, widgetId: Int): Boolean =
+            manager.getAppWidgetInfo(widgetId)?.provider?.className ==
+                OverviewWidget::class.java.name
     }
 }

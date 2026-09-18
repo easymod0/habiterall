@@ -115,8 +115,13 @@ object Widgets {
          * the strip moves", which the early-return branch satisfied by
          * construction — nothing moved — while leaving exactly the case
          * above presenting stale figures as current; the field is defined by
-         * what its one reader (`StatsWidget.render`) asks of it, not by the
-         * mechanism that happens to make it true elsewhere. Cleared in
+         * what its readers ask of it, not by the mechanism that happens to
+         * make it true elsewhere. There are TWO of those readers, and the
+         * second was added a round later: `StatsWidget.render` asks "are my
+         * figures current", and `OverviewWidget.render` asks "is my grid
+         * current" — the same question, because [answered] advancing [date]
+         * with no fetch behind it is what makes [date] stop being a fetch
+         * date, and this flag is the only witness to that. Cleared in
          * [refreshed] — a successful fetch is exactly what makes the figures
          * current again. `WidgetSync.noteRefused` is the one exception: a
          * refusal never reached the server, so the last fetch's figures are
@@ -132,6 +137,29 @@ object Widgets {
          * pre-upgrade local answer, closing at the very next fetch.
          */
         val figuresStale: Boolean = false,
+        /**
+         * Where this habit sits in the OVERVIEW widget's list — the index it
+         * held in the `/api/overview` reply, and nothing else.
+         *
+         * The server has already applied the account's own `habit_sort`
+         * (`shared/src/habit-order.js`), so the widget agrees with the app by
+         * construction rather than by a second sort on the phone. That is also
+         * why this is not `Habit.position`: `position` is the MANUAL order,
+         * and an account sorting by name or by score would see its widget
+         * disagree with every other surface it owns.
+         *
+         * Stored rather than left implicit in the list's order, because no
+         * store preserves one: `Settings.putWidgetSet` writes a widget's
+         * records at the TAIL of the blob, so a reconcile that appended a
+         * newly-added habit's record would draw it LAST however the account
+         * sorts — a wrong-order bug no test of the store could see. As a field
+         * it is an assertable property of the record instead.
+         *
+         * Means nothing for the two single-habit providers, which is why it
+         * defaults to `0`: a checkmark or stats record never has to be written
+         * to acquire one.
+         */
+        val rank: Int = 0,
     ) {
         /**
          * Enough of a habit for the rules that decide a tap and its colour.
@@ -312,6 +340,44 @@ object Widgets {
     }
 
     /**
+     * How many habit rows an OVERVIEW widget of this height should draw, and
+     * how many day columns one of this width should.
+     *
+     * Same shape as [stripDays] and for the same reason — a designer's answer
+     * to "how many fit", written as literals so a test can assert the literals
+     * rather than a constant that drifts with the layout unnoticed. The top arm
+     * of each IS the cap: the layout holds exactly [MAX_OVERVIEW_ROWS] rows and
+     * [MAX_STRIP_DAYS] cells per row, hidden beyond need, so a threshold table
+     * that could answer higher would be asking for views that do not exist.
+     *
+     * The column thresholds are [stripDays]'s shifted up by 80dp: this widget
+     * pays for a habit-name column that the stats widget's bare strip does not.
+     *
+     * [MAX_OVERVIEW_ROWS] is 7 and not 8 because of lint. The layout is ~75
+     * views at seven rows (1 root + 1 note + 1 header + 1 spacer + 7 day labels
+     * + 7 row containers + 7 names + 49 cells + 1 footer); `TooManyViews` warns
+     * past 80, and an eighth row would be ~85.
+     */
+    const val MAX_OVERVIEW_ROWS = 7
+
+    fun overviewColumns(minWidthDp: Int): Int = when {
+        minWidthDp >= 330 -> 7
+        minWidthDp >= 290 -> 6
+        minWidthDp >= 250 -> 5
+        minWidthDp >= 210 -> 4
+        else -> 3
+    }
+
+    fun overviewRows(minHeightDp: Int): Int = when {
+        minHeightDp >= 180 -> 7
+        minHeightDp >= 155 -> 6
+        minHeightDp >= 130 -> 5
+        minHeightDp >= 105 -> 4
+        minHeightDp >= 80 -> 3
+        else -> 2
+    }
+
+    /**
      * The stats widget's history strip, encoded into one field of [Record].
      *
      * Comma-separated `date:value` tokens, or `date:s` for a skip — only for
@@ -365,7 +431,7 @@ object Widgets {
      * widgets for the same habit on one home screen would disagree about the
      * same day. A widget's own tap does NOT reach that far: `HabitWidget.tap`
      * writes back only its own record (`putWidgets(listOf(...))`, and
-     * `Settings.putWidgets` upserts keyed by `widgetId`), so a second widget
+     * `Settings.putWidgets` upserts keyed by `(widgetId, habitId)`), so a second widget
      * for the same habit is untouched by it and the two stay disagreeing
      * until the next fetch — the carve-out below is still worth having for
      * the case it actually closes, `noteAnswer`'s. [stateOn] already draws
@@ -462,6 +528,85 @@ object Widgets {
     )
 
     /**
+     * An empty record for [refreshed] to fill.
+     *
+     * Every field it leaves alone is one the server is about to supply, so
+     * there is no second place that decides what a record starts as. It lives
+     * here rather than privately in `WidgetConfigActivity` — which is where it
+     * was, and its only caller — because [reconcileOverview] has to make one
+     * too, and "no second place" is the whole of its reasoning.
+     */
+    fun blank(widgetId: Int, habitId: Long) = Record(
+        widgetId = widgetId,
+        habitId = habitId,
+        name = "",
+        type = "boolean",
+        targetValue = 0.0,
+        targetType = "at_least",
+        showAs = "amount",
+        color = "",
+        unit = "",
+        date = "",
+        value = null,
+        skip = false,
+    )
+
+    /**
+     * One overview widget's whole set of records, from the habits the server
+     * has just served.
+     *
+     * Which habits, in what order, is the decision this function IS — kept
+     * pure and here rather than in the provider so a test can reach it without
+     * a launcher, the same reasoning as [refreshedOrGone]'s.
+     *
+     * Three rules, and each is a refusal of something easier:
+     *
+     * - **The order is [habits]' own**, which is the order `/api/overview`
+     *   served them in and so the account's own `habit_sort` already applied
+     *   (`shared/src/habit-order.js`). Sorting by `Habit.position` here instead
+     *   would disagree with the app for every account not on manual order.
+     * - **The order is written down**, as [Record.rank], not left implicit in
+     *   the returned list: nothing downstream preserves list order —
+     *   `Settings.putWidgetSet` appends to the blob's tail — so a habit added
+     *   to the account would render last whatever the account's sort says.
+     *   `refreshed`'s signature is left alone and the rank is stamped by a
+     *   `copy` after it: `refreshed` is also called by `WidgetConfigActivity`
+     *   and by [refreshedOrGone] for single-habit widgets, which have no rank
+     *   to supply, and a defaulted parameter there would be a third thing to
+     *   keep in sync.
+     * - **A habit no longer served is DROPPED, not marked [Record.gone].** The
+     *   overview is "your habits"; one that has left the account is not one of
+     *   them, and the row below it closing up is the visible signal. That is a
+     *   deliberate difference from the single-habit widgets, where hiding the
+     *   one thing on screen would leave a blank widget with nothing to explain
+     *   it, so `refreshedOrGone` keeps the record and says "Removed" instead.
+     *
+     * A record already held for a served habit goes through [refreshedOrGone]
+     * rather than [refreshed] alone, for its `gone = false` arm — and the
+     * reason is NOT the one first written down here. `WidgetSync.refreshFrom`
+     * excludes a live overview widget's records from the path that marks
+     * records gone, so a refresh cannot set the flag on a row of a widget the
+     * launcher reports as an overview. What the arm clears is a `gone` carried
+     * in from BEFORE this id was an overview's: a record can outlive the widget
+     * it was written for, and the launcher hands the id out again. Left set, it
+     * is permanent — `OverviewWidget.render` filters on it — so clearing it for
+     * a habit the server is serving costs one `copy` and closes the one way
+     * this widget could hide a live habit for good.
+     */
+    fun reconcileOverview(
+        existing: List<Record>,
+        widgetId: Int,
+        habits: List<Habit>,
+        today: String,
+    ): List<Record> {
+        val held = existing.associateBy { it.habitId }
+        return habits.mapIndexed { index, habit ->
+            val record = held[habit.id] ?: blank(widgetId, habit.id)
+            refreshedOrGone(record, habit, today).copy(widgetId = widgetId, rank = index)
+        }
+    }
+
+    /**
      * The record after an answer given somewhere else on this phone — the
      * notification's buttons, or its number pad.
      *
@@ -540,6 +685,11 @@ object Widgets {
         // this existed has seventeen fields and must still draw, reading
         // `false` back — the strip's own currency, not the figures'.
         if (r.figuresStale) "1" else "0",
+        // Field 18, the overview widget's row order. Appended and never
+        // inserted, like every field since 12: a record written before this
+        // existed has eighteen fields and must still draw. `0` read back for
+        // one is also what every single-habit record legitimately holds.
+        r.rank.toString(),
     ).joinToString("|")
 
     /**
@@ -603,6 +753,15 @@ object Widgets {
             // fetch — same fail-safe direction as `unloggedIsSuccess` above,
             // for a real and bounded cost rather than none.
             figuresStale = f.getOrNull(17) == "1",
+            // Field 18. Absent reads `0`, which is not a fail-safe compromise
+            // the way `gone` and `unloggedIsSuccess` are: no record written
+            // before this field existed belongs to an overview widget, because
+            // there was none, and the first reconcile stamps every rank it
+            // will ever draw from. `toIntOrNull` rather than `toInt` for the
+            // same reason as 14 and 15 — a junk token, or a future field this
+            // build does not understand shifting this one, must not cost the
+            // whole record and with it the widget.
+            rank = f.getOrNull(18)?.toIntOrNull() ?: 0,
         )
     }
 

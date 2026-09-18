@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  `updatePeriodMillis` is the floor Android allows (30 minutes) and it is a
+  BACKSTOP, not the refresh: it redraws from the cache with no network. Note
+  what it is NOT — it is not the midnight answer, because these updates ride an
+  inexact alarm that Doze defers, so overnight the redraw lands on wake rather
+  than on the half hour. `HabitWidget.armMidnight` is what aims at midnight, and
+  it matters more here than on either single-habit widget: this grid's columns
+  all shift by one at midnight, not just its newest cell.
+
+  `minWidth`/`minHeight` are ~4x3 launcher cells, which `Widgets.overviewColumns`
+  and `Widgets.overviewRows` read back as five day columns and seven habit rows.
+
+  `configure`, and it is the SHARED `WidgetConfigActivity` — an overview widget
+  needs no habit pick, but it does need the server, and that activity already
+  reports "set your server first", a failed fetch and an empty account. The
+  manifest has exactly one `APPWIDGET_CONFIGURE` declaration and there is still
+  no second one to add.
+
+  And NO `widgetFeatures="reconfigurable"`, which is the one attribute the other
+  two provider XMLs carry that this one must not. That flag puts a Reconfigure
+  item in the launcher's long-press menu, which re-enters the activity above —
+  where `isOverview` answers true and `seed()` runs with no dialog at all. The
+  user gets a menu item that flashes and appears to do nothing: an affordance
+  for a question this widget never asks. The single-habit widgets keep it
+  because for them the activity has a real question (which habit), and
+  `configure` itself stays here either way — the initial seed still needs it.
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="250dp"
+    android:minHeight="180dp"
+    android:targetCellWidth="4"
+    android:targetCellHeight="3"
+    android:updatePeriodMillis="1800000"
+    android:initialLayout="@layout/widget_overview"
+    android:previewLayout="@layout/widget_overview"
+    android:configure="com.habiterall.app.widget.WidgetConfigActivity"
+    android:description="@string/overview_widget_description"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen" />

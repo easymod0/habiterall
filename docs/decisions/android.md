@@ -586,7 +586,8 @@ was — which is exactly wrong for a notification still in the shade about
 yesterday, answered after this morning's sync had cleared the flag: an answer
 WAS just recorded with no fetch behind it, and the note line went on reading
 "current" regardless. The rule that now holds is what `StatsWidget.render` —
-the field's one reader — actually needs to know: `figuresStale` means an
+the field's only reader at the time, and see the overview widget's section for
+the second one — actually needs to know: `figuresStale` means an
 ANSWER has been recorded with no fetch behind it, set on BOTH of `answered`'s
 branches, including the early return. A refusal (`WidgetSync.noteRefused`) is
 the one answer-shaped path that does NOT set it — but a later review of the
@@ -671,5 +672,394 @@ yesterday's strip cell exactly as it was until the next `/overview` fetch
 lands. Self-healing, and no data is lost — the write itself still goes
 through the outbox to the correct date — so this is recorded rather than
 patched.
+
+## The overview widget
+
+Issue #145 asked for two widgets. The stats widget was the first half and is
+the section above; this is the second — every habit down one side, the last few
+days across, read-only. The dashboard's grid at widget size.
+
+**The issue called it "a third cache shape", and that was the one genuinely
+hard call in the work.** It is not a third shape, and the reason is narrow
+enough to be worth stating rather than asserting. `Widgets.Record` carries a
+habit's shape, one day's answer, a history string and the four recoverability
+flags; every one of those fields means exactly the same thing for a row of an
+overview grid as it does for a checkmark widget's single cell. What an overview
+needs that no previous widget did is not a new FIELD but a new CARDINALITY: N
+records against one widget id. So the change is to the store's key, not to the
+record.
+
+**A second record type was the refused option, and the argument against it is
+the same one the stats widget already made, one size larger.** `Widgets.remap`
+and `onRestored` (a restore hands out different widget ids than the backup
+held — the "12 twice" bug), `refreshedOrGone` (a habit that leaves the account
+arrives as an absence) and the encode/decode fail-safes (a record that will not
+parse leaves a widget blank with no click intent and no way to recover) are
+three mechanisms this package paid for in shipped bugs. A parallel store would
+have had to re-implement all three, and the copy would have been wrong in a
+different place than the original. Against that, the cost of reuse is one
+`Record` field that means nothing for two of the three providers (`rank`, which
+defaults to `0`) and one store function that the single-habit widgets must not
+call (`cachedWidgetSet`). Both are documented at the definition.
+
+**`Settings.putWidgets` was the obstacle, and changing it introduced a
+regression in the two OLD widgets that had to be closed in the same change.**
+That function did `associateBy { it.widgetId }` and then `byId[it.widgetId] = it`,
+so N records for one id silently collapsed to whichever came last — every row
+of an overview but one, gone at the first refresh. Keyed on
+`(widgetId, habitId)` instead, N records survive; what the pair key takes away
+is the ability to say "these are the widget's records now", because a habit the
+new set does not name is no longer overwritten by anything. That meaning had a
+caller. `WidgetConfigActivity` is declared `widgetFeatures="reconfigurable"`,
+so pointing a checkmark widget from habit A to habit B runs it a second time,
+and on the old id key that write REPLACED the record. On the pair key it leaves
+both, and `Settings.cachedWidget(widgetId)` — which is `firstOrNull` — can then
+answer habit A: the launcher drawing B while a tap records A, which is the
+"12 twice" bug's exact shape reached by a second road, in a widget this issue
+did not otherwise touch. `Settings.putWidgetSet(widgetId, records)` purges the
+id and writes in one `edit`, the picker was moved onto it, and the test for it
+is written end to end through the store (write A, `putWidgetSet` B, assert
+`cachedWidget` answers B and only B) rather than against the function in
+isolation — the mutation that proves it is making `putWidgetSet` delegate to
+`putWidgets` with no purge.
+
+**Sorting by `Habit.position` was refused, and the refusal is the reason a
+`rank` field exists at all.** The obvious answer to "in what order" is the
+habit's own `position`, which the phone already has on every `Habit`. It is
+wrong for every account not on manual order: `/api/overview` applies the
+account's `habit_sort` server-side (`shared/src/habit-order.js`, #200), so the
+served list is already in the order every other surface shows, and re-sorting
+on the phone would make the widget the one surface that disagrees — by name, by
+score, by creation date, silently, for anyone who ever changed that setting.
+The order is therefore "the order the server served them in", full stop.
+
+That answer then needs somewhere to live, because nothing downstream preserves
+list order. `putWidgetSet` appends a widget's records at the tail of a flat
+blob and `cachedWidgetSet` filters it; `reconcileOverview` returns a list, but
+what is stored is a set. A reconcile that appended a newly-added habit's record
+would draw that habit LAST however the account sorts — a visible wrong-order
+bug that no test of the three store functions could see, because each of them
+is individually correct. `Record.rank` makes the served index an assertable
+property of the record: encode/decode field 18, appended and never inserted,
+read back `f.getOrNull(18)?.toIntOrNull() ?: 0` like every field since 12. The
+`0` default is not the fail-safe compromise `gone` and `unloggedIsSuccess` are —
+no record written before this field existed can belong to an overview widget,
+since there was none — but `toIntOrNull` rather than `toInt` is, for the reason
+14 and 15 are: a junk token must not cost the whole record and with it the
+widget. The two tests that matter here are separate on purpose, because #332
+shipped a decode test that named three fallbacks while mutating one of them and
+stayed green: one asserts an 18-field line reads `rank == 0`, one asserts a
+19-field line reads its rank, and the `reconcileOverview` fixture has the
+served order differing from both the stored order and the habit-id order, so it
+can tell the three apart.
+
+**A `Bitmap` was refused, for the three hazards the stats widget's section
+already lists and one more.** `RemoteViews` cannot draw, so a grid rendered as
+one image would need `setImageViewBitmap`: re-rendered on every resize, every
+theme change and every density change, under the marshalled-transaction size
+ceiling — and a 7×7 grid is where that ceiling stops being theoretical. The
+layout is fixed views hidden beyond need, exactly as `widget_stats.xml` does
+with its seven cells, which is also what lets a resize reveal cells without
+re-inflating anything. The cost is a real bound: `MAX_OVERVIEW_ROWS` is **7 and
+not 8 because of Android lint**. The layout is ~75 views (1 root + 1 note + 1
+header + 1 spacer + 7 day labels + 7 row containers + 7 names + 49 cells + 1
+footer), `TooManyViews` warns past 80, and an eighth row would be ~85. Seven
+rows are what keeps this under that ceiling, so adding a row means re-deriving
+`Widgets.overviewRows`'s thresholds, not raising a lint baseline.
+
+**A configuration screen that picks a subset was refused, and the honest bound
+is a counted footer instead.** The issue's own objection — "a home screen
+cannot show forty rows" — has two answers. One is a picker: choose which habits
+this widget shows, which needs a screen, a stored selection per widget id, a
+rule for what happens when a selected habit is archived, and a second place the
+"which habits" decision lives. The other is to show as many as fit and say how
+many are not shown. The second was taken. Every non-archived habit gets a
+record with no cap — it is the user's own account and one flat line each — so
+the count in `overview_more` is exact rather than approximate, and the widget
+never pretends it is showing all of them. How many are SHOWN is the widget's
+HEIGHT, the same way the stats strip's column count is its width, with
+`overviewRows`/`overviewColumns` written as explicit thresholds in `stripDays`'
+style; the column thresholds are `stripDays`' shifted up 80dp for the name
+column a bare strip does not pay for. The footer is a `<plurals>` and not
+`%d more`, because one is a common case (eight habits, seven rows) and "1 more
+habits" is what a format string ships.
+
+**A gone row disappears here where the single-habit widgets say "Removed", and
+this is a deliberate divergence rather than an inconsistency.** On a widget
+whose whole content is one habit, hiding that habit leaves a blank rectangle
+with nothing on it able to explain itself — which is why `widget_gone_short`
+exists and why the checkmark widget's note is a real view rather than a content
+description. On a grid of "your habits", a habit that has left the account is
+not one of them, and the row below closing up IS the signal. So
+`Widgets.reconcileOverview` DROPS such a record rather than marking it gone.
+`OverviewWidget.render` also filters `gone`, and the reason first written beside
+both — "`WidgetSync.refreshFrom` marks records gone knowing nothing about
+overview widgets, so a gone record genuinely exists in the store between a
+refresh and the next reconcile" — was made false by the same commit that wrote
+it: `refreshFrom` gained `records.filterNot { it.widgetId in overviewIds }`, so
+a live overview widget's records never enter the path that marks anything gone.
+The filter stays, with a true reason instead. A record can carry `gone` in from
+BEFORE its widget was a live overview — a record can outlive the widget it was
+written for, since the process may die between a deletion and `onDeleted`, and
+the launcher hands that id out again — and one `filterNot` over a list already
+in hand is cheaper than reasoning about which of those windows is reachable.
+The reconcile runs a held record through `refreshedOrGone` rather than bare
+`refreshed` for the other arm of the same function, and that arm is what clears
+such a flag: left set, a flag the render filters on hides a live habit forever,
+which is the failure this widget's own "drop it" rule would have made permanent.
+
+**The note line reports `record.date` staleness, which IS a claim about the
+grid**: an unrefreshed record has no data for today's column, so it paints
+UNKNOWN — indistinguishable from "answered nothing today". The line names the
+**oldest** row drawn and not the newest. "As of" is a claim about every row
+above it, so the newest date would be false about any row a day behind, and
+over-reporting staleness is the fail-safe direction the stats widget's own
+`noteRefused` decision already takes.
+
+**`figuresStale` IS read here, and the argument that it never needed to be did
+not survive review.** This section first said the opposite, at length: the
+widget paints name and cells only, `figuresStale` exists because `StatsWidget`
+PAINTS `score` and `currentStreak`, nothing on this screen is one of those
+figures, so the flag says nothing about anything drawn here — and, since
+"forgotten" and "excluded on purpose" look identical in a diff, the exclusion
+was written as a comment at the top of `OverviewWidget`. That is right about
+FIGURES and wrong about the GRID, which is the only thing this widget draws.
+
+`record.date` is not a FETCH date. `Widgets.answered` advances it on an answer
+recorded with no network at all, and `WidgetSync.noteAnswer` maps that over
+every record for the habit, overview rows included. Named case: T-3 is the last
+successful fetch, so the row carries `date = T-3` and a `history` covering
+T-9..T-3; on T-2 and T-1 the habit is answered in the browser while the phone
+is offline, so no fetch lands; on T the offline reminder fires and the user
+presses Yes, which sets `date = T` and `figuresStale = true` and leaves
+`history` untouched. The dated arm then reads `asOf == today` and the note
+DISAPPEARS — at the exact moment columns T-2 and T-1 have no history keys and
+paint UNKNOWN, which is the "indistinguishable from answered-nothing" confusion
+the line exists to resolve. `figuresStale` is the only available witness that
+`date` stopped being a fetch date, because `Widgets.answered` is the one event
+that both advances `date` and records that nothing was fetched behind it.
+
+So the precedence is three arms — nothing drawn → `overview_empty`; any drawn
+row dated before today → `overview_stale`; otherwise any drawn row with
+`figuresStale` → `overview_grid_behind` — and the third names no date, for the
+same reason `stats_figures_behind` is not a dated sentence: here the date IS
+today, and naming it would be false.
+
+**`overview_root`'s spoken sentence takes all four arms, and the first version
+took one.** The third arm arrived with `overview_summary_grid_behind` beside it
+— a note line a sighted user can read while the root announces an unqualified
+"your habits" is #332's screen-versus-screen-reader finding one layer up — but
+the description branched on `figuresStale` ALONE, so the two arms that were
+already there went on saying nothing: a widget whose visible line read "As of
+2026-08-14" was announced "Your habits: 2 of 2", and one reading "No habits to
+show yet" was announced "Your habits: 0 of 0", a COUNT where the screen states a
+REASON. `overview_summary_empty` (no format args — there is no pair left worth
+reading out) and `overview_summary_stale` (`overview_summary`'s own two counts,
+then the day the visible line names) close it, in `render`'s own
+empty/stale/behind/plain order, which is the shape `StatsWidget.render` already
+gave `stats_root` in #332 and the shape this widget should have copied whole.
+The general form, worth stating once: an arm added to a visible line is an arm
+owed to the spoken one, and the review that catches it is a diff that shows the
+two conditions next to each other.
+
+The lesson is the one the `figuresStale` section above already states, reached
+from the other side: a field is defined by what its READER asks of it. The
+stats widget asks "are my figures current" and this widget asks "is my grid
+current"; those are different questions with the same answer, and arguing from
+the field's NAME — "stale figures, and I paint no figures" — is what produced a
+justification that read as airtight and was not. The test is written through
+`WidgetSync.noteAnswer` rather than a hand-built `figuresStale = true` record
+for the same reason: only the real event shows that `date` and the history have
+parted company.
+
+**`liveIds` caught a third provider, exactly as its own KDoc predicted, and the
+sharper failure mode was `armMidnight`'s again.** That KDoc was written when
+`StatsWidget` shipped and ended by warning that a third provider would hit the
+same trap; it now records that it did. With ONLY an overview widget on a home
+screen, an `armMidnight` whose `wanted` did not count overview ids takes the
+`!wanted` branch and CANCELS the one alarm that would ever redraw anything at
+midnight — and this is the widget that needs it most, because its whole grid
+shifts by a column at midnight where the other two move one cell. The
+`Pair<Set<Int>, Set<Int>>` became
+`internal data class LiveIds(checkmark, stats, overview)` with an `any`
+accessor in the same change, specifically because the two call sites
+destructured it POSITIONALLY: a fourth provider added to a `Pair`-turned-
+`Triple` shifts what each name binds to and compiles everywhere, where named
+fields make it a compile error at every site that has not been extended.
+`redraw` also changed shape — it groups records by `widgetId` before
+dispatching, where it walked records one at a time — because an overview frame
+is drawn from its whole set at once, and per-record dispatch would have called
+`OverviewWidget.render` N times with one row each and left the launcher holding
+whichever single row was drawn last. The mutation for all of this is reverting
+`liveIds` to the two-provider `Pair`: both the `armMidnight`-with-only-an-
+overview test and the `redraw` test fail.
+
+**That regrouping left a hole of its own, and it is the same shape one level
+down: a widget id holding ZERO records produces no group, so `groupBy` never
+dispatches it.** For the two single-habit providers that is correct — no record
+means a widget whose configuration activity never completed, and an
+unconfigured widget belongs on its `initialLayout`. For an overview id it is
+wrong, and the input is ordinary: an account with habits and one overview
+widget, then every habit archived or deleted. `/api/overview` carries neither,
+so `WidgetSync.reconciledRows` hands `Widgets.reconcileOverview` an empty
+served list, which returns `[]`, and `Settings.putWidgetSet(id, emptyList())`
+purges the id — a purge its own KDoc calls legitimate, and the right write to
+make. `redraw` then skipped that id entirely and the launcher went on showing
+the frame it was last handed: the archived habits, their old cells, and no note
+at all. Nothing recovered it, because the 30-minute backstop and the midnight
+alarm both come back through the same `redraw`. `OverviewWidget.resized` had
+the identical hole from the other direction, as `if (records.isEmpty()) return`.
+
+So `redraw` dispatches the UNION of the grouped ids and the live OVERVIEW ids,
+and the asymmetry is stated in a comment where it lives, because "an empty
+group is nothing to draw" is the intuition that produced the bug. This is
+precisely the state `overview_empty` was written for — and that string is drawn
+into a real, VISIBLE `TextView` rather than a content description, for the
+reason the checkmark widget's gone note is one: the `uiautomator` dump is not
+the screen.
+
+**The test that was supposed to cover this could not fail, and it is worth
+recording why it read as thorough.** `zero renderable rows shows the empty
+message on a real view` called `OverviewWidget.render(context, emptyList(), …)`
+directly and asserted the note on the inflated view — a real view, a real
+string, both roads through the renderer. Nothing in the app ever calls the
+renderer with an empty list: the only caller that could is a `redraw` that has
+just been handed an empty group, which is exactly the dispatch that never
+happened. So it pinned the pure function one line below the platform output,
+which is this repo's most-shipped defect written down in its own suite. The
+replacements go through `Settings.putWidgetSet(id, emptyList())` +
+`HabitWidget.redraw(context)` and read the drawn frame back with
+`shadowOf(AppWidgetManager.getInstance(context)).getViewFor(id)`; the second
+starts from a widget that HAS rows and loses every habit through
+`WidgetSync.refreshFrom(context, emptyList())`, so the "frozen on its last good
+frame" symptom is what the assertion actually sees. The mutation is reverting
+`redraw` to the plain `groupBy` dispatch: the first fails with "a live overview
+widget holding no records must still be drawn", and the second with
+`expected:<[No habits to show yet]> but was:<[As of 2026-08-16]>` — the stale
+frame, quoted from the launcher.
+
+**The overview provider is NOT `reconfigurable`, and the other two are.**
+`widgetFeatures="reconfigurable"` puts a Reconfigure item in the launcher's
+long-press menu, which re-enters `WidgetConfigActivity` — where `isOverview`
+answers true and `seed()` runs with no dialog at all. For the single-habit
+widgets that menu item asks a real question ("which habit"); here the user gets
+a control that flashes and appears to do nothing, an affordance for a question
+this widget never asks. `android:configure` stays on the provider either way,
+because the initial seed still needs it, and the manifest's one
+`APPWIDGET_CONFIGURE` declaration is untouched.
+
+**`WidgetSync.refreshFrom` does two different jobs now, and mixing them would
+purge the store.** A single-habit record is REFRESHED in place through
+`putWidgets`, with the existing filter that drops an unchanged record so a
+refresh deciding nothing writes nothing. An overview set is RECONCILED through
+`putWidgetSet`, because membership, order and rank are all decided by the
+served list. Those records are excluded from the first path, and that exclusion
+is not tidiness: the drop-unchanged filter feeding a write that means "these
+are the widget's records now" would purge every untouched row of every widget
+in the store. Which ids are overviews is asked of the LAUNCHER rather than of
+the store — here and in `refreshFromServer`'s "only when a widget exists"
+guard — because an overview widget placed but never seeded holds no records at
+all: its configuration activity can be dismissed, killed, or run against an
+unreachable server, and it finishes CANCELLED having written nothing. Asked of
+the store alone, the heartbeat that would have filled that widget returned
+before it fetched anything, which is the one path that must not skip it.
+
+The in-flight-write skip applies to an overview row, and narrowly. The overview
+itself writes nothing, but the habit in a row gets answered elsewhere on the
+phone — a notification's buttons, its number pad, or a checkmark widget for the
+same habit — and a fetch landing while that write is still in the outbox
+carries an answer older than the tap, so writing it over the row blanks a cell
+the user already answered, and offline it stays blanked. So
+`WidgetSync.reconciledRows` keeps the pending day's `value`/`skip`, and nothing
+else: a pending write says something about one DAY, not about whether the habit
+is still on the account or where it now sorts, so `gone`, `rank` and the
+habit's shape come from the reconcile regardless. The narrowing is that
+`Outbox.isPending` is asked only for a row whose refreshed day actually
+DISAGREES with what the row already shows. A single-habit widget is a handful
+of records and a question each; an overview is one record per habit on the
+account, on every fetch, and a WorkManager round trip about a row that would
+not change is bought for nothing.
+
+**The configuration activity gained a branch and not a second activity,
+because the manifest can only hold one.** `APPWIDGET_CONFIGURE` is declared
+once and the existing declaration's comment says there is no second one to
+add — still true. An overview widget has no habit to pick, but it has the
+identical need of the server, and with no configuration step at all it would
+sit blank until `ScheduleWorker`'s six-hourly heartbeat, with nothing on screen
+to say that no server was ever configured. It therefore takes every failure
+path this activity already draws (`api == null`, a failed fetch, an empty
+account) and none of its question, seeding every non-archived habit through
+`reconcileOverview` from an EMPTY existing set — the same pure function the
+refresh path uses, so placing a widget and refreshing one cannot become two
+opinions about which habits, in what order, at what rank.
+
+The branch is `WidgetConfigActivity.isOverview(manager, widgetId)`, hoisted to
+an `internal` companion function for the reason `HabitList` and `ManageScreen`
+are reachable: it is the ONE path by which an overview widget ever acquires
+records, and a predicate buried in an activity body is a decision no test can
+reach — this file's most repeated lesson, four Android bugs one line below a
+correct pure function. Every way of being wrong in it is silent
+(`shortClassName` rather than `className`, the `ComponentName`'s own
+`toString`, the other provider's name), and each one sends a freshly placed
+overview widget into the habit PICKER, which seeds it a single record and
+leaves a seven-row grid holding one row. A null info — an id the launcher has
+already dropped — answers false and falls through to the picker, which finishes
+CANCELLED like any other failure here; the test pins that case too.
+
+**Writing that test taught a Robolectric fact that belongs in the archive,
+because the obvious version of it cannot fail.**
+`ShadowAppWidgetManager.bindAppWidgetId(id, componentName)` — which every other
+test in this suite uses, correctly, to make `getAppWidgetIds` answer — does NOT
+populate `getAppWidgetInfo(id).provider`. The plain bind records the
+`ComponentName` and nothing else; `getAppWidgetInfo` reads a field the shadow
+sets only from a matching entry in its installed-provider list. So after a bare
+bind the info is `null` for every id, `isOverview` answers false for every id
+including the overview one, and a test written the obvious way asserts
+`false, false, false` and passes green against a predicate that always answers
+false. This was confirmed by running it before the real test was written. What
+works is `addBoundWidget(id, AppWidgetProviderInfo().apply { provider = ... })`,
+which installs the provider AND binds the id, so `getAppWidgetIds` still
+answers it and the fixture agrees with the one `liveIds` reads. The fixture
+also asserts that `className` and `shortClassName` DIFFER in it, because
+otherwise the test cannot see a `shortClassName` comparison at all.
+
+**Per-row taps needed the `filterEquals` lesson one id finer than the other two
+widgets did.** Extras are ignored by intent equality, so seven rows built from
+one `Intent` differing only in `EXTRA_HABIT_ID` collapse onto ONE PendingIntent
+and every row opens whichever habit was drawn last. The alarms learned this as
+`habiterall://snooze/<id>` against `habiterall://remind/<id>`, and the two
+widgets as `habiterall://widget/<widgetId>/tap` and
+`habiterall://stats/<widgetId>` — all of which distinguish one WIDGET from
+another. This widget has N targets inside one widget, so the habit id is in the
+URI as well: `habiterall://overview/<widgetId>/<habitId>`.
+
+**Two colour decisions are inherited rather than re-made, and each still needed
+its own test on this surface.** Cells call `HabitWidget.stripFill`, not `fill`,
+because this grid has no glyphs either and so needs the ghost-kept arm
+`Widgets.markFor` draws as a `✓` on the big cell — with `fill`, a full-marks
+week on an avoided habit paints as a blank one, which is precisely the defect
+the section above found and fixed one layer down. The avoided-habit inversion
+(a clean day in the habit's own colour, a slip in red) comes free from the same
+reuse. Free does not mean pinned: "pinning the decision is not pinning the
+wiring", and a new caller is a new place for the wiring to be wrong, so both
+have tests against the INFLATED `RemoteViews` here. The per-cell VALUE follows
+`stripStates`' own carve-out — `record.value` when the cell's date equals
+`record.date`, else the decoded history — because shading every cell from
+`record.value` was one of #332's findings across seven cells, and there are
+forty-nine here.
+
+**What did NOT change, and confirming it was part of the work.** No server
+change and no `shared/` change: `/api/overview` already returns `score`,
+`currentStreak`, `bestStreak` and `totalCompleted` per habit in both editions,
+and `Api.kt`'s `Habit` already deserializes all four plus `position` and
+`archived`. No new file under `shared/public/`, so no `CACHE_VERSION` bump. No
+sixth offline mirror — the figures and the order are cached ANSWERS, never
+recomputed on the phone, which is the same refusal the stats widget made about
+Loop's `0.5^(sqrt(frequency)/13)` decay. And no `days = 1` hazard on the list
+screen's path, which was worth checking because that is exactly the bug #332
+found in `refreshFromServer`: `MainActivity` fetches
+`api.overview(days = windowDays)`, where `windowDays` starts at
+`Grid.INITIAL_DAYS` (30) and only ever grows toward `Grid.MAX_DAYS` (365), so
+it can never be narrower than the seven days `encodeHistory` needs.
 
 

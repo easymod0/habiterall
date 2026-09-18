@@ -36,6 +36,7 @@ class WidgetTest {
         score: Double = 0.0,
         currentStreak: Int = 0,
         history: String = "",
+        rank: Int = 0,
     ) = Widgets.Record(
         widgetId = 7,
         habitId = habit.id,
@@ -53,6 +54,7 @@ class WidgetTest {
         score = score,
         currentStreak = currentStreak,
         history = history,
+        rank = rank,
     )
 
     private fun boolHabit() = Habit(id = 1, name = "Meditate")
@@ -240,6 +242,114 @@ class WidgetTest {
         val back = Widgets.refreshedOrGone(gone, boolHabit(), today)
         assertFalse(back.gone)
         assertNotNull(Widgets.tap(back, today, skipDays = false, questionMarks = false))
+    }
+
+    /* ---------- the overview widget's set of records ---------- */
+
+    /**
+     * Three habits carrying DIFFERENT colours as well as different names, so a
+     * row resolved the wrong way is visible in an assertion rather than equal
+     * to its neighbour. Their id order is 1, 2, 4 — which the ordering test
+     * below needs to differ from both the stored order and the served one.
+     */
+    private fun meditate() = boolHabit().copy(color = "#111111")
+    private fun water() = waterHabit().copy(color = "#222222")
+    private fun read() = Habit(id = 4, name = "Read", color = "#333333")
+
+    @Test
+    fun `reconcileOverview ranks habits in the order the server served them`() {
+        // The one assertion the whole ordering decision rests on, and the
+        // fixture is built so it can fail three different ways: the STORED
+        // order is 2, 4, 1; the ID order is 1, 2, 4; and the SERVED order —
+        // which is the account's own `habit_sort`, already applied by
+        // `/api/overview` — is 4, 1, 2. Ranking by anything but the served
+        // order lands on different numbers.
+        val stored = listOf(
+            record(water()).copy(widgetId = 42),
+            record(read()).copy(widgetId = 42),
+            record(meditate()).copy(widgetId = 42),
+        )
+        val served = listOf(read(), meditate(), water())
+
+        val out = Widgets.reconcileOverview(stored, widgetId = 42, habits = served, today = today)
+
+        assertEquals(
+            "the rank IS the index in the served list",
+            listOf(4L to 0, 1L to 1, 2L to 2),
+            out.map { it.habitId to it.rank },
+        )
+        // And the returned list is in that order too, so a caller that draws
+        // it straight through is not drawing something else.
+        assertEquals(listOf("Read", "Meditate", "Water"), out.map { it.name })
+    }
+
+    @Test
+    fun `reconcileOverview adds a habit that had no record`() {
+        // A habit created on another device between two reconciles. It gets a
+        // whole record built from the server's answer, not a blank one waiting
+        // on a later refresh.
+        val stored = listOf(record(meditate()).copy(widgetId = 42))
+        val served = listOf(meditate(), water())
+
+        val out = Widgets.reconcileOverview(stored, widgetId = 42, habits = served, today = today)
+
+        assertEquals(listOf(1L, 2L), out.map { it.habitId })
+        val added = out[1]
+        assertEquals("Water", added.name)
+        assertEquals("#222222", added.color)
+        assertEquals(today, added.date)
+        assertEquals(1, added.rank)
+    }
+
+    @Test
+    fun `reconcileOverview drops a habit the server no longer serves`() {
+        // Dropped, not marked `gone`: the overview is "your habits", and one
+        // that has left the account is not one of them — the row below closing
+        // up is the signal. The single-habit widgets say "Removed" instead,
+        // because hiding the one thing on their screen would leave a blank
+        // widget with nothing to explain it.
+        val stored = listOf(
+            record(meditate()).copy(widgetId = 42),
+            record(water()).copy(widgetId = 42),
+        )
+        val served = listOf(water())
+
+        val out = Widgets.reconcileOverview(stored, widgetId = 42, habits = served, today = today)
+
+        assertEquals(listOf(2L), out.map { it.habitId })
+        assertEquals("the survivor moves up to the first row", 0, out.single().rank)
+    }
+
+    @Test
+    fun `reconcileOverview stamps the widget id on every record`() {
+        // The records come off a store keyed by the pair, and a fresh one is
+        // built here rather than fetched, so neither source can be trusted to
+        // carry the id the caller is reconciling FOR.
+        val stored = listOf(record(meditate()).copy(widgetId = 7))
+        val out = Widgets.reconcileOverview(
+            stored,
+            widgetId = 42,
+            habits = listOf(meditate(), water()),
+            today = today,
+        )
+        assertEquals(listOf(42, 42), out.map { it.widgetId })
+    }
+
+    @Test
+    fun `reconcileOverview un-marks a row whose habit has come back`() {
+        // `WidgetSync.refreshFrom` marks records gone knowing nothing about
+        // overview widgets, so a row can arrive here already flagged. The
+        // habit is in the served list, so it is plainly not gone — and the
+        // render filters `gone` rows, which would otherwise hide an
+        // un-archived habit for good.
+        val stored = listOf(record(meditate()).copy(widgetId = 42, gone = true))
+        val out = Widgets.reconcileOverview(
+            stored,
+            widgetId = 42,
+            habits = listOf(meditate()),
+            today = today,
+        )
+        assertFalse("a served habit is not a gone one", out.single().gone)
     }
 
     /* ---------- midnight, and the restore ---------- */
@@ -514,6 +624,42 @@ class WidgetTest {
     }
 
     @Test
+    fun `overviewColumns holds its thresholds exactly, not the constant`() {
+        // Every threshold and one below each, as literals. Asserting
+        // `Widgets.MAX_STRIP_DAYS` for the top arm would pin the name and
+        // nothing else — the `fresh` window passed with 7 widened to 30 while
+        // its own comment claimed the boundary was covered.
+        assertEquals(3, Widgets.overviewColumns(209))
+        assertEquals(4, Widgets.overviewColumns(210))
+        assertEquals(4, Widgets.overviewColumns(249))
+        assertEquals(5, Widgets.overviewColumns(250))
+        assertEquals(5, Widgets.overviewColumns(289))
+        assertEquals(6, Widgets.overviewColumns(290))
+        assertEquals(6, Widgets.overviewColumns(329))
+        assertEquals(7, Widgets.overviewColumns(330))
+        // And the top arm is the cap: there are seven cells in a row and no
+        // width answers more.
+        assertEquals(7, Widgets.overviewColumns(900))
+    }
+
+    @Test
+    fun `overviewRows holds its thresholds exactly, not the constant`() {
+        assertEquals(2, Widgets.overviewRows(79))
+        assertEquals(3, Widgets.overviewRows(80))
+        assertEquals(3, Widgets.overviewRows(104))
+        assertEquals(4, Widgets.overviewRows(105))
+        assertEquals(4, Widgets.overviewRows(129))
+        assertEquals(5, Widgets.overviewRows(130))
+        assertEquals(5, Widgets.overviewRows(154))
+        assertEquals(6, Widgets.overviewRows(155))
+        assertEquals(6, Widgets.overviewRows(179))
+        assertEquals(7, Widgets.overviewRows(180))
+        // The layout holds seven rows, so no height may answer eight — the
+        // literal, not `MAX_OVERVIEW_ROWS`, for the reason above.
+        assertEquals(7, Widgets.overviewRows(900))
+    }
+
+    @Test
     fun `refreshedOrGone carries the stats figures from the habit`() {
         val stale = record(waterHabit(), score = 0.0, currentStreak = 0)
         val habit = waterHabit().copy(score = 0.42, currentStreak = 7)
@@ -544,6 +690,41 @@ class WidgetTest {
         )
         // And everything that already existed still parses.
         assertEquals(7, back.widgetId)
+    }
+
+    /* ---------- rank: the overview widget's row order, on disk ---------- */
+
+    @Test
+    fun `a record written before rank existed reads rank zero`() {
+        // Eighteen fields is what every widget on a phone that upgrades to
+        // this build holds, and the reader indexes positionally: `f[18]`, or
+        // `f.getOrNull(18)!!`, throws on every one of them and costs the phone
+        // its whole widget blob. Deliberately the ONLY claim in this test —
+        // #332 shipped a decode test that named three fallbacks while mutating
+        // one of them and stayed green, so the 19-field half is its own test
+        // below rather than another assertion here.
+        val eighteen = Widgets.encode(record(boolHabit())).split('|').take(18).joinToString("|")
+        val back = Widgets.decode(eighteen)
+        assertNotNull("a record with no rank field must still decode", back)
+        assertEquals("an absent rank field reads as the first row", 0, back!!.rank)
+    }
+
+    @Test
+    fun `a nineteen-field line reads its own rank`() {
+        // The other half, separately: a record that HAS a rank must come back
+        // holding it, and not holding the fallback the test above asserts. 4
+        // rather than 0 on purpose — a fixture holding a field's default
+        // compares equal to itself and passes with the field dropped entirely.
+        val fifth = record(waterHabit(), rank = 4)
+        val line = Widgets.encode(fifth)
+        assertEquals("rank is field 18, appended and never inserted", 19, line.split('|').size)
+        assertEquals("4", line.split('|')[18])
+
+        val back = Widgets.decode(line)!!
+        assertEquals(4, back.rank)
+        // And the whole record round trips with it, so nothing was shifted by
+        // the new field.
+        assertEquals(fifth, back)
     }
 
     @Test

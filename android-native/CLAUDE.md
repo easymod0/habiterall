@@ -476,6 +476,128 @@ checkmark widget's own cell does with its one mark.
 has been; this is that same behaviour on a second layout, and this paragraph is
 the recorded decision rather than the default nobody chose.
 
+### The overview widget
+
+**A THIRD provider, `OverviewWidget`, over the SAME record store — every habit
+down one side, the last few days across.** Read-only like the stats widget, and
+name plus cells ONLY: a name column and up to seven day columns leave no room
+for a figure, and the stats widget is where a number lives.
+
+**It is still not a third cache; the cost was one assumption in the STORE, and
+two rules come out of it.** `Settings.putWidgets` keys on `(widgetId, habitId)`
+rather than on `widgetId`, so it can only MERGE: any write meaning "these and no
+others" must be `Settings.putWidgetSet(widgetId, records)`, which purges the id
+first — `emptyList()` included, and that purge is legitimate. And
+`cachedWidget`'s `firstOrNull` is the SINGLE-HABIT read; this widget uses
+`cachedWidgetSet`.
+
+**The order is the SERVER's, never `Habit.position`, and it is stored as
+`Record.rank`.** `/api/overview` has already applied the account's `habit_sort`
+(#200), so sorting on the phone is a second opinion, and `position` is the
+MANUAL order — an account sorting by name would see its widget disagree with
+every other surface it owns. Stored (field 18, fail-safe `0`) and not left
+implicit in list order, which `putWidgetSet`'s tail-append does not preserve.
+
+**The note line has THREE arms, and the third reads `figuresStale` — reversing
+what this section first said.** No rows drawn → `overview_empty`; any drawn row
+dated before today → `overview_stale`, naming the OLDEST row drawn, since "as
+of" is a claim about every row above it; otherwise any drawn row with
+`figuresStale` → `overview_grid_behind`, which names no date because the date IS
+today. The first argument — "no figures are painted here, so the flag says
+nothing about this screen" — is right about FIGURES and wrong about the GRID:
+`record.date` is not a fetch date, `Widgets.answered` advances it on an answer
+recorded with no network, so a row answered offline reads `date == today` while
+its older columns still paint UNKNOWN off a history nothing refreshed, and this
+flag is the only witness that `date` moved with no fetch behind it.
+**`overview_root`'s spoken sentence takes the same arms in the same order**, and
+adding an arm to one half means adding it to the other: `overview_summary_empty`,
+`overview_summary_stale`, `overview_summary_grid_behind`, then the plain
+`overview_summary`. It branched on `figuresStale` alone first, so a widget whose
+line read "As of 2026-08-14" was announced as "Your habits: 2 of 2" and an empty
+one as "Your habits: 0 of 0" — a count where the screen states a reason. That is
+#332's stats-widget finding on a third surface, which is why `stats_root` is the
+shape to copy rather than a thing to re-derive.
+
+**A gone row DISAPPEARS here and the rows below close up, where the two
+single-habit widgets say "Removed".** Both are right: hiding the one thing on
+THEIR screen leaves a blank widget with nothing to explain it, while here the
+overview is "your habits" and the vanishing row IS the signal.
+`Widgets.reconcileOverview` drops such a record and `OverviewWidget.render`
+filters `gone` as well — cheap defence against a `gone` carried in from before
+the id was an overview's, NOT the mechanism the comment first claimed
+(`refreshFrom` excludes a live overview's records from the gone-marking path).
+`refreshedOrGone`'s `gone = false` arm clears it; left set, a flag the render
+filters on is permanent.
+
+**How many rows are shown is the widget's HEIGHT, and what it cannot show it
+COUNTS.** `overviewRows`/`overviewColumns` are `stripDays`'s shape — explicit
+thresholds — with the columns shifted up 80dp for the name column. Every
+non-archived habit gets a record, uncapped, which is what makes `overview_more`
+exact. `MAX_OVERVIEW_ROWS` is **7 and not 8 because of lint**: the layout is ~75
+views and `TooManyViews` warns past 80, so an eighth row means re-deriving the
+thresholds, not raising a baseline.
+
+**`HabitWidget.redraw` dispatches the UNION of the grouped record ids and the
+live OVERVIEW ids, and the asymmetry is deliberate.** An id holding no records
+produces no `groupBy` entry. For a checkmark or stats id that is right — no
+record means an UNCONFIGURED widget, which must stay on its `initialLayout`. An
+overview id with no records is a CONFIGURED widget on an account with every
+habit archived, which is what `overview_empty` is for; left out of the loop the
+launcher freezes on its last good frame, and the 30-minute backstop and the
+midnight alarm both come back through this one function.
+`OverviewWidget.resized` draws an empty set for the same reason.
+
+**A third provider joins `liveIds`, under the rule the stats widget's section
+above already states** — and `LiveIds` is a named type rather than a `Pair` so
+that a fourth is a compile error at both call sites, not a silent re-binding.
+`redraw` additionally groups by `widgetId` before dispatching, because an
+overview frame is drawn from its whole set at once.
+
+**`WidgetSync.refreshFrom` does two different jobs, not one job with a different
+cardinality.** A single-habit record is REFRESHED in place through `putWidgets`
+with the drop-unchanged filter; an overview set is RECONCILED through
+`putWidgetSet`, and its records are EXCLUDED from the first path, or that filter
+meeting "these are the widget's records now" purges every untouched row in the
+store. Which ids are overviews is asked of the LAUNCHER, never the store —
+a widget placed but never seeded holds no records at all. The `Outbox.isPending`
+skip applies to an overview row too, narrowed to a row whose refreshed day
+actually disagrees with what it shows, because this asks one question per habit
+on every fetch.
+
+**The configuration activity gained a BRANCH, not a second activity — and this
+provider is NOT `reconfigurable`.** One `APPWIDGET_CONFIGURE` declaration, still
+no second to add: this widget has no habit to pick but the identical need of the
+server, so it takes that activity's failure paths and none of its question,
+behind `WidgetConfigActivity.isOverview(manager, widgetId)` — an `internal`
+companion function, because it is the ONE path by which this widget acquires
+records and every way of being wrong in it is silent.
+`widgetFeatures="reconfigurable"`, which both single-habit providers declare,
+must NOT be set here: it offers a long-press Reconfigure that re-enters the
+activity, where `seed()` runs with no dialog — a menu item that flashes and
+appears to do nothing. `configure` stays; the initial seed needs it.
+
+**Seven rows are seven PendingIntents, one `filterEquals` step finer than the
+other two widgets needed.** Extras are ignored by intent equality, so rows
+differing only in `EXTRA_HABIT_ID` collapse onto one and every row opens the
+habit drawn last: the habit id is in the `data` too,
+`habiterall://overview/<widgetId>/<habitId>`.
+
+**Every cell is `HabitWidget.stripFill`/`describeStrip` of its OWN day's
+value** — the strip's rules above, on forty-nine cells instead of seven, with
+the value following `stripStates`' carve-out (`record.value` only when the
+cell's date is `record.date`) and the date prepended to each description. All of
+it inherited, all of it re-tested on THIS surface, because pinning the decision
+is not pinning the wiring.
+
+**It follows the LAUNCHER's light/dark, never the account's `theme` setting** —
+`res/values-night/colors.xml` is still the app's only night qualifier.
+
+**A test-harness trap: Robolectric's `ShadowAppWidgetManager.bindAppWidgetId`
+does NOT populate `getAppWidgetInfo(id).provider`,** so a provider-predicate
+test written on it asserts false everywhere and passes green against a predicate
+that always answers false. `addBoundWidget(id, AppWidgetProviderInfo().apply {
+provider = ... })` is what works; `docs/decisions/android.md` has why.
+
 ## The WebView back stack
 
 **A view is named by a fragment, never a path** (`#/habit/42`), because that
