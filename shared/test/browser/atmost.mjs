@@ -5,6 +5,7 @@ import { pathToFileURL as _p2u } from 'node:url';
 /** Resolve a module in shared/public relative to this file, not the cwd. */
 const sharedPublic = (name) =>
   _p2u(_jn(_dn(_f2u(import.meta.url)), '..', '..', 'public', name)).href;
+import { daysAgo } from './fixtures.mjs';
 // Verify at_most habits paint 0 as a full success.
 class N{constructor(n){this.name=n;this.attrs={};this.children=[];this.text=null;}
  setAttribute(k,v){this.attrs[k]=String(v);}getAttribute(k){return this.attrs[k];}
@@ -19,9 +20,12 @@ const {calendarChart}=await import(sharedPublic('charts.js'));
 let fails=0;
 const check=(l,c,e='')=>{console.log(`${c?'PASS':'FAIL'}  ${l}${e?' :: '+e:''}`);if(!c)fails++;};
 
-const today=new Date();today.setHours(0,0,0,0);
-const iso=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-const ago=n=>iso(new Date(today.getTime()-n*86400000));
+// `daysAgo` from the fixtures, not a local copy: this was `iso(new
+// Date(today.getTime() - n * 86400000))` off a local midnight, which steps by
+// fixed 24-hour blocks and so skips a calendar day across a spring-forward.
+// The five-day run below (`rD30`…`rD26`) was six days wide with a hole in it on
+// four days a year. See `daysAgo`'s own comment.
+const ago = daysAgo;
 const d0=ago(7), d1=ago(8), d2=ago(9);   // safely inside a 4-week grid
 
 const paint=(entries,color,habit)=>{

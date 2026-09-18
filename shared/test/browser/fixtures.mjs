@@ -67,12 +67,69 @@ const api = async (path, options = {}, base = BASE) => {
 const iso = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
-const daysAgo = (n) => {
+/**
+ * `n` days before today, on the LOCAL calendar — the one spelling, for a suite
+ * that runs under node.
+ *
+ * Exported because two suites had their own, and theirs stepped a local `Date`
+ * by fixed 24-hour blocks (`today.getTime() - n * 86400000`). A local calendar
+ * day spanning a spring-forward is 23 hours, so that walk drifts an hour and
+ * then skips a date outright: under `America/New_York` with today at
+ * 2026-04-07, it answers `2026-03-07, 2026-03-09, …` and never 2026-03-08.
+ * `atmost.mjs` builds a five-day RUN out of five such calls, so on four days a
+ * year that run spanned six calendar days with a hole in it — a fixture wrong
+ * about the thing the suite exists to assert. `setDate` takes CALENDAR steps
+ * and has no such day, which is the same reason `dateRange` in
+ * `shared/src/stats.js` walks with it rather than by epoch arithmetic.
+ *
+ * The noon anchor is the second half: `setDate` keeps the local time of day, so
+ * starting at midnight puts the walk one hour from the boundary in a zone that
+ * transitions AT midnight. Noon is as far from both as a day allows.
+ *
+ * `LOCAL_ISO_SRC` below is this function again as page-side source, and
+ * `browser-runner.test.js` asserts the two agree.
+ *
+ * @param {number} n days back; negative reaches into the future
+ * @returns {string} `YYYY-MM-DD`
+ */
+export const daysAgo = (n) => {
   const d = new Date();
   d.setHours(12, 0, 0, 0);
   d.setDate(d.getDate() - n);
   return iso(d);
 };
+
+/**
+ * `daysAgo` again, as PAGE-SIDE SOURCE, for the suites that name a day the
+ * fixtures above seeded.
+ *
+ * A suite runs its date arithmetic inside `Runtime.evaluate`, so it cannot
+ * call the function above — and six of them had each written their own copy
+ * as `d.setDate(d.getDate() - n)` followed by `d.toISOString().slice(0, 10)`.
+ * That mixes a LOCAL-time `Date` with a UTC read, so the answer is the local
+ * date only while the two zones agree about which day it is. They disagree for
+ * part of every day — west of UTC through the local evening, east of UTC
+ * through the local morning — and then every date the suite computes is one
+ * day off the days `daysAgo` wrote, while the app, which is on the local
+ * calendar throughout (`iso()` in `ui/dates.js`, `todayISO()`), draws the
+ * local ones.
+ *
+ * `habiterall-personal/test/overview.integration.mjs` had already written this
+ * rule down for its own `daysAgo`, which is worth knowing: the rule existed and
+ * the browser suites had not been held to it. **CI runs UTC, so none of this
+ * can fail there** — it only ever breaks on somebody's laptop, which is why it
+ * survived in six suites at once, and why the guard in
+ * `shared/test/browser-runner.test.js` reads the source rather than waiting for
+ * a red run.
+ *
+ * Interpolated into a template literal, so it contains no backticks (see the
+ * root `CLAUDE.md` on a suite's page-side source) and quotes with `"`.
+ */
+export const LOCAL_ISO_SRC =
+  'const iso = (n) => { const d = new Date(); d.setHours(12, 0, 0, 0);'
+  + ' d.setDate(d.getDate() - n);'
+  + ' const p = (x) => String(x).padStart(2, "0");'
+  + ' return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()); };';
 
 /**
  * Wipe and recreate the fixture set, with ~60 days of history so the charts

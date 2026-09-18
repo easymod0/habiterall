@@ -44,6 +44,7 @@ import { join } from 'node:path';
 import {
   closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
 } from './chrome.mjs';
+import { daysAgo, LOCAL_ISO_SRC } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9321);
 const profile = mkdtempSync(join(tmpdir(), 'habstrip-'));
@@ -113,8 +114,7 @@ try {
         target_type: 'at_most', target_value: 2, show_as: 'avoid', unit: 'coffees',
         color: '#ef4444', freq_numerator: 1, freq_denominator: 1 }),
     })).json();
-    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
-      return d.toISOString().slice(0, 10); };
+    ${LOCAL_ISO_SRC}
     const day1 = iso(1), day2 = iso(2), day3 = iso(3);
     for (const h of [yesno, num, avoid].filter(Boolean)) {
       for (const date of [day1, day2, day3]) {
@@ -539,8 +539,7 @@ try {
   // changes, and the block clears every note it added before it ends, so the
   // habit leaves this block exactly as it arrived.
   const notesSeed = await ev(`(async () => {
-    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
-      return d.toISOString().slice(0, 10); };
+    ${LOCAL_ISO_SRC}
     const kept = iso(10), toClear = iso(11), toAdd = iso(12);
     const rows = await (await fetch('/api/habits/${seeded.habit}/entries')).json();
     const at = (date) => rows.find(e => e.date === date) ?? null;
@@ -1188,15 +1187,13 @@ try {
     // later edit that swaps in a "rounder" frequency would silently stop this
     // block testing anything. Verified against `/api/habits/:id/stats` rather
     // than assumed.
-    const localISO = (n) => {
-      const d = new Date();
-      d.setHours(12, 0, 0, 0);
-      d.setDate(d.getDate() - n);
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-        + `-${String(d.getDate()).padStart(2, '0')}`;
-    };
-    const probeEntryDate = localISO(12);
-    const probeNextDate = localISO(11);
+    // `daysAgo` from the fixtures, not a fourth copy: this block is node-side,
+    // so it can call the function the fixtures seeded these days with instead
+    // of restating it. The three page-side blocks in this file use
+    // `LOCAL_ISO_SRC`, which is the same algorithm as source text because a
+    // `Runtime.evaluate` cannot call a node function.
+    const probeEntryDate = daysAgo(12);
+    const probeNextDate = daysAgo(11);
     const probe = await ev(`(async () => {
       const h = await (await fetch('/api/habits', {
         method: 'POST', headers: { 'content-type': 'application/json' },
@@ -1234,7 +1231,7 @@ try {
     // so nothing inside a daily streak is ever left unlogged — unlike Gym
     // above, whose 3/7 schedule fills its run with the very unlogged days
     // this suite uses to pin the tick itself.
-    const closedRunDates = [13, 12, 11, 10].map(localISO); // oldest first
+    const closedRunDates = [13, 12, 11, 10].map((n) => daysAgo(n)); // oldest first
     const closedRun = await ev(`(async () => {
       const h = await (await fetch('/api/habits', {
         method: 'POST', headers: { 'content-type': 'application/json' },
@@ -1292,8 +1289,7 @@ try {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'Strip notes probe', type: 'boolean', color: '#22c55e' }),
     })).json();
-    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
-      return d.toISOString().slice(0, 10); };
+    ${LOCAL_ISO_SRC}
     const noted = iso(1), plain = iso(2);
     const noteText = 'left half a glass, felt fine';
     await fetch('/api/habits/' + h.id + '/entries/' + noted, {

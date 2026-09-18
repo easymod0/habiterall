@@ -13,6 +13,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor } from './chrome.mjs';
+import { LOCAL_ISO_SRC } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9295);
 const profile = mkdtempSync(join(tmpdir(), 'habunknown-'));
@@ -69,10 +70,7 @@ try {
   const seeded = await ev(`(async () => {
     const habits = await (await fetch('/api/habits')).json();
     const yesno = habits.find(h => h.type === 'boolean' && !h.archived);
-    const iso = n => {
-      const d = new Date(); d.setDate(d.getDate() - n);
-      return d.toISOString().slice(0, 10);
-    };
+    ${LOCAL_ISO_SRC}
     const tapDay = iso(1), bareDay = iso(2);
     // Start from nothing on both, so what appears is what the taps did.
     for (const date of [tapDay, bareDay]) {
