@@ -33,6 +33,8 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
+import { LOCAL_ISO_SRC } from './browser/fixtures.mjs';
+
 const browserDir = join(dirname(fileURLToPath(import.meta.url)), 'browser');
 
 /**
@@ -796,7 +798,11 @@ test('a suite dates its days on the local calendar, the one the fixtures seeded'
   const found = {};
   for (const file of suites) {
     const src = readFileSync(join(browserDir, file), 'utf8');
-    const hits = src.split('\n').filter((l) => /toISOString\s*\(/.test(l)).length;
+    // OCCURRENCES, not lines holding one. A second UTC read added to a line
+    // that already had one is invisible to a per-line count, and both exempt
+    // files below build their page-side source as concatenated string
+    // fragments, where several reads on one line is the ordinary shape.
+    const hits = (src.match(/toISOString\s*\(/g) ?? []).length;
     if (hits) found[file] = hits;
   }
 
@@ -823,9 +829,97 @@ test('a suite dates its days on the local calendar, the one the fixtures seeded'
   }
 
   // The rule is only worth having if the shared spelling is what it points at.
+  // Scoped to the DECLARATION rather than to everything after it: split on the
+  // export and the second half is the rest of the file, so a later helper here
+  // that legitimately formats a UTC timestamp would fail this check with a
+  // message blaming a constant it has nothing to do with.
   const fixtures = readFileSync(join(browserDir, 'fixtures.mjs'), 'utf8');
-  assert.match(fixtures, /export const LOCAL_ISO_SRC/,
+  const decl = fixtures.match(/export const LOCAL_ISO_SRC[\s\S]*?;\n/)?.[0];
+  assert.ok(decl,
     'LOCAL_ISO_SRC has gone, so the message above names a helper that does not exist');
-  assert.ok(!/toISOString/.test(fixtures.split('export const LOCAL_ISO_SRC')[1] ?? ''),
+  assert.ok(!/toISOString|getUTC/.test(decl),
     'LOCAL_ISO_SRC itself reads a date in UTC, which is the defect it exists to remove');
+});
+
+/**
+ * ...and it ANSWERS the local date, which the guard above cannot see.
+ *
+ * The check above reads source text, so the root `CLAUDE.md`'s rule applies to
+ * it in full: *a guard that reads SOURCE TEXT cannot see a renamed binding or
+ * an inverted comparison — keep it for what it does catch, and add a
+ * behavioural test beside it.* What it catches is a seventh suite growing its
+ * own `toISOString`. What it cannot catch is the one string every other suite
+ * now depends on being rewritten to read UTC by some other spelling, and that
+ * is the more expensive failure of the two: five suites break together, on a
+ * laptop, while CI stays green because CI runs UTC.
+ *
+ * So this one RUNS it, against a `Date` whose local fields and UTC fields
+ * deliberately name different days — which makes the whole check independent
+ * of the host's own zone, and so able to fail under CI's UTC, where a test
+ * built on `TZ` or on the real clock cannot.
+ *
+ * **The noon anchor is why one zone is not enough.** `setHours(12, …)` puts the
+ * instant far enough from midnight that converting it to UTC lands on the same
+ * calendar day for every offset inside ±12 — so at `-05:00`, the zone this was
+ * reported from, a version reading `getUTCFullYear`/`getUTCMonth`/`getUTCDate`
+ * still answers correctly and proves nothing. `+14:00` is a real zone
+ * (`Pacific/Kiritimati`) and is past that bound, so there the same rewrite
+ * answers the day before. Both are asserted, and the first is what catches the
+ * ORIGINAL helper, which had no anchor at all.
+ *
+ * Literals rather than a second implementation, per the root `CLAUDE.md`: a
+ * test that recomputes the answer the way the code does pins the name and not
+ * the behaviour. What is NOT asserted here is agreement with `daysAgo` itself,
+ * which is module-private to `fixtures.mjs` — the browser suites are that
+ * check, and they fail loudly and immediately if the two ever disagree.
+ */
+const zonedDateClass = (utcMillis, offsetMinutes) => {
+  // A real `Date` holding the LOCAL WALL CLOCK, read back through its UTC
+  // accessors — which is what lets the local-field methods below answer a
+  // different day from the UTC ones on the same instant.
+  const wall = utcMillis + offsetMinutes * 60_000;
+  return class ZonedDate {
+    constructor() { this._wall = new Date(wall); }
+    /** The true instant, for the UTC-side accessors. */
+    _utc() { return new Date(this._wall.getTime() - offsetMinutes * 60_000); }
+    getFullYear() { return this._wall.getUTCFullYear(); }
+    getMonth() { return this._wall.getUTCMonth(); }
+    getDate() { return this._wall.getUTCDate(); }
+    getDay() { return this._wall.getUTCDay(); }
+    setHours(h, m = 0, s = 0, ms = 0) { return this._wall.setUTCHours(h, m, s, ms); }
+    setDate(d) { return this._wall.setUTCDate(d); }
+    getUTCFullYear() { return this._utc().getUTCFullYear(); }
+    getUTCMonth() { return this._utc().getUTCMonth(); }
+    getUTCDate() { return this._utc().getUTCDate(); }
+    toISOString() { return this._utc().toISOString(); }
+  };
+};
+
+test('LOCAL_ISO_SRC answers the LOCAL calendar day, in a zone that disagrees with UTC', () => {
+  /** @param {number} utcMillis @param {number} offsetMinutes */
+  const isoIn = (utcMillis, offsetMinutes) => new Function(
+    'Date', `${LOCAL_ISO_SRC} return iso;`)(zonedDateClass(utcMillis, offsetMinutes));
+
+  // The reported case: 21:30 on the 17th at -05:00, where UTC is already the
+  // 18th. This is what the original helper got wrong, and it got it wrong for
+  // the whole local evening of every day.
+  const evening = isoIn(Date.UTC(2026, 8, 18, 1, 30), -300);
+  assert.equal(evening(0), '2026-09-17',
+    'a date read in UTC through a local-evening clock names TOMORROW');
+  assert.equal(evening(1), '2026-09-16');
+  assert.equal(evening(10), '2026-09-07', 'the day is zero-padded');
+
+  // Noon on the 17th at +14:00, where UTC is still the 16th. Past the ±12
+  // bound the noon anchor covers, so this is the case that fails for a helper
+  // rewritten to `getUTC*` — the spelling the source guard above cannot see.
+  const dateline = isoIn(Date.UTC(2026, 8, 16, 22, 0), 840);
+  assert.equal(dateline(0), '2026-09-17',
+    'a UTC read east of the date line names YESTERDAY, whatever the anchor');
+  assert.equal(dateline(2), '2026-09-15');
+
+  // Walking back across a month and a year boundary, on the local calendar.
+  assert.equal(isoIn(Date.UTC(2026, 0, 1, 2, 0), -300)(0), '2025-12-31');
+  assert.equal(isoIn(Date.UTC(2026, 0, 1, 2, 0), -300)(31), '2025-11-30');
+  assert.equal(isoIn(Date.UTC(2026, 0, 6, 1, 0), -300)(4), '2026-01-01',
+    'the month is zero-padded too');
 });
