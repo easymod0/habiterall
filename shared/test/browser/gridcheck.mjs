@@ -1141,6 +1141,82 @@ try{
       ck('...and the weekday letter survives in the name, so the label sits on the box',
          !!letter && (ghostName ?? '').includes(letter),
          `letter=${JSON.stringify(letter)} name=${JSON.stringify(ghostName)}`);
+
+      // **`role="img"`, and this is the one check here that cannot be
+      // behavioural — which is exactly why it is written down.** The box is a
+      // bare `<span>`, so `aria-label` sits on `role=generic`, where ARIA 1.2
+      // prohibits it. Chrome honours it anyway: every name assertion above
+      // passes with the role removed, measured. So nothing this suite can
+      // observe holds it, and a later reader looking only at Chrome would be
+      // right that it changes nothing — on Chrome. It is here for WebKit and
+      // Gecko, which this fleet never runs, where a prohibited label may not
+      // contribute to the button's name at all and the cell would fall back to
+      // announcing the raw `"✓ T"` these checks exist to forbid.
+      const boxRole = await ev(`document.querySelector(
+        ${JSON.stringify(sel(unloggedInRun))} + ' .check-box')?.getAttribute('role') ?? ''`);
+      ck('...on a box carrying role="img", since aria-label is prohibited on a bare span',
+         boxRole === 'img', JSON.stringify(boxRole));
+
+      /* ---- a measurable day names the goal it is measured against, and
+       * names NO goal when the habit has none.
+       *
+       * `parseHabit` accepts `target_value: 0` on an at-least habit, and the
+       * shade falls back to 1 there so it has something to divide by. That
+       * fallback is not a target anybody set, so it must not be spoken: read
+       * from `habit.target_value` the cell announced "8 of 0 pages", and read
+       * from the fallback "8 of 1 pages". Both are a number the user never
+       * chose, stated as fact to the one reader who cannot see the square.
+       * `Read` (target 20) is the positive half, so a build that simply
+       * dropped the clause fails beside it.
+       */
+      const goalless = await ev(`(async () => {
+        const iso = (n) => { const d = new Date(); d.setHours(12, 0, 0, 0);
+          d.setDate(d.getDate() - n);
+          const p = (x) => String(x).padStart(2, "0");
+          return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()); };
+        const h = await (await fetch('/api/habits', { method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: 'Goalless pages', type: 'numerical',
+            unit: 'pages', target_value: 0, color: '#6366f1' }) })).json();
+        await fetch('/api/habits/' + h.id + '/entries/' + iso(1), { method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ value: 8 }) });
+        return { id: h.id, date: iso(1) };
+      })()`);
+      const read = await ev(`(async () => {
+        const iso = (n) => { const d = new Date(); d.setHours(12, 0, 0, 0);
+          d.setDate(d.getDate() - n);
+          const p = (x) => String(x).padStart(2, "0");
+          return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()); };
+        const habits = await (await fetch('/api/habits')).json();
+        const h = habits.find(x => x.name === 'Read');
+        if (!h) return null;
+        await fetch('/api/habits/' + h.id + '/entries/' + iso(1), { method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ value: 8 }) });
+        return { id: h.id, date: iso(1) };
+      })()`);
+      await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+        reload: () => send('Page.navigate',{url:APP},sessionId),
+        what: 'the dashboard, for the measurable-day names',
+      });
+      await sleep(600);
+
+      if (read) {
+        const readName = await axName(
+          `.check[data-focus-key="check:${read.id}:${read.date}"]`);
+        ck('a measurable day names the amount AND the goal it is measured against',
+           /8 of 20 pages/.test(readName ?? ''), JSON.stringify(readName));
+      }
+      const goallessName = await axName(
+        `.check[data-focus-key="check:${goalless.id}:${goalless.date}"]`);
+      ck('a measurable habit with NO goal names the amount alone',
+         /8 pages/.test(goallessName ?? '') && !/ of /.test(goallessName ?? ''),
+         JSON.stringify(goallessName));
+
+      // The probe habit is this block's own; `fixtures.reset()` would take it
+      // anyway, but the next block in this file runs before that.
+      await ev(`fetch('/api/habits/${goalless.id}', { method: 'DELETE' })`);
     }
   }
 

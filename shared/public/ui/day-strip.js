@@ -175,8 +175,23 @@ function ghostTick(box, habit, state) {
  * Android's own comment gives: a screen reader has no square to look at, and
  * "not done" for a day nobody answered is the conflation that setting exists
  * to undo.
+ *
+ * **`role="img"` goes on with the label, and it is not decoration.** The box is
+ * a bare `<span>`, so its role is `generic` — the one role ARIA 1.2 lists
+ * `aria-label` as PROHIBITED on, and the only place in this directory that
+ * labels anything but a `<button>`, an `<input>` or an `<svg>`. Chrome does
+ * honour it there today, and the whole of what says so is one engine: whether a
+ * prohibited label still contributes to an ancestor's name-from-contents is
+ * engine-specific rather than specified, and this app installs as a PWA onto
+ * iOS. Dropped, the name falls back to the contents and the cell announces
+ * `"✓ T"` again — the exact defect this function exists to remove, silently,
+ * with `gridcheck.mjs` green because it only ever runs Chrome. `img` supports
+ * naming, replaces the glyph with the name rather than sitting beside it, and
+ * still contributes that name to the button, so the weekday letter in
+ * `.check-day` survives exactly as before.
  */
 function says(box, state) {
+  box.setAttribute('role', 'img');
   box.setAttribute('aria-label', state);
 }
 
@@ -190,7 +205,10 @@ function paintCheckbox(
   // this over a cell that is already painted and already labelled, so a state
   // that no longer applies must not keep announcing itself. Every branch below
   // sets one, so a cell reaching the end with no label is a branch that forgot.
+  // The ROLE goes with it: `says` sets the pair, so a box left with `img` and
+  // no name would be an unnamed image rather than a plain span.
   box.removeAttribute('aria-label');
+  box.removeAttribute('role');
   // `toggle`, not `add`: this box is repainted in place by `repaintCells`, so a
   // note that has since been cleared has to lose its dot on the same call that
   // would otherwise keep asserting one.
@@ -291,19 +309,35 @@ function paintCheckbox(
   // numerical: shade by progress toward target, show the raw number.
   // For an "at most" habit a low number is the good outcome, so 0 is a full
   // success and must be painted, not left blank.
+  // **Two questions about one field, and they genuinely have different
+  // answers: what the SHADE is measured against, and what there is to SAY.**
+  // `parseHabit` accepts `target_value: 0` for either direction
+  // (`Number(body.target_value ?? 0)`, refused only if negative). On a LIMIT
+  // that is a real, stated goal — "at most none" is the whole point of a habit
+  // like that — so it is both shaded and spoken. On an at-least habit it is the
+  // absence of a goal, and the `|| 1` below is a divide-by-zero fallback rather
+  // than a target anybody set: spoken, it announced "8 of 0 pages" from
+  // `habit.target_value` and "8 of 1 pages" from the fallback, and the second
+  // is an internal detail promoted to a claim. So that case says the amount
+  // alone. Either way the label reads the same binding the shade did — two
+  // readings of one field, six lines apart, is the drift this branch's own
+  // argument is about.
+  let goal, statedGoal;
   if (habit.target_type === 'at_most') {
-    const target = habit.target_value;
+    goal = habit.target_value;
+    statedGoal = goal;
     // Fade gradually past the target; scale by 3 when the target is 0 so
     // small overages remain distinguishable.
-    const scale = Math.max(target, 3);
-    const ratio = value <= target
+    const scale = Math.max(goal, 3);
+    const ratio = value <= goal
       ? 1
-      : Math.max(0.2, 1 - (value - target) / scale);
+      : Math.max(0.2, 1 - (value - goal) / scale);
     box.style.background = habit.color;
     box.style.opacity = String(ratio);
   } else {
-    const target = habit.target_value || 1;
-    const ratio = Math.min(1, value / target);
+    statedGoal = Number(habit.target_value) > 0 ? habit.target_value : null;
+    goal = statedGoal ?? 1;
+    const ratio = Math.min(1, value / goal);
     if (value > 0) {
       box.style.background = habit.color;
       box.style.opacity = String(Math.max(0.28, ratio));
@@ -314,12 +348,15 @@ function paintCheckbox(
   // The bare number is the one glyph that is not actually wrong — but "8" says
   // nothing about the goal it is 8 of, which is the number the cell's SHADE is
   // carrying for a sighted reader. Android's `describe()` reads "8 of 20
-  // pages" here for the same reason.
-  says(box, `${amountWords(value, habit)} of ${amountWords(habit.target_value, habit)}`);
+  // pages" here for the same reason. `statedGoal` is null only where there is
+  // no goal to name (above), and there the amount alone is the whole truth.
+  says(box, statedGoal == null
+    ? amountWords(value, habit)
+    : `${amountDigits(value)} of ${amountWords(statedGoal, habit)}`);
 }
 
 /**
- * `8` / `8.5` plus the habit's unit, for a spoken amount.
+ * `8` / `8.5`, the digits alone.
  *
  * Deliberately NOT `formatAmount`/`convention()` from `ui/amount.js`: that pair
  * answers which CHARACTER a decimal point is, which is a question about typing
@@ -328,10 +365,23 @@ function paintCheckbox(
  * string a screen reader may well spell out. Same rounding as the glyph beside
  * it, so the two cannot disagree.
  */
-function amountWords(value, habit) {
+function amountDigits(value) {
   const n = Number(value) || 0;
-  const num = n % 1 === 0 ? String(n) : n.toFixed(1);
-  return habit.unit ? `${num} ${habit.unit}` : num;
+  return n % 1 === 0 ? String(n) : n.toFixed(1);
+}
+
+/**
+ * The same digits plus the habit's unit — for an amount said ON ITS OWN.
+ *
+ * **The unit belongs to the PAIR, not to each half of it.** A goal reading
+ * spells the amount with `amountDigits` and the goal with this, so it lands as
+ * "8 of 20 pages" — the wording Android's `describe()` already uses and the
+ * wording this file's own comments claimed. Built from two `amountWords` it
+ * read "8 pages of 20 pages", which is what shipped until `gridcheck.mjs` was
+ * made to assert the sentence rather than its parts.
+ */
+function amountWords(value, habit) {
+  return habit.unit ? `${amountDigits(value)} ${habit.unit}` : amountDigits(value);
 }
 
 /* ---------- building the row ---------- */

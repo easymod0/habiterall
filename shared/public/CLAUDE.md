@@ -919,6 +919,36 @@ with the label dropped the name falls back to `"✓ T"`, which still differs fro
 a logged cell's name and still contains no "done", so neither of those two
 checks catches it and a third one has to.
 
+**The box carries `role="img"` with that label, and the reason is that a bare
+`<span>` is `role=generic` — the one role ARIA 1.2 lists `aria-label` as
+PROHIBITED on.** It is the only label in this directory that sits on anything
+but a `<button>`, an `<input>` or an `<svg>`. Chrome honours it regardless:
+every accessible-name check in `gridcheck.mjs` passes with the role removed,
+measured, so nothing this fleet can observe holds it and a later reader looking
+only at Chrome would be right that it changes nothing — on Chrome. Whether a
+prohibited label still contributes to an ANCESTOR's name-from-contents is
+engine-specific rather than specified, and this app installs as a PWA onto iOS;
+dropped there, the cell falls back to announcing `"✓ T"`, which is the whole
+defect, silently, under a green suite. `img` supports naming, replaces the
+glyph with the name instead of sitting beside it, and still contributes to the
+button, so the weekday letter survives. `paintCheckbox`'s reset clears the role
+with the label, since a box left `img` with no name is an unnamed image rather
+than a plain span. The attribute assertion in `gridcheck.mjs` is deliberately
+NOT behavioural, and says so at the check: it is the one thing here a Chrome-only
+fleet cannot prove.
+
+**A measurable day names the goal the SHADE is measured against, and names none
+when the habit has none.** `parseHabit` accepts `target_value: 0` in either
+direction, and the two mean different things: on a LIMIT it is a stated goal
+("at most none" is the point of such a habit) and is both shaded and spoken,
+while on an at-least habit it is the ABSENCE of one and the `|| 1` in the ratio
+is a divide-by-zero fallback rather than a target anybody set. Spoken from
+`habit.target_value` the cell announced `"8 of 0 pages"`; spoken from the
+fallback, `"8 of 1 pages"` — an internal detail promoted to a claim. So that
+one case says the amount alone, and every other reads the same binding the
+shade did. Two readings of one field six lines apart is exactly the drift
+`says()` exists to prevent, met inside `says()`'s own branch.
+
 **The run set is exactly as stale as the rest of the row it draws.** It is the
 one `/overview` last answered with, so an offline tap that turns a day into a
 stored 0 keeps drawing that cell's in-run tick until the next load corrects
