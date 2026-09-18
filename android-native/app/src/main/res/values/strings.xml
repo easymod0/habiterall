@@ -114,6 +114,15 @@
          saying different things through one string is how the two later drift
          into one wrong sentence. -->
     <string name="overview_stale">As of %1$s</string>
+    <!-- `record.date` is not a fetch date: `Widgets.answered` advances it on an
+         answer recorded with no network at all, so a row last fetched three
+         days ago and answered offline this morning reads `date == today` while
+         the two columns between them still have no data behind them. Shown
+         instead of `overview_stale` in exactly that case (`figuresStale`, the
+         only witness that `date` moved with no fetch), and deliberately NOT the
+         dated sentence: the date here IS today, and naming it would be false —
+         the same reason `stats_figures_behind` exists beside `stats_stale`. -->
+    <string name="overview_grid_behind">Grid updates on next sync</string>
     <!-- Every row has gone: a brand-new account, or every habit archived. The
          grid is then empty with nothing on screen able to say why, which is
          the same mistake the checkmark widget's gone note was added to fix —
@@ -136,6 +145,30 @@
          also what keeps lint's `PluralsCandidate` quiet: this one genuinely is
          not a plural — "1 of 3" and "3 of 3" are the same sentence. -->
     <string name="overview_summary">Your habits: %1$d of %2$d</string>
+    <!-- Spoken for `overview_root` in place of `overview_summary` when no row
+         is drawn and the visible note line is `overview_empty`. Both counts are
+         then zero, and "Your habits: 0 of 0" states a COUNT where the screen
+         states a REASON — the same screen-versus-screen-reader disagreement
+         `stats_summary_stale` was added for, on the arm where there is no pair
+         left worth reading out at all. No format args for that reason. -->
+    <string name="overview_summary_empty">Your habits: none to show yet</string>
+    <!-- Spoken for `overview_root` in place of `overview_summary` when the
+         visible note line is `overview_stale` — same condition, same
+         precedence, so a widget reading "As of 2026-08-14" cannot be announced,
+         unqualified, as "Your habits: 2 of 2". %1$d and %2$d are
+         `overview_summary`'s own two counts, in the same order; %3$s is the day
+         that line names, the OLDEST row drawn, since "as of" is a claim about
+         every row above it. Positional args, never string concatenation —
+         `stats_summary`'s own comment says why. -->
+    <string name="overview_summary_stale">Your habits: %1$d of %2$d, as of %3$s</string>
+    <!-- Spoken for `overview_root` in place of `overview_summary` when the
+         visible note line is `overview_grid_behind` — same condition, same
+         precedence, so the screen and the screen reader cannot disagree about
+         whether the grid is current. %1$d and %2$d are `overview_summary`'s own
+         two counts, in the same order; the clause is appended rather than
+         replacing the sentence, because "how many of how many" is still true
+         and still the first thing a reader needs. -->
+    <string name="overview_summary_grid_behind">Your habits: %1$d of %2$d, grid updates on next sync</string>
 
     <string name="count_hint">Amount</string>
     <string name="save">Save</string>

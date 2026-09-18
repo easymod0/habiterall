@@ -271,6 +271,20 @@ class HabitWidget : AppWidgetProvider() {
          * FIRST record, which is the same answer `Settings.cachedWidget`'s own
          * `firstOrNull` gives them everywhere else.
          *
+         * It dispatches the UNION of the grouped ids and the live OVERVIEW
+         * ids, and that asymmetry is the whole of it: an id holding no records
+         * produces no group, so a `groupBy` alone never draws it. For a
+         * checkmark or a stats id that is right — no record means an
+         * unconfigured widget, which must stay on its `initialLayout`. For an
+         * overview id it is a different thing: `Settings.putWidgetSet(id,
+         * emptyList())` is the legitimate purge for an account whose habits
+         * have all been archived or deleted, so the id is CONFIGURED and has
+         * something to say, which is what `R.string.overview_empty` is. Left
+         * out of the loop, the launcher goes on showing the last frame it was
+         * handed — the archived habits, their old cells, and no note — and
+         * neither the midnight alarm nor the 30-minute backstop can recover it,
+         * because both come back through here.
+         *
          * The alarm is armed HERE rather than at each of the places that can
          * create a widget, because every one of them redraws and an alarm that
          * re-arms from the drawing cannot drift out of step with what is on the
@@ -289,21 +303,32 @@ class HabitWidget : AppWidgetProvider() {
             val settings = Settings(app)
             val questionMarks = settings.cachedQuestionMarks()
             val today = LocalDate.now().toString()
-            settings.cachedWidgets().groupBy { it.widgetId }.forEach { (widgetId, group) ->
+            val held = settings.cachedWidgets().groupBy { it.widgetId }
+            (held.keys + live.overview).forEach { widgetId ->
+                val group = held[widgetId].orEmpty()
                 when (widgetId) {
-                    in live.checkmark -> manager.updateAppWidget(
-                        widgetId,
-                        render(app, group.first(), today, questionMarks),
-                    )
-                    in live.stats -> manager.updateAppWidget(
-                        widgetId,
-                        StatsWidget.render(
-                            app,
-                            group.first(),
-                            today,
-                            StatsWidget.columnsFor(manager.getAppWidgetOptions(widgetId)),
-                        ),
-                    )
+                    // `firstOrNull`, not `first`: only an overview id reaches
+                    // this loop with an empty group today, but the two
+                    // single-habit arms stay total so that widening the union
+                    // later is a wrong frame at worst rather than a throw that
+                    // takes every other widget on the home screen with it.
+                    in live.checkmark -> group.firstOrNull()?.let { record ->
+                        manager.updateAppWidget(
+                            widgetId,
+                            render(app, record, today, questionMarks),
+                        )
+                    }
+                    in live.stats -> group.firstOrNull()?.let { record ->
+                        manager.updateAppWidget(
+                            widgetId,
+                            StatsWidget.render(
+                                app,
+                                record,
+                                today,
+                                StatsWidget.columnsFor(manager.getAppWidgetOptions(widgetId)),
+                            ),
+                        )
+                    }
                     in live.overview -> {
                         // Both dimensions, unlike the stats widget's width
                         // alone: the height decides how many habits are listed

@@ -36,17 +36,23 @@ import java.util.Locale
  *
  * **Name and cells only: no score number, no streak number.** With a name
  * column and up to seven day columns there is no room for a figure, and the
- * per-habit `StatsWidget` is the surface where a number lives. A direct
- * consequence, stated here because a reader would otherwise think it was
- * forgotten: **this widget never reads [Widgets.Record.figuresStale]**. That
- * flag exists because `StatsWidget` PAINTS `score` and `currentStreak`, which
- * `Widgets.answered` can move out of date with no fetch behind them. Nothing
- * on this screen is one of those figures, so the flag says nothing about
- * anything drawn here. What the note line DOES report is [Widgets.Record.date]
- * staleness, which is a claim about the grid itself: a record not refreshed
- * today has no data for today's column, so it paints UNKNOWN — which is
- * indistinguishable from "answered nothing today" until the line says
- * otherwise.
+ * per-habit `StatsWidget` is the surface where a number lives.
+ *
+ * The note line reports [Widgets.Record.date] staleness, which is a claim
+ * about the grid itself: a record not refreshed today has no data for today's
+ * column, so it paints UNKNOWN — indistinguishable from "answered nothing
+ * today" until the line says otherwise. **It reads
+ * [Widgets.Record.figuresStale] too**, and this paragraph used to say the
+ * opposite: "no figures are painted here, so the flag says nothing about
+ * anything on this screen". That is right about FIGURES and wrong about the
+ * grid. `Widgets.answered` is the one event that advances `date` with no fetch
+ * behind it, and it sets `figuresStale` doing so — which makes the flag the
+ * only available witness that `date` has stopped being a fetch date. A row
+ * fetched on T-3 and answered offline on T reads `date == today`, so the dated
+ * arm goes quiet while the columns for T-2 and T-1 still paint UNKNOWN off a
+ * `history` nothing refreshed. A field is defined by what its reader asks of
+ * it: `StatsWidget` asks "are my figures current", this widget asks "is my
+ * grid current", and the same flag answers both.
  */
 class OverviewWidget : AppWidgetProvider() {
 
@@ -160,6 +166,15 @@ class OverviewWidget : AppWidgetProvider() {
          * [onAppWidgetOptionsChanged], for the reason `HabitWidget.redraw` is
          * one: the override is a `goAsync()` wrapper a test cannot enter
          * without a real broadcast dispatch, and everything it decides is here.
+         *
+         * An empty record set is DRAWN rather than returned from, the same
+         * asymmetry `HabitWidget.redraw`'s union states: this override is only
+         * ever dispatched to an overview widget the launcher holds, and a
+         * configured overview widget with no records is an account with every
+         * habit archived or deleted — which [render] answers with
+         * `R.string.overview_empty`. Returning early left that widget on
+         * whatever frame it was last handed, and a resize is one of the few
+         * things a user does expecting the widget to redraw.
          */
         internal suspend fun resized(
             context: Context,
@@ -169,7 +184,6 @@ class OverviewWidget : AppWidgetProvider() {
         ) {
             val app = context.applicationContext
             val records = Settings(app).cachedWidgetSet(widgetId)
-            if (records.isEmpty()) return
             manager.updateAppWidget(
                 widgetId,
                 render(
@@ -197,10 +211,18 @@ class OverviewWidget : AppWidgetProvider() {
          * "Removed" instead: hiding the one thing on THEIR screen would leave a
          * blank widget with nothing to explain it, whereas here the overview is
          * "your habits" and a habit that has left the account is not one of
-         * them — the disappearing row IS the signal. The filter is here as well
-         * as in `Widgets.reconcileOverview` because `WidgetSync.refreshFrom`
-         * marks records gone knowing nothing about overview widgets, so a gone
-         * record can sit in the store between a refresh and the next reconcile.
+         * them — the disappearing row IS the signal.
+         *
+         * The filter is here as well as in `Widgets.reconcileOverview`, and the
+         * reason is NOT the one first written down: `WidgetSync.refreshFrom`
+         * excludes a live overview widget's records from the path that marks
+         * records gone, so a refresh cannot produce one for a widget the
+         * launcher reports as an overview. What it defends is a record that
+         * carries `gone` from BEFORE this id was an overview's — a record can
+         * outlive the widget it was written for (the process can die between a
+         * deletion and `onDeleted`, see `HabitWidget.redraw`), and the launcher
+         * hands that id out again. One `filterNot` on a list already in hand is
+         * cheaper than reasoning about which of those windows is reachable.
          */
         fun render(
             context: Context,
@@ -227,20 +249,38 @@ class OverviewWidget : AppWidgetProvider() {
                 views.setOnClickPendingIntent(rowId, clickIntent(context, record))
             }
 
-            // `gone` beats everything else on the note line, exactly as it does
-            // on the stats widget's — except that here a gone record is not
-            // drawn at all, so the only way it reaches this line is by taking
-            // the whole grid with it, which is the empty case below.
+            // Three arms, in this order. `gone` does not appear among them the
+            // way it does on the stats widget's line: a gone record is not
+            // drawn here at all, so the only way it reaches this line is by
+            // taking the whole grid with it, which is the empty case.
             //
             // The dated case asks the OLDEST record drawn, not the newest: "as
             // of" is a claim about every row above it, and one row a day behind
             // the rest makes the newest date a false claim about that row. Over
             // -reporting staleness is the fail-safe direction, the same one
             // `figuresStale` takes on the stats widget.
+            //
+            // And [Widgets.Record.figuresStale] IS read here, as the third arm.
+            // `record.date` is not a fetch date: `Widgets.answered` advances it
+            // on an answer recorded with no network at all, and
+            // `WidgetSync.noteAnswer` maps that over every record for the
+            // habit, this widget's rows included. A row fetched on T-3 and
+            // answered offline on T carries `date = T` with its `history` still
+            // stopping at T-3 — so the dated arm goes quiet exactly when the
+            // columns for T-2 and T-1 have nothing behind them and paint
+            // UNKNOWN, which is the "indistinguishable from answered-nothing"
+            // confusion this line exists to resolve. `figuresStale` is the one
+            // witness that `date` moved with no fetch behind it, which is what
+            // makes it the right question for a grid as well as for a figure.
+            // It says so WITHOUT a date, for the reason `stats_figures_behind`
+            // is not `stats_stale`: here the date IS today, and naming it would
+            // be false.
             val asOf = shown.map { it.date }.filter { it.isNotEmpty() }.minOrNull()
+            val stale = asOf != null && asOf != today
+            val behind = shown.any { it.figuresStale }
             views.setViewVisibility(
                 R.id.overview_note,
-                if (shown.isEmpty() || (asOf != null && asOf != today)) {
+                if (shown.isEmpty() || stale || behind) {
                     android.view.View.VISIBLE
                 } else {
                     android.view.View.GONE
@@ -253,10 +293,15 @@ class OverviewWidget : AppWidgetProvider() {
                 // and the reason this is a real view rather than a content
                 // description.
                 views.setTextViewText(R.id.overview_note, context.getString(R.string.overview_empty))
-            } else if (asOf != null && asOf != today) {
+            } else if (stale) {
                 views.setTextViewText(
                     R.id.overview_note,
                     context.getString(R.string.overview_stale, asOf),
+                )
+            } else if (behind) {
+                views.setTextViewText(
+                    R.id.overview_note,
+                    context.getString(R.string.overview_grid_behind),
                 )
             }
 
@@ -276,9 +321,38 @@ class OverviewWidget : AppWidgetProvider() {
                 )
             }
 
+            // The spoken sentence takes the SAME arms the visible line just
+            // did, in the same order — empty, then dated, then grid-behind,
+            // then plain — because the screen and the screen reader
+            // disagreeing was #332's finding one layer down (`describeStrip`),
+            // and a note line a sighted user can read while the root announces
+            // an unqualified "your habits" is the identical shape one layer up.
+            // It branched on `behind` alone first, which left the other two
+            // arms saying it: a widget whose line read "As of 2026-08-14" was
+            // announced as "Your habits: 2 of 2", and one reading "No habits to
+            // show yet" as "Your habits: 0 of 0" — a COUNT where the screen
+            // states a REASON. `StatsWidget.render` branches `stats_root` the
+            // same way, and for the same reason.
             views.setContentDescription(
                 R.id.overview_root,
-                context.getString(R.string.overview_summary, shown.size, ordered.size),
+                if (shown.isEmpty()) {
+                    context.getString(R.string.overview_summary_empty)
+                } else if (stale) {
+                    context.getString(
+                        R.string.overview_summary_stale,
+                        shown.size,
+                        ordered.size,
+                        asOf,
+                    )
+                } else if (behind) {
+                    context.getString(
+                        R.string.overview_summary_grid_behind,
+                        shown.size,
+                        ordered.size,
+                    )
+                } else {
+                    context.getString(R.string.overview_summary, shown.size, ordered.size)
+                },
             )
             return views
         }

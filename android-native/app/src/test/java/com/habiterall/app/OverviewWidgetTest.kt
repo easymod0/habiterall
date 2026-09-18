@@ -219,6 +219,12 @@ class OverviewWidgetTest {
     private fun name(view: View, row: Int): String =
         view.findViewById<TextView>(nameIds[row]).text.toString()
 
+    /** The visible note line, and what `overview_root` announces — the two that must agree. */
+    private fun noteOf(view: View): TextView = view.findViewById(R.id.overview_note)
+
+    private fun spoken(view: View): String =
+        view.findViewById<View>(R.id.overview_root).contentDescription.toString()
+
     /* ---------- case 1: rows are drawn in RANK order ---------- */
 
     @Test
@@ -388,6 +394,11 @@ class OverviewWidgetTest {
 
     @Test
     fun `zero renderable rows shows the empty message on a real view`() {
+        // The renderer's own two roads into the state. Nothing in the app calls
+        // `render` with an empty list directly, so this case pins the DECISION
+        // and not the wiring — `redraw draws a live overview widget that holds
+        // no records at all` and `an overview widget that loses every habit …`
+        // below are the ones that go through the store and the launcher.
         val empty = inflate(OverviewWidget.render(context, emptyList(), today, rows = 7, columns = 3))
         val note = empty.findViewById<TextView>(R.id.overview_note)
         assertEquals(View.VISIBLE, note.visibility)
@@ -444,6 +455,207 @@ class OverviewWidgetTest {
             "the line must name the OLDEST row's day, got \"${note.text}\"",
             note.text.toString().contains(dayBefore),
         )
+    }
+
+    @Test
+    fun `an answer recorded with no fetch behind it still says the grid is behind`(): Unit =
+        runBlocking {
+            // Through the REAL event, never a hand-built `figuresStale = true`:
+            // the defect is that `record.date` is not a FETCH date, and only
+            // the path that proves it — an answer given on this phone with no
+            // network — can show that the note line asks the wrong question.
+            // T-3 was the last fetch; the browser answered T-2 and T-1 while
+            // the phone was offline; at T the reminder still in the shade is
+            // pressed. `Widgets.answered` advances `date` to T and leaves
+            // `history` stopping at T-3, so a note line reading `date` alone
+            // goes quiet exactly while the T-2 and T-1 columns paint UNKNOWN
+            // off nothing — the "indistinguishable from answered-nothing"
+            // confusion the line exists to resolve.
+            val manager = AppWidgetManager.getInstance(context)
+            val shadowManager = shadowOf(manager)
+            val widgetId = 95
+            shadowManager.bindAppWidgetId(widgetId, ComponentName(context, OverviewWidget::class.java))
+            // The REAL current date, not this class's frozen `today`:
+            // `noteAnswer` and `redraw` both read `LocalDate.now()`, and a
+            // fixture on a frozen day would take the dated arm instead and
+            // pass against a note line with no third arm at all.
+            val now = java.time.LocalDate.now()
+            val lastFetch = now.minusDays(3).toString()
+            val habit = boolHabit()
+            val settings = Settings(context)
+            settings.putWidgetSet(
+                widgetId,
+                listOf(
+                    record(
+                        habit,
+                        widgetId = widgetId,
+                        rank = 0,
+                        date = lastFetch,
+                        value = Sentinels.YES,
+                        history = "$lastFetch:2",
+                    ),
+                ),
+            )
+
+            WidgetSync.noteAnswer(context, habit.id, now.toString(), Sentinels.YES, skip = false)
+
+            val row = settings.cachedWidgetSet(widgetId).single()
+            assertEquals(
+                "the fixture only means anything once the real event has advanced the row's date",
+                now.toString(),
+                row.date,
+            )
+            assertEquals(
+                "and left the history exactly where the last fetch stopped",
+                "$lastFetch:2",
+                row.history,
+            )
+
+            val view = shadowManager.getViewFor(widgetId)
+            assertNotNull("the answer must have redrawn the widget", view)
+            val note = view!!.findViewById<TextView>(R.id.overview_note)
+            assertEquals(
+                "a row dated today off a LOCAL answer is not a refreshed row",
+                View.VISIBLE,
+                note.visibility,
+            )
+            assertEquals(
+                context.getString(R.string.overview_grid_behind),
+                note.text.toString(),
+            )
+            assertFalse(
+                "the line must not name a date — the date IS today, and naming it would be false",
+                note.text.toString().contains(now.toString()),
+            )
+            assertEquals(
+                "the spoken sentence must not disagree with the visible one",
+                context.getString(R.string.overview_summary_grid_behind, 1, 1),
+                view.findViewById<View>(R.id.overview_root).contentDescription.toString(),
+            )
+        }
+
+    /* ---------- case 8b: the note line and the spoken sentence take the SAME arm ---------- */
+
+    // #332's finding, one layer up: the visible note line grew to three arms
+    // while `overview_root`'s content description branched on ONE of them
+    // (`figuresStale`), so a widget whose line read "As of 2026-08-14" was
+    // announced, unqualified, as "Your habits: 2 of 2", and one reading "No
+    // habits to show yet" as "Your habits: 0 of 0" — a COUNT where the screen
+    // states a REASON. Four tests rather than one walking four arms, because a
+    // single test stops at its first failed assertion and the arms fail
+    // independently: the description this replaced gets TWO of them wrong, and
+    // one test would only ever quote whichever came first.
+    //
+    // Each arm asserts the VISIBLE line and the SPOKEN one together, since the
+    // defect is the two disagreeing, and each qualified arm also asserts what
+    // the spoken sentence must NOT be — the plain one built from that arm's own
+    // counts, rather than a literal that would drift from it.
+
+    @Test
+    fun `an empty widget's spoken sentence states the reason, not a count of nothing`() {
+        // `overview_summary` is not a weaker claim here, it is a false one:
+        // there are no habits for "0 of 0" to be a count of, and the screen
+        // says so in words.
+        val view = inflate(OverviewWidget.render(context, emptyList(), today, rows = 7, columns = 3))
+        assertEquals(context.getString(R.string.overview_empty), noteOf(view).text.toString())
+        assertEquals(context.getString(R.string.overview_summary_empty), spoken(view))
+        assertNotEquals(
+            "an empty widget must not be announced as a count",
+            context.getString(R.string.overview_summary, 0, 0),
+            spoken(view),
+        )
+    }
+
+    @Test
+    fun `a dated widget's spoken sentence names the day its visible line names`() {
+        // The same fixture `the as-of line reports the oldest row drawn` uses,
+        // asked of the other half of the widget: the line names `dayBefore`, so
+        // the sentence read out over it has to name `dayBefore` too.
+        val mixed = listOf(
+            record(boolHabit(id = 1, name = "Current"), rank = 0, date = today),
+            record(boolHabit(id = 2, name = "Behind"), rank = 1, date = dayBefore),
+        )
+        val view = inflate(OverviewWidget.render(context, mixed, today, rows = 7, columns = 3))
+        assertTrue(
+            "the visible line must name the oldest row's day, got \"${noteOf(view).text}\"",
+            noteOf(view).text.toString().contains(dayBefore),
+        )
+        assertTrue(
+            "the spoken sentence must name the day the visible line names, got \"${spoken(view)}\"",
+            spoken(view).contains(dayBefore),
+        )
+        assertEquals(
+            context.getString(R.string.overview_summary_stale, 2, 2, dayBefore),
+            spoken(view),
+        )
+        assertNotEquals(
+            "a widget dated three days back must not be announced as current",
+            context.getString(R.string.overview_summary, 2, 2),
+            spoken(view),
+        )
+    }
+
+    @Test
+    fun `a grid-behind widget's spoken sentence says so, through the real answer path`(): Unit =
+        runBlocking {
+            // Built the way `an answer recorded with no fetch behind it …`
+            // above builds it, and for the reason stated there: a hand-set
+            // `figuresStale = true` would prove nothing about the one event
+            // that sets it, and the real one is what makes `date` stop being a
+            // fetch date. This arm is the one the description already got
+            // right; it is here so the four are asserted as a set, and so a
+            // later change cannot fix two arms by breaking this one.
+            val manager = AppWidgetManager.getInstance(context)
+            val shadowManager = shadowOf(manager)
+            val widgetId = 96
+            shadowManager.bindAppWidgetId(widgetId, ComponentName(context, OverviewWidget::class.java))
+            // The REAL current date, not this class's frozen `today`, for the
+            // reason that test states: a frozen day takes the dated arm instead.
+            val now = java.time.LocalDate.now()
+            val lastFetch = now.minusDays(3).toString()
+            val habit = boolHabit()
+            val settings = Settings(context)
+            settings.putWidgetSet(
+                widgetId,
+                listOf(
+                    record(
+                        habit,
+                        widgetId = widgetId,
+                        rank = 0,
+                        date = lastFetch,
+                        value = Sentinels.YES,
+                        history = "$lastFetch:2",
+                    ),
+                ),
+            )
+            WidgetSync.noteAnswer(context, habit.id, now.toString(), Sentinels.YES, skip = false)
+
+            val view = shadowManager.getViewFor(widgetId)
+            assertNotNull("the answer must have redrawn the widget", view)
+            assertEquals(
+                context.getString(R.string.overview_grid_behind),
+                noteOf(view!!).text.toString(),
+            )
+            assertEquals(
+                context.getString(R.string.overview_summary_grid_behind, 1, 1),
+                spoken(view),
+            )
+            assertNotEquals(
+                "a grid with no fetch behind it must not be announced as current",
+                context.getString(R.string.overview_summary, 1, 1),
+                spoken(view),
+            )
+        }
+
+    @Test
+    fun `a current widget is announced plainly, with no note line at all`() {
+        // The negative half, and the reason the other three cannot be passed by
+        // "always qualify it": nothing is wrong with this widget, so the note
+        // line is GONE and the plain sentence is the whole of what is said.
+        val current = listOf(record(boolHabit(id = 4, name = "Fresh"), rank = 0, date = today))
+        val view = inflate(OverviewWidget.render(context, current, today, rows = 7, columns = 3))
+        assertEquals(View.GONE, noteOf(view).visibility)
+        assertEquals(context.getString(R.string.overview_summary, 1, 1), spoken(view))
     }
 
     /* ---------- case 9: one tap target per row, and they must not collapse ---------- */
@@ -540,6 +752,29 @@ class OverviewWidgetTest {
             assertEquals(View.GONE, view.findViewById<View>(cellIds[0][4]).visibility)
             // And the row it had no room for is still reported.
             assertEquals(View.VISIBLE, view.findViewById<View>(R.id.overview_more).visibility)
+        }
+
+    @Test
+    fun `a resize of a widget holding no records draws the empty note, not nothing`(): Unit =
+        runBlocking {
+            // The same asymmetry `redraw`'s union states, on the one path only
+            // this widget's own instance hears about: an empty record set here
+            // is an account with every habit archived, not an unconfigured
+            // widget, and returning early left it on whatever frame it was last
+            // handed — during the one gesture a user makes expecting a redraw.
+            val manager = AppWidgetManager.getInstance(context)
+            val shadowManager = shadowOf(manager)
+            val widgetId = 72
+            shadowManager.bindAppWidgetId(widgetId, ComponentName(context, OverviewWidget::class.java))
+            Settings(context).putWidgetSet(widgetId, emptyList())
+
+            OverviewWidget.resized(context, manager, widgetId, Bundle())
+
+            val view = shadowManager.getViewFor(widgetId)
+            assertNotNull("the resized id must have been drawn", view)
+            val note = view!!.findViewById<TextView>(R.id.overview_note)
+            assertEquals(View.VISIBLE, note.visibility)
+            assertEquals(context.getString(R.string.overview_empty), note.text.toString())
         }
 
     /* ---------- case 12: each cell is shaded from ITS OWN day ---------- */
@@ -730,6 +965,71 @@ class OverviewWidgetTest {
             assertNull(
                 "an overview id must NOT get HabitWidget's layout",
                 overviewView.findViewById<View>(R.id.widget_root),
+            )
+        }
+
+    @Test
+    fun `redraw draws a live overview widget that holds no records at all`(): Unit =
+        runBlocking {
+            // The one id-set asymmetry in `redraw`. A widget id holding no
+            // records produces no `groupBy` entry, so a dispatch over the
+            // groups alone never draws it — right for a checkmark or a stats
+            // id, where no record means an UNCONFIGURED widget that must stay
+            // on its `initialLayout`, and wrong here: `putWidgetSet(id,
+            // emptyList())` is the legitimate purge for an account whose
+            // habits have all been archived or deleted, and this is precisely
+            // the state `overview_empty` exists for.
+            val manager = AppWidgetManager.getInstance(context)
+            val shadowManager = shadowOf(manager)
+            val widgetId = 89
+            shadowManager.bindAppWidgetId(widgetId, ComponentName(context, OverviewWidget::class.java))
+            Settings(context).putWidgetSet(widgetId, emptyList())
+
+            HabitWidget.redraw(context)
+
+            val view = shadowManager.getViewFor(widgetId)
+            assertNotNull("a live overview widget holding no records must still be drawn", view)
+            val note = view!!.findViewById<TextView>(R.id.overview_note)
+            assertEquals(View.VISIBLE, note.visibility)
+            assertEquals(context.getString(R.string.overview_empty), note.text.toString())
+        }
+
+    @Test
+    fun `an overview widget that loses every habit is redrawn empty, not frozen on its last frame`(): Unit =
+        runBlocking {
+            // The reachable road to the case above, end to end: archive or
+            // delete every habit and the fetch arrives as an empty list, which
+            // `reconciledRows` turns into no rows and `putWidgetSet` purges the
+            // id with. Undrawn, the launcher goes on showing the last frame it
+            // was handed — the archived habits, their old cells, and no note —
+            // and the 30-minute backstop and the midnight alarm both come back
+            // through the same `redraw`, so nothing recovers it.
+            val manager = AppWidgetManager.getInstance(context)
+            val shadowManager = shadowOf(manager)
+            val widgetId = 90
+            shadowManager.bindAppWidgetId(widgetId, ComponentName(context, OverviewWidget::class.java))
+            val settings = Settings(context)
+            settings.putWidgetSet(
+                widgetId,
+                listOf(record(boolHabit(id = 1, name = "Alpha"), widgetId = widgetId, rank = 0)),
+            )
+            HabitWidget.redraw(context)
+            assertEquals(
+                "the fixture is only meaningful from a frame that really had a row on it",
+                "Alpha",
+                name(shadowManager.getViewFor(widgetId)!!, 0),
+            )
+
+            WidgetSync.refreshFrom(context, emptyList())
+
+            val view = shadowManager.getViewFor(widgetId)!!
+            val note = view.findViewById<TextView>(R.id.overview_note)
+            assertEquals(View.VISIBLE, note.visibility)
+            assertEquals(context.getString(R.string.overview_empty), note.text.toString())
+            assertEquals(
+                "the archived habit's row must go with it, not stay on the last good frame",
+                View.GONE,
+                view.findViewById<View>(rowIds[0]).visibility,
             )
         }
 

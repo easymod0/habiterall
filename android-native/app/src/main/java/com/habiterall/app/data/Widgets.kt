@@ -115,8 +115,13 @@ object Widgets {
          * the strip moves", which the early-return branch satisfied by
          * construction — nothing moved — while leaving exactly the case
          * above presenting stale figures as current; the field is defined by
-         * what its one reader (`StatsWidget.render`) asks of it, not by the
-         * mechanism that happens to make it true elsewhere. Cleared in
+         * what its readers ask of it, not by the mechanism that happens to
+         * make it true elsewhere. There are TWO of those readers, and the
+         * second was added a round later: `StatsWidget.render` asks "are my
+         * figures current", and `OverviewWidget.render` asks "is my grid
+         * current" — the same question, because [answered] advancing [date]
+         * with no fetch behind it is what makes [date] stop being a fetch
+         * date, and this flag is the only witness to that. Cleared in
          * [refreshed] — a successful fetch is exactly what makes the figures
          * current again. `WidgetSync.noteRefused` is the one exception: a
          * refusal never reached the server, so the last fetch's figures are
@@ -577,10 +582,16 @@ object Widgets {
      *   it, so `refreshedOrGone` keeps the record and says "Removed" instead.
      *
      * A record already held for a served habit goes through [refreshedOrGone]
-     * rather than [refreshed] alone, for its `gone = false` arm: `WidgetSync`
-     * marks records gone without knowing anything about overview widgets, so a
-     * row whose habit was archived and then brought back would otherwise carry
-     * a stale flag that the render filters on forever.
+     * rather than [refreshed] alone, for its `gone = false` arm — and the
+     * reason is NOT the one first written down here. `WidgetSync.refreshFrom`
+     * excludes a live overview widget's records from the path that marks
+     * records gone, so a refresh cannot set the flag on a row of a widget the
+     * launcher reports as an overview. What the arm clears is a `gone` carried
+     * in from BEFORE this id was an overview's: a record can outlive the widget
+     * it was written for, and the launcher hands the id out again. Left set, it
+     * is permanent — `OverviewWidget.render` filters on it — so clearing it for
+     * a habit the server is serving costs one `copy` and closes the one way
+     * this widget could hide a live habit for good.
      */
     fun reconcileOverview(
         existing: List<Record>,
