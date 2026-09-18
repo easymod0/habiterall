@@ -1,5 +1,6 @@
 package com.habiterall.app.widget
 
+import android.appwidget.AppWidgetManager
 import android.content.Context
 import com.habiterall.app.data.Api
 import com.habiterall.app.data.Habit
@@ -31,6 +32,17 @@ object WidgetSync {
      * fetch effect that restarts whenever the visible window grows, and half a
      * home screen updated is worse than none of it. It is a DataStore write and
      * a handful of binder calls.
+     *
+     * Two different jobs, and they are not the same job with a different
+     * cardinality. A single-habit widget's record is REFRESHED in place, and an
+     * unchanged one is dropped so a refresh that decided nothing writes
+     * nothing — which is exactly why those records cannot go through
+     * [Settings.putWidgetSet]: that says "these are the widget's records now",
+     * and the dropped-unchanged filter above it would purge every untouched row
+     * of every widget in the store. An overview widget's set is RECONCILED
+     * instead — membership, order and rank are all decided by the served list,
+     * so the whole set is rewritten and `putWidgetSet` is the only write that
+     * can express it.
      */
     suspend fun refreshFrom(context: Context, habits: List<Habit>) {
         val app = context.applicationContext
@@ -38,10 +50,16 @@ object WidgetSync {
             runCatching {
                 val settings = Settings(app)
                 val records = settings.cachedWidgets()
-                if (records.isEmpty()) return@runCatching
+                // Which ids are overviews is the launcher's answer, not the
+                // store's: an overview widget placed but never seeded holds no
+                // records at all, and that is precisely the one this has to
+                // reconcile rows INTO.
+                val overviewIds =
+                    HabitWidget.liveIds(app, AppWidgetManager.getInstance(app)).overview
+                if (records.isEmpty() && overviewIds.isEmpty()) return@runCatching
                 val today = LocalDate.now().toString()
 
-                val updated = records.mapNotNull { record ->
+                val updated = records.filterNot { it.widgetId in overviewIds }.mapNotNull { record ->
                     val habit = habits.firstOrNull { it.id == record.habitId }
                     // A tap still on its way wins over the server's answer,
                     // which is by definition older than it. This is the
@@ -68,8 +86,65 @@ object WidgetSync {
                 }
 
                 settings.putWidgets(updated)
+                overviewIds.forEach { widgetId ->
+                    settings.putWidgetSet(
+                        widgetId,
+                        reconciledRows(
+                            app,
+                            records.filter { it.widgetId == widgetId },
+                            widgetId,
+                            habits,
+                            today,
+                        ),
+                    )
+                }
                 HabitWidget.redraw(app)
             }
+        }
+    }
+
+    /**
+     * One overview widget's rows, with the in-flight answers above them kept.
+     *
+     * `Widgets.reconcileOverview` decides membership, order and each row's day
+     * from the SERVER's reply, and that is right for everything but one case —
+     * the same case the single-habit skip in [refreshFrom] exists for, reached
+     * by a different road. The overview itself writes nothing, but the habit in
+     * a row does get answered elsewhere on this phone: a notification's
+     * buttons, its number pad, or a checkmark widget for the same habit, all of
+     * which paint through `noteAnswer` and then queue. A fetch that lands while
+     * that write is still in the outbox carries an answer OLDER than the tap,
+     * so writing it over the row would blank a cell the user has already
+     * answered — and offline it would stay blanked until the write finally
+     * lands.
+     *
+     * So the skip applies, in the same shape and for the same reason, with one
+     * narrowing the single-habit path does not need: [Outbox.isPending] is
+     * asked only for a row whose refreshed day actually DISAGREES with what the
+     * row already shows. A widget is at most a handful of records and a
+     * question each; an overview is one per habit on the account, on every
+     * fetch, and a question asked about a row that would not change is a
+     * WorkManager round trip bought for nothing.
+     *
+     * What is NOT kept is anything else about the row. A pending write says
+     * something about one day, not about whether the habit is still on the
+     * account or where the account now sorts it, so `gone`, `rank` and the
+     * habit's own shape all come from the reconcile regardless.
+     */
+    private suspend fun reconciledRows(
+        context: Context,
+        held: List<Widgets.Record>,
+        widgetId: Int,
+        habits: List<Habit>,
+        today: String,
+    ): List<Widgets.Record> {
+        val byHabit = held.associateBy { it.habitId }
+        return Widgets.reconcileOverview(held, widgetId, habits, today).map { row ->
+            val prior = byHabit[row.habitId] ?: return@map row
+            if (prior.date != today) return@map row
+            if (prior.value == row.value && prior.skip == row.skip) return@map row
+            if (!Outbox.isPending(context, row.habitId, today)) return@map row
+            row.copy(value = prior.value, skip = prior.skip)
         }
     }
 
@@ -87,10 +162,25 @@ object WidgetSync {
      * noticed because it only ever reads `today`. [refreshFrom] itself is left
      * asking nothing of its own: the list's fetch (its other caller) already
      * asks for a far larger window, and narrowing this call is enough.
+     *
+     * "Only when a widget exists" is TWO questions and not one — the same pair
+     * [refreshFrom]'s own guard asks, for the same reason. A record in the
+     * store is evidence of a widget, but an overview widget placed and never
+     * seeded holds no records at all: its configuration activity can be
+     * dismissed, killed, or run against a server it cannot reach, and it
+     * finishes CANCELLED having written nothing. Asked of the store alone this
+     * heartbeat returned before it fetched anything, so the one path that would
+     * ever have filled that widget was the one path that skipped it. With
+     * genuinely nothing on the home screen both sets are empty and no request
+     * is made, which is what the guard is for.
      */
     suspend fun refreshFromServer(context: Context, api: Api) {
         val app = context.applicationContext
-        if (runCatching { Settings(app).cachedWidgets() }.getOrDefault(emptyList()).isEmpty()) return
+        val records = runCatching { Settings(app).cachedWidgets() }.getOrDefault(emptyList())
+        val overviewIds = runCatching {
+            HabitWidget.liveIds(app, AppWidgetManager.getInstance(app)).overview
+        }.getOrDefault(emptySet())
+        if (records.isEmpty() && overviewIds.isEmpty()) return
         val data = runCatching { api.overview(days = Widgets.MAX_STRIP_DAYS) }.getOrNull() ?: return
         refreshFrom(app, data.habits)
     }

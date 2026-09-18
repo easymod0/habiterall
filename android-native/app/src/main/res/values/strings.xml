@@ -100,6 +100,43 @@
          paint kept and announce itself unanswered. -->
     <string name="stats_cell_kept">kept, nothing logged</string>
 
+    <!-- The overview widget: every habit down one side, the last few days
+         across. Read-only, and name-plus-cells only — there is no room for a
+         figure beside a name column and up to seven day columns, and the
+         per-habit stats widget is the surface where a number lives. -->
+    <string name="overview_widget_description">All your habits and the last few days, at a glance.</string>
+    <!-- %1$s is the day the rows were last refreshed, e.g. "2026-08-15".
+         Deliberately NOT `stats_stale`, though the sentence would read the
+         same: there it says the score and streak beside it are that old, here
+         it says today's COLUMN has no data behind it — an unrefreshed record
+         paints today as UNKNOWN, which is indistinguishable from "answered
+         nothing today", and this line is what resolves that. Two surfaces
+         saying different things through one string is how the two later drift
+         into one wrong sentence. -->
+    <string name="overview_stale">As of %1$s</string>
+    <!-- Every row has gone: a brand-new account, or every habit archived. The
+         grid is then empty with nothing on screen able to say why, which is
+         the same mistake the checkmark widget's gone note was added to fix —
+         so this is a real, visible line rather than a content description. -->
+    <string name="overview_empty">No habits to show yet</string>
+    <!-- How many habits the account holds that this widget has no room for.
+         A plural, not "%d more": one is a real and common case (eight habits
+         in a seven-row widget), and "1 more habits" is the reason this is a
+         `plurals` rather than a format string. -->
+    <plurals name="overview_more">
+        <item quantity="one">%d more habit</item>
+        <item quantity="other">%d more habits</item>
+    </plurals>
+    <!-- Spoken for `overview_root`. %1$d is how many rows are drawn and %2$d
+         how many the account holds — stated as a pair even when they are equal,
+         because the honest claim is what is SHOWN against what exists, and a
+         widget that announced only the rows it drew would be making the same
+         "these are all of them" claim `overview_more` exists to refuse. The
+         count ENDS the sentence rather than sitting before a noun, which is
+         also what keeps lint's `PluralsCandidate` quiet: this one genuinely is
+         not a plural — "1 of 3" and "3 of 3" are the same sentence. -->
+    <string name="overview_summary">Your habits: %1$d of %2$d</string>
+
     <string name="count_hint">Amount</string>
     <string name="save">Save</string>
     <string name="cancel">Cancel</string>
