@@ -836,12 +836,18 @@ const codeOnly = (src) => src
   .join('\n');
 
 test('a suite dates its days on the local calendar, the one the fixtures seeded', () => {
-  const suites = readdirSync(browserDir)
-    .filter((f) => f.endsWith('.mjs') && f !== 'fixtures.mjs');
+  // Every `.mjs` under `browser/`, **`fixtures.mjs` included**. Excluding it
+  // was right while it held no date spelling of its own; it now holds BOTH
+  // canonical ones — `daysAgo` and `LOCAL_ISO_SRC` — and seven suites rest on
+  // them, so the one file that matters most was the one file outside the
+  // denominator this test prints. It scans clean today: everything it says
+  // about either defect it says in JSDoc, which `codeOnly` drops. `run.mjs`
+  // and `chrome.mjs` are in here too, and always were.
+  const files = readdirSync(browserDir).filter((f) => f.endsWith('.mjs'));
 
   /** @type {Record<string, number>} */
   const found = {};
-  for (const file of suites) {
+  for (const file of files) {
     const src = codeOnly(readFileSync(join(browserDir, file), 'utf8'));
     // **Both spellings, and that symmetry is the point.** The declaration check
     // at the bottom of this test was widened to `getUTC` on the argument that
@@ -862,13 +868,13 @@ test('a suite dates its days on the local calendar, the one the fixtures seeded'
   // The INVENTORY is part of the assertion: an empty offender list means
   // nothing until the denominator is known (root `CLAUDE.md`). Printed even
   // when it matches, so a reader can see the guard reached real files.
-  console.log(`scanned ${suites.length} suites for a UTC date read`);
+  console.log(`scanned ${files.length} files under browser/ for a UTC date read`);
   for (const [file, n] of Object.entries(found)) {
     const why = UTC_DATE_READS[file]?.why;
     console.log(`  ${file}: ${n} — ${why ? 'exempt: ' + why.slice(0, 60) + '…' : 'NOT EXEMPT'}`);
   }
-  assert.ok(suites.length >= 30,
-    `only ${suites.length} suites scanned — this guard has stopped seeing the directory`);
+  assert.ok(files.length >= 30,
+    `only ${files.length} files scanned — this guard has stopped seeing the directory`);
 
   assert.deepEqual(
     found,
@@ -882,14 +888,39 @@ test('a suite dates its days on the local calendar, the one the fixtures seeded'
   }
 
   // The second shape: a LOCAL `Date`'s epoch value stepped by whole days.
+  //
+  // **Both ORDERS of the multiplication, and both spellings of the anchor.**
+  // The first version matched `* 864…` alone, so commuting the operands —
+  // `getTime() - 86400000 * n`, the same walk, an equally ordinary way to
+  // write it — was invisible to it: measured on a probe file carrying both
+  // orders, it reported 1. That is the same asymmetry as a guard seeing one
+  // spelling of a UTC read, one step narrower. `Date.now()` is here for the
+  // same reason `getTime()` is — the identical fixed-block walk with the
+  // anchor spelled differently, which breaks the same way for anyone stepping
+  // back from an hour near local midnight.
+  //
+  // Seven spellings measured as caught — both orders, both anchors, `864e5`,
+  // `86_400_000` and `24 * 60 * 60 * 1000`. What it still cannot see, said out
+  // loud rather than left to be discovered: `+t` as the anchor (`new Date(+t -
+  // n * 86400000)`, no call to match on), a fully commuted `1000 * 60 * 60 *
+  // 24 * n`, and a multiplication split across a line break — the match is
+  // single-line by construction (`[^;\n]*`), which is what stops it running
+  // away across a file. An hour-scale step and a DIFFERENCE divided by a day
+  // (`(a.getTime() - b.getTime()) / 86400000`, which `feat4` does) are
+  // measured as NOT firing, which is the other half of a guard being usable.
+  // The two behavioural tests below are the rest of this, per the root
+  // `CLAUDE.md`: no source guard of any shape catches a `+ n` written for a
+  // `- n`.
   /** @type {Record<string, number>} */
   const stepped = {};
-  for (const file of suites) {
+  for (const file of files) {
     const src = codeOnly(readFileSync(join(browserDir, file), 'utf8'));
-    const hits = (src.match(/getTime\(\)\s*[-+][^;\n]*\*\s*864/g) ?? []).length;
+    const hits = (src.match(
+      /(getTime\(\)|Date\.now\(\))\s*[-+][^;\n]*(\*\s*(86_?4|24\s*\*\s*60)|86_?4[\d_e]*\s*\*)/g,
+    ) ?? []).length;
     if (hits) stepped[file] = hits;
   }
-  console.log(`scanned ${suites.length} suites for a local epoch day-step`);
+  console.log(`scanned ${files.length} files under browser/ for a local epoch day-step`);
   for (const [file, n] of Object.entries(stepped)) {
     console.log(`  ${file}: ${n} — ${LOCAL_EPOCH_DAY_STEPS[file] ? 'exempt' : 'NOT EXEMPT'}`);
   }
