@@ -429,6 +429,87 @@ ck('cloud: a habit with no notes carries [] rather than an absent key',
   Array.isArray(noNotesRow.notes) && noNotesRow.notes.length === 0,
   JSON.stringify(noNotesRow.notes));
 
+/* ---- issue #247: /overview ships per-habit run ranges for the dashboard's
+ * in-run ghost tick ----
+ *
+ * `runs` is `summaryStats`'s clipped fold over `streaksFrom`, asked for with
+ * the GRID window (`start`/`end` — this route's own, never `summaryEnd`). A
+ * 3-in-7 boolean habit logged Mon/Wed/Fri for ~60 days is on pace every day
+ * of its life, so it is one long run — far longer than the 14-day window this
+ * asks for — which is what lets one assertion be the clipping check and the
+ * true-length check at once: reporting the clipped span instead of the true
+ * length would read `length: 14` or less, never more than the days requested.
+ *
+ * The request is deliberately PAGED BACK (`end: isoDaysAgo(PAGE_BACK_DAYS)`),
+ * still inside the fixture's 60-day run but strictly earlier than
+ * `summaryEnd` (today) — a caller that swapped `summaryEnd` in for the grid
+ * `end` answers with today's date every time, so only a paged-back request
+ * can catch that substitution: at `end: today` the two dates coincide and the
+ * "within window" check would pass either way. Mirrors habiterall-personal's
+ * test/overview.integration.mjs; the two editions promise the same API.
+ */
+const runsHabit = await (await fetch(`${overviewBase}/api/habits`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(
+    { name: 'RunsHabit 247', type: 'boolean', freq_numerator: 3, freq_denominator: 7 }
+  ),
+})).json();
+const RUNS_DAYS = 60;
+for (let i = RUNS_DAYS - 1; i >= 0; i--) {
+  const date = isoDaysAgo(i);
+  const dow = new Date(`${date}T12:00:00`).getDay();
+  if ([1, 3, 5].includes(dow)) {
+    await putNoteEntry(runsHabit.id, date, { value: 2 });
+  }
+}
+
+const GRID_DAYS = 14;
+const PAGE_BACK_DAYS = 20;
+const runsView = await getOverview({ days: GRID_DAYS, end: isoDaysAgo(PAGE_BACK_DAYS) });
+const runsRow = runsView.habits.find((h) => h.id === runsHabit.id);
+
+ck('cloud: runs is a non-empty array',
+  Array.isArray(runsRow.runs) && runsRow.runs.length > 0, JSON.stringify(runsRow.runs));
+ck("cloud: every run's start/end lies within the requested grid window",
+  runsRow.runs.every((r) => r.start >= runsView.start && r.end <= runsView.end),
+  `window ${runsView.start}..${runsView.end}, runs ${JSON.stringify(runsRow.runs)}`);
+ck('cloud: a run\'s length is the TRUE, unclipped length — greater than the days requested',
+  runsRow.runs.every((r) => r.length > GRID_DAYS),
+  `requested ${GRID_DAYS}, runs ${JSON.stringify(runsRow.runs)}`);
+
+// A window with no runs in it answers with an empty array rather than a
+// missing key or a 500 — and note what this does NOT pin, because its first
+// version claimed to. It does not pin the 400-day bound (decision 2): this
+// fixture holds 60 days of entries, so a window at −456..−450 intersects no
+// run for a reason that has nothing to do with `SUMMARY_WINDOW_DAYS`, and
+// deleting that constant from the route entirely leaves this passing. The
+// bound is `summaryStats`' behaviour rather than the route's and is pinned
+// where it can be reached with a 500-day fixture and no HTTP: `#247` cases 2
+// and 6 in `shared/test/streaks.test.js`. What this DOES bite is the grid
+// window being threaded through at all — swap `summaryEnd` in for `end` and
+// it answers with a run.
+const pagedPastWindow = await getOverview({ days: 7, end: isoDaysAgo(450) });
+const pagedPastWindowRow = pagedPastWindow.habits.find((h) => h.id === runsHabit.id);
+ck('cloud: ?end= paged back past the summary window returns runs: []',
+  Array.isArray(pagedPastWindowRow.runs) && pagedPastWindowRow.runs.length === 0,
+  JSON.stringify(pagedPastWindowRow.runs));
+
+// The row figures are computed in archived mode too, so `runs` must ride
+// along there as well.
+await fetch(`${overviewBase}/api/habits/${runsHabit.id}`, {
+  method: 'PUT',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    name: 'RunsHabit 247', type: 'boolean', freq_numerator: 3, freq_denominator: 7,
+    archived: true,
+  }),
+});
+const runsArchivedView = await getOverview({ days: GRID_DAYS, archived: 'true' });
+const runsArchivedRow = runsArchivedView.habits.find((h) => h.id === runsHabit.id);
+ck('cloud: ?archived=true still carries the runs field',
+  runsArchivedRow && 'runs' in runsArchivedRow, JSON.stringify(runsArchivedRow));
+
 /* ---- issue #223: /overview's bestStreak reads the same credit rule ----
  *
  * `score` and `currentStreak` come from `summaryStats` and so from
@@ -3369,6 +3450,9 @@ for (const id of [
   // leaving it out failed this same check by exactly that margin.
   marathon.id,
   retired.id,
+  // #247's fixture: ~26 entries over its 60-day run, same trap as the rest
+  // of this list.
+  runsHabit.id,
 ]) {
   await fetch(`${overviewBase}/api/habits/${id}`, { method: 'DELETE' });
 }

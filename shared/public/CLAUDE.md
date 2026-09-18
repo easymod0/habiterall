@@ -849,12 +849,112 @@ doing that a deliberate act rather than a silent one.
 **Still open, on purpose.** Streak connectors drawn over an empty cell was
 issue #176, addressed above — a different route (`inStreak`) from anything
 else in this section, and it left `unlogged_is_success`'s own fill untouched.
-It reaches the calendar and the detail page's own strip only: the dashboard's
-day squares and both Android grids (`DayGrid`, the widget) still draw these
-days blank, and stay that way until a follow-up ships the `/overview` streak
-ranges either would need. The credit window's missing far end is still issue
-#223, and it is not this one's to fix either. `docs/decisions/day-states.md`
-has the long form.
+It reached the calendar and the detail page's own strip first; #247 (below)
+extends it to the dashboard's own day squares. Both Android grids (`DayGrid`,
+the widget) still draw these days blank, and stay that way until a follow-up
+ships them the same `/overview` streak ranges. The credit window's missing far
+end is still issue #223, and it is not this one's to fix either.
+`docs/decisions/day-states.md` has the long form.
+
+**#247 threads the same run set into the dashboard's own day squares.**
+`ui/dashboard.js`'s `habitRow` passes `streakDates(habit.runs, MIN_STREAK)` as
+`dayCells`'s fifth argument — the same call `ui/detail.js`'s strip already
+makes over `stats.streaks` — so the ghost tick above reaches a third grid with
+no new renderer, only a caller that had been passing the `new Set()` default.
+`habit.runs` rides on `/overview`: `summaryStats` already reads its `score`
+and `currentStreak` off entries the route bounded to a fixed ~400-day window
+anchored to today (`SUMMARY_WINDOW_DAYS`, not to the grid's own `end`), and
+`runs` is that same `streaksFrom` array, clipped into the GRID window the
+route is about to answer (its own `start`/`end`, never `summaryEnd`) instead
+of the 1830-day scan `recomputeBestStreak` runs on a stale summary cache —
+that scan would make the marks flicker between two loads of one page
+depending on cache freshness, and a second, narrower entries read plus a
+second `onPaceSeries` pass for a paged-back grid window was rejected too,
+since a narrower window moves `onPaceSeries`'s own birth-gated leniency and
+would put the dashboard at odds with the detail page about the same run. So a
+grid paged back past the 400-day entries window shows no run marks for those
+days, accepted rather than coded around, and each run's `length` on the wire
+is the TRUE unclipped length, never the span visible in whatever grid window
+clipped it.
+
+**"No marks past the bound" needs the first `den - 1` days of the slice
+suppressed too, and without that the boundary drew WRONG marks rather than
+none.** `onPaceSeries` judges a day against the trailing `denominator`-day
+window ending on it, so a day less than `den - 1` from the start of the walked
+range is judged against a window missing history that really happened — with
+#340's leniency correctly withheld, because the range opened at the slice's
+edge and not at the habit's birth. Measured on a 3x/7 habit kept perfectly for
+500 days: the 400-day slice reported its own first fortnight as a 4-day run,
+then a ONE-DAY HOLE, then the real run, where the habit's own page reports one
+unbroken 499. Drawn, that is a blank square mid-band on the dashboard while the
+calendar strokes through the same day. `summaryStats` therefore floors the
+`runs` window at `from + (den - 1)` whenever `from > birth`, so those days are
+absent instead of wrong — `score` and `currentStreak` are untouched, both being
+read at the range's far end where nothing is truncated. The read of
+`freq_denominator` that needs sits INSIDE the `runs` branch, because
+`stats.test.js`'s counting-getter guard measures pass invocations through that
+property and a third unconditional read would stop it meaning what it says.
+
+**A `.check` cell SAYS its state, because the glyph alone lies — and the
+`aria-label` goes on the BOX, never on the button.** A button with no label of
+its own is named from its contents, so before this the dashboard announced
+`"✓ S"` for an in-run day nobody had logged: the app stating a habit was done
+on a day it was not, with `questionMarks` on or off. The faint tick and a solid
+one are one character. `paintCheckbox` therefore labels the `.check-box` in the
+SAME branch that decides the glyph — `says()`, and `ghostTick` takes the state
+as an argument — which is what keeps a glyph from disagreeing with its own
+description; a `describeDay()` mirroring the branch order would be two
+functions over one set of inputs, which is the drift this project keeps paying
+for. Labelling the box rather than the button is what preserves the weekday
+letter in `.check-day` as part of the computed name, and it is also the only
+option available: `dayCells` paints the box BEFORE `btn.append(box, day)`, so
+the button is not reachable from there. The vocabulary is Android's
+`describe()` (`ui/DayGrid.kt`) rather than a second one — "counted as kept, no
+entry", "no entry", "done", "not done", "clean", "slipped, N unit", "N of M
+unit" — plus the two in-run states, which Android will need when #247's other
+half lands. `gridcheck.mjs` reads the COMPUTED name over CDP
+(`Accessibility.getPartialAXTree`, the same shape `categorycheck.mjs` uses) and
+not the attribute, and asserts the name is PROSE rather than the raw glyph:
+with the label dropped the name falls back to `"✓ T"`, which still differs from
+a logged cell's name and still contains no "done", so neither of those two
+checks catches it and a third one has to.
+
+**The box carries `role="img"` with that label, and the reason is that a bare
+`<span>` is `role=generic` — the one role ARIA 1.2 lists `aria-label` as
+PROHIBITED on.** It is the only label in this directory that sits on anything
+but a `<button>`, an `<input>` or an `<svg>`. Chrome honours it regardless:
+every accessible-name check in `gridcheck.mjs` passes with the role removed,
+measured, so nothing this fleet can observe holds it and a later reader looking
+only at Chrome would be right that it changes nothing — on Chrome. Whether a
+prohibited label still contributes to an ANCESTOR's name-from-contents is
+engine-specific rather than specified, and this app installs as a PWA onto iOS;
+dropped there, the cell falls back to announcing `"✓ T"`, which is the whole
+defect, silently, under a green suite. `img` supports naming, replaces the
+glyph with the name instead of sitting beside it, and still contributes to the
+button, so the weekday letter survives. `paintCheckbox`'s reset clears the role
+with the label, since a box left `img` with no name is an unnamed image rather
+than a plain span. The attribute assertion in `gridcheck.mjs` is deliberately
+NOT behavioural, and says so at the check: it is the one thing here a Chrome-only
+fleet cannot prove.
+
+**A measurable day names the goal the SHADE is measured against, and names none
+when the habit has none.** `parseHabit` accepts `target_value: 0` in either
+direction, and the two mean different things: on a LIMIT it is a stated goal
+("at most none" is the point of such a habit) and is both shaded and spoken,
+while on an at-least habit it is the ABSENCE of one and the `|| 1` in the ratio
+is a divide-by-zero fallback rather than a target anybody set. Spoken from
+`habit.target_value` the cell announced `"8 of 0 pages"`; spoken from the
+fallback, `"8 of 1 pages"` — an internal detail promoted to a claim. So that
+one case says the amount alone, and every other reads the same binding the
+shade did. Two readings of one field six lines apart is exactly the drift
+`says()` exists to prevent, met inside `says()`'s own branch.
+
+**The run set is exactly as stale as the rest of the row it draws.** It is the
+one `/overview` last answered with, so an offline tap that turns a day into a
+stored 0 keeps drawing that cell's in-run tick until the next load corrects
+it — the same acceptance `ui/detail.js`'s `stripRuns` already states for the
+strip. `shared/test/browser/gridcheck.mjs`'s "clearing a skip while offline
+repaints the cell" case is the worked example.
 
 ## Amounts
 

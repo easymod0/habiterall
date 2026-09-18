@@ -103,16 +103,38 @@ try {
    * first row; it is gone, its API half folded into the checks here.
    */
   const gridMarks = () => ev(`(() => {
+    // #247 gave this grid a THIRD state and the two-state read above could not
+    // see it. An in-run day nobody logged now draws the faint tick the detail
+    // strip has drawn since #176, so "has a glyph" stopped meaning "has a
+    // row". A ghost tick is told from a solid one by its BACKGROUND, not by
+    // its 0.45 opacity: \`paintCheckbox\` leaves the cell on \`--grid-empty\`
+    // and only writes the glyph, where every branch that draws a solid '✓'
+    // (a boolean done day, an avoided clean day) fills with the habit's own
+    // colour first, and every branch that tints writes something other than a
+    // tick. Opacity would be the fragile read — a numerical cell's is its
+    // progress ratio, which is free to land on 0.45 for the right target.
+    // \`gridcheck.mjs\` is where the ghost tick's own appearance is pinned;
+    // here it only has to be told apart.
+    const probe = document.createElement('span');
+    probe.style.background = 'var(--grid-empty)';
+    document.body.append(probe);
+    const empty = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+
     const cells = [...document.querySelectorAll('#grid .check[data-date]')];
     const shown = {};
     for (const btn of cells) {
       const box = btn.querySelector('.check-box');
-      shown[btn.dataset.focusKey] = (box.textContent || '').trim() !== '';
+      const glyph = (box.textContent || '').trim();
+      shown[btn.dataset.focusKey] = glyph === '' ? ''
+        : (glyph === '✓' && getComputedStyle(box).backgroundColor === empty
+            ? 'ghost' : 'solid');
     }
     return {
       range: document.querySelector('.grid-range')?.textContent ?? '',
       cells: cells.length,
-      answered: Object.values(shown).filter(Boolean).length,
+      answered: Object.values(shown).filter((s) => s === 'solid').length,
+      ghosts: Object.values(shown).filter((s) => s === 'ghost').length,
       shown,
     };})()`);
 
@@ -147,10 +169,24 @@ try {
    * all (the root `CLAUDE.md`'s reason for `unknowncheck.mjs`). If a future
    * fixture adds one, these checks fail and name the day, which is the right
    * failure rather than a wrong measure.
+   *
+   * **#247 added a third shape and it is subtracted by NAME rather than
+   * tolerated.** `Gym` is 3×/7 kept perfectly, so every day of it is on pace
+   * and its unlogged Tue/Thu/Sat/Sun cells now carry the in-run ghost tick —
+   * which is the feature, and which a bare "marked" read counts as a row that
+   * is not there. So the correspondence is asserted of SOLID marks only, and
+   * the ghost cells get their own half of it: with these fixtures a ghost tick
+   * can only ever be the `value == null` branch, because `atMostUnlogged` is
+   * `miss` (no kept-unlogged tick) and the set holds no boolean 0 (no stored-
+   * lapse tick) — so a ghost over a day that HAS a row means the fixtures have
+   * gained exactly the shape the paragraph above says would break this, and it
+   * fails naming the day rather than being absorbed.
    */
   const disagreements = (grid, rows) => Object.entries(grid.shown)
-    .filter(([key, on]) => on !== !!rows[key])
-    .map(([key, on]) => `${key} is ${on ? 'marked with no row' : 'blank but has a row'}`);
+    .filter(([key, mark]) => (mark === 'solid') !== !!rows[key] || (mark === 'ghost' && rows[key]))
+    .map(([key, mark]) => `${key} is ${
+      mark === 'ghost' ? 'an in-run ghost tick over a day that HAS a row'
+        : mark === 'solid' ? 'marked with no row' : 'blank but has a row'}`);
 
   const rows = await recorded();
 
@@ -177,10 +213,20 @@ try {
   // **The grid must hold BOTH kinds of day, or agreement is satisfied by a
   // uniform one.** Structural rather than hopeful: `Gym` is seeded on Monday,
   // Wednesday and Friday only, so any run of ten consecutive columns leaves at
-  // least four of its cells blank, while `Read` and `No late-night snacks`
-  // carry a row on every one of the sixty days. This is what the mutation
-  // (`answered: cells`) fails first, and it fails by naming the count.
+  // least four of its cells carrying no SOLID mark, while `Read` and `No
+  // late-night snacks` carry a row on every one of the sixty days. This is
+  // what the mutation (`answered: cells`) fails first, and it fails by naming
+  // the count. Since #247 those four are ghost ticks rather than blanks —
+  // `answered` counts solid marks alone, so the spread is unaffected, and
+  // `Meditate`'s own `i % 9` gaps are genuinely blank either way (a daily
+  // habit's unlogged day is never on pace, so it can be in no run).
   const spread = (g) => g.answered > 0 && g.answered < g.cells;
+  // The third state is asserted PRESENT rather than merely handled: with no
+  // ghost cell in the window the classification above is never exercised and
+  // the correspondence below would pass against a build that had lost the
+  // in-run tick entirely. `Gym` is what guarantees one (#247).
+  ck('the window holds at least one in-run ghost tick to classify',
+    now.ghosts > 0, `${now.ghosts} ghost, ${now.answered} solid of ${now.cells}`);
   ck('the current window marks exactly the days the account has recorded',
     spread(now) && disagreements(now, rows).length === 0,
     `${now.answered}/${now.cells} marked in ${now.range}; `

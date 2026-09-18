@@ -397,6 +397,145 @@ named at the end of the #223 section. What else remains open is the far end of
 the credit window, deliberately — there is still no "silence expires" rule, so
 an abandoned limit habit with one real answer keeps accruing.
 
+**The dashboard's day squares are addressed below, by #247** — the payload
+change this section said the strip's own follow-up would need. Both Android
+grids still draw these days blank; #247 stays open for them.
+
+
+## Issue #247 — the dashboard's own day squares still drew a run blank
+
+#176 above reached the calendar and the detail page's "Recent days" strip.
+Its own "What was not extended" section named the reason the dashboard's day
+squares were left out: `/overview` shipped only `bestStreak`, no per-day run
+range, and getting one there was scoped out on purpose. This issue is that
+follow-up, for the web dashboard only — Android's grid and widget stay open,
+as recorded there.
+
+**The issue's own text names the wrong input.** It says both editions run
+`computeStats` per habit for `bestStreak`, which was true when #176 was
+written and has not been since #184: `/overview` calls `summaryStats`, not
+`computeStats`, and the full `computeStreaks` pass behind `bestStreak`
+(`recomputeBestStreak`, over `STREAK_HISTORY_DAYS` — 1830 days, and not the
+`MAX_COMPARE_DAYS` that happens to share the number) only runs for a habit
+whose summary cache is STALE. Reading a run range off that
+path would have made the dashboard's ghost ticks appear and disappear between
+two loads of the same page, purely on cache freshness — a defect the fix would
+have shipped rather than fixed. `summaryStats` was the right input instead,
+and for a reason simpler than "it runs every time": it already builds
+`streaksFrom(series)` and reads `currentStreak` off the result, then discards
+the array. Returning it costs no second walk, no second `onPaceSeries` build
+and no second `boundedRange` call — the same discipline "Two entry points
+share one window" above states for `lastMiss`, extended to a second field on
+the same array.
+
+**The shape is a clipped range with a TRUE, unclipped length, and that
+distinction is the trap.** `clipRuns` folds `streaksFrom`'s output into the
+window a caller names (`summaryStats`'s new opt-in `runs: {start, end}`):
+a run that does not intersect the window is dropped, a run that does is
+clipped into it, but `length` stays the run's real length regardless. Report
+the clipped SPAN as `length` instead and `streakDates(runs, MIN_STREAK)`
+(`shared/public/charts.js`) drops a 40-day run showing two days at a 14-day
+window's edge as a 2-day run — the ghost ticks vanish exactly at the left edge
+of the grid, which is where they matter most and where nobody is looking to
+notice they are gone. No minimum length is enforced server-side: `MIN_STREAK`
+lives in `charts.js`, a presentation module `shared/src` cannot import, and
+the calendar, the strip and the dashboard must all read the same gate, so the
+server ships every run's true length and the client decides which count.
+
+**The bound is the ~400-day `SUMMARY_WINDOW_DAYS` window the ENTRIES are
+already read over, not a wider one, and two wider alternatives were
+rejected.** Both editions' `/overview` bound the entries they read for every
+habit to `[now - SUMMARY_WINDOW_DAYS, now]` — anchored to today, not to
+whatever page the grid is showing — before ever calling `summaryStats`, so
+`streaksFrom` cannot see a run further back than that regardless of what
+window `runs` is then clipped into. `runs` itself clips into the GRID
+window — the route's own `start`/`end`, never `summaryEnd` — which is a
+SEPARATE, usually much narrower window (`days`, defaulting to 30). A grid
+paged back past the 400-day entries window has no entries to have found a run
+in at all, so it shows no run marks for those days. This is documented, not
+coded around.
+  - The 1830-day scan is rejected for the reason above: it is the STALE-cache
+    path, so using it here would make the marks themselves flicker between
+    two loads of one page.
+  - **The bound needed one more clause than the first version of this section
+    claimed, and a review round found it.** "A grid paged back past the
+    400-day window shows no run marks" was written as though the slice's own
+    edge were harmless, and it is not: `onPaceSeries` judges a day against the
+    trailing `den`-day window ending on it, so the first `den - 1` days of any
+    bounded slice are judged against a window missing history that really
+    happened — with #340's leniency correctly withheld, since the range opened
+    at the slice edge rather than at the habit's birth. Reproduced on a 3x/7
+    habit kept perfectly for 500 days, `?days=14&end=<cutoff+8>`:
+
+    ```
+    /habits/:id/stats  -> one run, 2025-05-07..2026-09-17, length 499
+    /overview          -> [{2025-08-13..2025-08-16, length 4},
+                           {2025-08-18..2025-08-21, length 396}]
+                          ... 2025-08-17 drawn BLANK, mid-band
+    ```
+
+    So the promise was false in the worse direction — a wrong mark inside the
+    bound rather than an absent one past it, on the one surface this issue
+    exists to fix, and disagreeing with the calendar about the same day.
+    `summaryStats` now floors the `runs` window at `from + (den - 1)` when
+    `from > birth`, which makes the documented promise true rather than
+    aspirational. The hole was ~`den - 1` days wide: 2 days at 3x/7, 6 at
+    1x/7. Nothing about `onPaceSeries` changed — its slice-edge behaviour is
+    #340's settled decision, and `score`/`currentStreak` read the far end of
+    the range where no truncation applies. Reachability was low (~28
+    page-backs on the web, one call for a direct `?days=365` caller), which
+    is why it is a MEDIUM and not the reason to leave it.
+  - A second entries read plus a second `onPaceSeries` pass, scoped to
+    whatever narrower window a paged-back request asked for, was rejected
+    too: `onPaceSeries` pro-rates its requirement near a habit's own BIRTH
+    only (#340's birth gate, `shared/CLAUDE.md`), so a second pass over a
+    window that opens somewhere other than the habit's birth judges the same
+    days by a different rule than the pass the detail page's own `/stats`
+    call uses — the dashboard could then disagree with the detail page about
+    the same run, the exact three-surfaces-disagreeing shape #176's own "What
+    is still open" section named.
+
+**The dashboard threads the set exactly where the strip already does.**
+`ui/dashboard.js`'s `habitRow` passes `streakDates(habit.runs, MIN_STREAK)` as
+`dayCells`'s fifth argument, mirroring `ui/detail.js:933`'s
+`streakDates(stats.streaks, MIN_STREAK)` call over the same renderer
+(`paintCheckbox`, `shared/public/ui/day-strip.js`) — no renderer change, only
+a caller that had been passing the `new Set()` default in since #176 shipped
+it. `habit.runs` can be absent (a service-worker-cached `/overview` predating
+the field), and `streakDates` already answers an empty `Set` for a nullish
+argument, so the caller needs no `?? []` of its own.
+
+**The run set carries the same accepted staleness every other figure on the
+row does.** It is the one `/overview` last answered with, so an offline tap
+that turns a day into a stored 0 keeps drawing that cell's in-run tick until
+the next load corrects it — the same acceptance `ui/detail.js`'s `stripRuns`
+is declared with for the strip. `shared/public/CLAUDE.md`'s in-run section
+and `shared/test/browser/gridcheck.mjs`'s "clearing a skip while offline
+repaints the cell" case are the worked example; not restated here.
+
+**Android stays open, and three of Mark's answers are recorded against it so
+a future worker does not re-ask them.** The single-day widget (`Widgets.kt`)
+already draws the in-run day the way the web strip does, if it is ever wired
+up — `Widgets.markFor`'s own doc comment claims it mirrors `DayCell`'s per-day
+state, state for state, so an in-run day widget-side is the same faint mark
+with no fill: `dayLabel` returns `"✓"` and `dayFill` stays `Transparent`,
+never a checkbox glyph over a coloured block. Neither `DayGrid.kt` nor
+`Widgets.kt` is touched by this issue; #247 stays open for them, and this PR
+must not say `Closes #247`.
+
+### What was not extended, and why
+
+**Every other surface #176 already covers.** Skips inside a run, a future
+day, the avoided-habit ramp, the calendar's stroke, the detail strip and the
+legend's "In a run" swatch are unchanged — #176 settled all of them and
+`paintCheckbox` already implements every one. This issue is a caller change
+only: one import, one argument, on the dashboard's own row builder.
+
+**`paintCheckbox`, `ghostTick`, `dayCells`, `repaintCells` and `streakDates`
+are untouched.** All five already took the run set as an argument since
+#176; the defect was a caller never passing one, not a renderer missing a
+branch.
+
 
 ## Issue #223 — an unanswered day counts as success only once the habit has answered
 

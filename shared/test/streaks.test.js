@@ -563,3 +563,122 @@ test('#340 review 3: at a SLICE EDGE a shut gate really does reproduce master', 
     'a slice edge is not a birth — withholding the leniency here is the ' +
     'whole difference the gate exists to make');
 });
+
+/* ---------- #247: summaryStats' opt-in `runs`, clipped and true-length ---------- */
+
+// A daily boolean habit over 60 days: a 5-day run entirely BEFORE the window
+// every case below asks for, a 40-day run straddling its left edge, and a
+// 2-day run entirely INSIDE it. `runsDay(n)` is the habit's own day `n`, with
+// `runsDay(60) === runsEnd`, so every literal below is a day count rather
+// than a calendar date nobody could check by eye.
+const runsEnd = '2026-03-01';
+const runsDay = (n) => addDays(runsEnd, n - 60);
+const runsEntries = [];
+for (let n = 1; n <= 5; n++) runsEntries.push({ date: runsDay(n), value: YES });   // run A
+for (let n = 11; n <= 50; n++) runsEntries.push({ date: runsDay(n), value: YES }); // run B
+for (let n = 53; n <= 54; n++) runsEntries.push({ date: runsDay(n), value: YES }); // run C
+// The window every case asks for: day 40 through the end — inside run B,
+// past run A entirely, and containing run C whole.
+const runsWindow = { start: runsDay(40), end: runsEnd };
+
+test('#247 case 1: a run longer than the window clips its dates but reports ' +
+     'its TRUE, unclipped length', () => {
+  const stats = summaryStats(boolHabit, runsEntries, { end: runsEnd, runs: runsWindow });
+  const clippedB = stats.runs.find((r) => r.length === 40);
+  assert.ok(clippedB, 'the 40-day run must still be reported');
+  assert.equal(clippedB.start, runsDay(40),
+    'clipped to the window\'s start, not to the run\'s own start (day 11)');
+  assert.equal(clippedB.end, runsDay(50));
+  assert.equal(clippedB.length, 40,
+    'the TRUE length — reporting the clipped 11-day span instead is the trap: ' +
+    'a 2-day-reading run is exactly what a client-side MIN_STREAK gate drops');
+});
+
+test('#247 case 2: a run entirely outside the window is absent from `runs`', () => {
+  const stats = summaryStats(boolHabit, runsEntries, { end: runsEnd, runs: runsWindow });
+  assert.equal(stats.runs.length, 2,
+    'run A (days 1-5, entirely before the window) must not be one of them');
+  assert.ok(!stats.runs.some((r) => r.length === 5),
+    'run A specifically must be absent, not merely outnumbered');
+});
+
+test('#247 case 3: a 2-day run is still returned — the length gate is the ' +
+     'client\'s, not summaryStats\'', () => {
+  const stats = summaryStats(boolHabit, runsEntries, { end: runsEnd, runs: runsWindow });
+  const clippedC = stats.runs.find((r) => r.length === 2);
+  assert.ok(clippedC, 'a 2-day run must still be reported here, unfiltered');
+  assert.equal(clippedC.start, runsDay(53));
+  assert.equal(clippedC.end, runsDay(54));
+});
+
+test('#247 case 4: a caller that passes no `runs` option gets no key at all', () => {
+  const stats = summaryStats(boolHabit, runsEntries, { end: runsEnd });
+  assert.equal('runs' in stats, false,
+    'absent, not `undefined` and not `[]` — the same convention `lastMiss` sets');
+});
+
+// Cases 1-3 all ask for a window ending at `runsEnd`, so no run of theirs ever
+// runs PAST the window's far end and `clipRuns`' right-hand clip is never
+// exercised: delete `end: streak.end > to ? to : streak.end` and all four pass.
+// That branch is what a PAGED-BACK dashboard reaches on every load — the grid's
+// `end` is then strictly inside a run that continues to today — so it is not an
+// edge case, it is the ordinary paged request, and only the two editions'
+// integration suites were holding it. A window with run B open at BOTH ends is
+// what pins both clips at once.
+// A BOUNDED slice — which is the only kind either `/overview` hands this — is
+// judged by `onPaceSeries` against a trailing window that is missing real
+// history for its first `den - 1` days, with #340's leniency correctly withheld
+// because the range did not open at the habit's birth. The verdict there is not
+// lenient or strict but WRONG, and `runs` is the one field that would draw it.
+// Measured against the unguarded code, this exact fixture: two runs,
+// `[day401..day404] length 4` and `[day406..] length 395`, with day 405 a HOLE —
+// a blank square mid-band on the dashboard while the calendar, which sees the
+// whole history, strokes through the same day.
+test('#247 case 6: a slice that opens AFTER the habit\'s birth draws no run in ' +
+     'the days its own edge makes unreliable', () => {
+  const thrice = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const end = '2026-03-01';
+  const day = (n) => addDays(end, n - 500);
+  // Kept perfectly: exactly 3 in every trailing 7 days, for 500 days.
+  const all = [];
+  for (let n = 1; n <= 500; n++) if (n % 7 === 1 || n % 7 === 3 || n % 7 === 5) {
+    all.push({ date: day(n), value: YES });
+  }
+  const birth = all[0].date;
+  // What the route hands it: the last 100 days only, birth supplied from SQL.
+  const slice = all.filter((e) => e.date >= day(401));
+  const stats = summaryStats(thrice, slice, {
+    end, birth, runs: { start: day(395), end: day(410) },
+  });
+
+  assert.equal(stats.runs.length, 1,
+    'ONE run, not a fragment and a hole — the slice edge must not split a run '
+    + 'the habit\'s own page reports unbroken');
+  assert.ok(stats.runs[0].start >= day(407),
+    `nothing may be drawn before the first day with a full trailing window `
+    + `(day 401 + 7 - 1 = day 407); got ${stats.runs[0].start} vs ${day(407)}`);
+
+  // The other half, and the one that stops the guard being "return []": a slice
+  // that DID open at the habit's birth keeps its early days, because there the
+  // leniency is #340's own and the verdict is right.
+  const fromBirth = summaryStats(thrice, all, {
+    end, birth, runs: { start: day(1), end: day(20) },
+  });
+  assert.ok(fromBirth.runs.some((r) => r.start <= day(7)),
+    'a range opening at the birth is not suppressed — it has no missing '
+    + 'history to be wrong about');
+});
+
+test('#247 case 5: a window INSIDE a run is clipped at both ends, and the ' +
+     'length is still the run\'s own', () => {
+  const inside = { start: runsDay(20), end: runsDay(30) };
+  const stats = summaryStats(boolHabit, runsEntries, { end: runsEnd, runs: inside });
+  assert.equal(stats.runs.length, 1,
+    'only run B (days 11-50) spans this window; A ended at 5 and C starts at 53');
+  assert.equal(stats.runs[0].start, runsDay(20), 'clipped UP to the window start');
+  assert.equal(stats.runs[0].end, runsDay(30), 'clipped DOWN to the window end');
+  assert.equal(stats.runs[0].length, 40,
+    'still the whole run — 11 days of it are visible and 40 is what a client '
+    + 'gates on, so an 11 here is a run that would survive MIN_STREAK anyway '
+    + 'and tells you nothing; the mutation to watch is case 1\'s');
+});

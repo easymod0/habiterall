@@ -21,6 +21,27 @@ try{
   const ev=async e=>{const r=await send('Runtime.evaluate',{expression:e,awaitPromise:true,returnByValue:true},sessionId);
     if(r.exceptionDetails)throw new Error(r.exceptionDetails.exception?.description);return r.result.value;};
   await send('Page.enable',{},sessionId); await send('Network.enable',{},sessionId);
+  // For the accessible-name block at the end of this file. `Accessibility` needs
+  // `DOM` on first, per CDP's own docs on `Accessibility.enable` — the same pair
+  // and the same reason as `categorycheck.mjs`'s `axInfo`.
+  await send('DOM.enable',{},sessionId); await send('Accessibility.enable',{},sessionId);
+
+  /**
+   * The COMPUTED accessible name of one element, from the browser's own
+   * accessibility tree — never the `aria-label` attribute, which cannot show
+   * whether a real assistive technology is handed it. That distinction is the
+   * whole point here: `paintCheckbox` labels the `.check-box` SPAN, and what is
+   * being asserted is that the label reaches the BUTTON's name through
+   * name-from-contents, together with the weekday letter beside it.
+   */
+  const axName = async (selector) => {
+    const { root } = await send('DOM.getDocument', { depth: -1, pierce: true }, sessionId);
+    const { nodeId } = await send('DOM.querySelector', { nodeId: root.nodeId, selector }, sessionId);
+    if (!nodeId) return null;
+    const { nodes } = await send('Accessibility.getPartialAXTree',
+      { nodeId, fetchRelatives: false }, sessionId);
+    return nodes[0]?.name?.value ?? '';
+  };
 
   for (const [label,w,h] of [['desktop',1440,900],['phone',390,844]]) {
     await send('Emulation.setDeviceMetricsOverride',{width:w,height:h,deviceScaleFactor:1,mobile:w<500},sessionId);
@@ -233,7 +254,22 @@ try{
     const el = document.querySelector('[data-focus-key="check:${seeded.yesno}:${seeded.clearMe}"] .check-box');
     return el ? (el.textContent || '').trim() : null;
   })()`);
-  ck('clearing a skip while offline repaints the cell', cleared === '',
+  // Not blank, since #247 threaded the dashboard's `inRun` set through — and
+  // the reason is worth stating exactly, because it is TRANSIENT and reads
+  // like a durable fact. The tap moves a skip on to a stored 0 (`no`), never a
+  // delete (`nextDayState`, ui/toggle.js). A skip is transparent to
+  // `onPaceSeries`, so while this day WAS one the server's run bridged it and
+  // `d(3)` is in the `runs` this page last loaded; a stored 0 on a DAILY habit
+  // is not on pace and breaks that run, so the next `/overview` drops the date
+  // and the tick with it. Offline there is no next `/overview` — which is the
+  // whole reason this block emulates it — so what is drawn here is the
+  // pre-tap run set over a post-tap value, exactly as `ui/detail.js`'s strip
+  // holds `stripRuns` until its own next load.
+  //
+  // What this check pins is unchanged: a version that forgot to update
+  // `habit.skips` alongside `habit.entries` would still be painting the stale
+  // skip dash ('–'), which any expectation but '–' catches.
+  ck('clearing a skip while offline repaints the cell', cleared === '✓',
      `cell reads "${cleared}" after the tap`);
 
   await send('Network.emulateNetworkConditions',
@@ -957,6 +993,231 @@ try{
        cellAfterSave?.dot === true, JSON.stringify(cellAfterSave));
 
     ck('the setting is put back', await setTap('cycle') === 'cycle');
+  }
+
+  /* ---------- the dashboard's own day squares thread the run set too
+     (#247 step 3) — the same assertion `stripcheck.mjs`'s "a kept run reads
+     as one band" block makes for the habit's own page, one surface over. ---------- */
+  console.log('\n--- dashboard in-run ticks ---');
+
+  // Desktop width, so the grid draws all 14 columns `gridColumns` allows at
+  // this width — the notes/habitSort/dayTap blocks above leave the viewport
+  // at phone size, where only 7 columns are drawn and Gym's Mon/Wed/Fri
+  // schedule may not leave an unlogged day inside the visible window at all.
+  await send('Emulation.setDeviceMetricsOverride',
+    { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, sessionId);
+  await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+    reload: () => send('Page.navigate',{url:APP},sessionId),
+    what: 'the dashboard, at desktop width, for the run-tick probe',
+  });
+  await sleep(600);
+
+  const gym = await ev(`(async () => {
+    const habits = await (await fetch('/api/habits')).json();
+    return habits.find(h => h.name === 'Gym') ?? null;
+  })()`);
+  ck('the Gym fixture habit is present', !!gym, JSON.stringify(gym));
+
+  if (gym) {
+    const cellSel = (date) => `.habit-row[data-habit-id="${gym.id}"] .check[data-date="${date}"] .check-box`;
+    // The box's colour and background are CSS values — a hex habit colour,
+    // `var(--grid-empty)` — so only the browser's OWN resolution of them is
+    // safe to compare against; a literal rgb string is "a constant" the two
+    // marks are not compared to (mirrors `stripcheck.mjs`'s helper).
+    const cellStyle = (date) => ev(`(() => {
+      const b = document.querySelector(${JSON.stringify(cellSel(date))});
+      if (!b) return null;
+      const s = getComputedStyle(b);
+      return { text: b.textContent.trim(), opacity: s.opacity, color: s.color,
+               background: s.backgroundColor };
+    })()`);
+    const resolved = (cssValue) => ev(`(() => {
+      const d = document.createElement('div');
+      d.style.color = ${JSON.stringify(cssValue)};
+      document.body.append(d);
+      const c = getComputedStyle(d).color;
+      d.remove();
+      return c;
+    })()`);
+    const gymColor = await resolved(gym.color);
+    const emptyColor = await resolved('var(--grid-empty)');
+
+    const visible = await ev(`[...document.querySelectorAll(
+      '.habit-row[data-habit-id="${gym.id}"] .check[data-date]')].map(el => el.dataset.date)`);
+    const classified = visible.map((date) => (
+      { date, dow: new Date(`${date}T12:00:00`).getDay() }));
+    const loggedDow = new Set([1, 3, 5]); // Mon/Wed/Fri — fixtures.mjs's Gym schedule
+    const logged = classified.filter((d) => loggedDow.has(d.dow));
+    const unlogged = classified.filter((d) => !loggedDow.has(d.dow));
+    ck('the visible dashboard row holds both logged and unlogged Gym days to compare',
+       logged.length >= 1 && unlogged.length >= 1,
+       `logged=${logged.length} unlogged=${unlogged.length} (visible=${JSON.stringify(visible)})`);
+
+    const unloggedInRun = unlogged[0]?.date;
+    const loggedDay = logged[0]?.date;
+
+    if (unloggedInRun) {
+      const ghost = await cellStyle(unloggedInRun);
+      ck('an unlogged in-run day on the DASHBOARD grid reads the faint tick, not a blank cell',
+         ghost?.text === '✓', JSON.stringify(ghost));
+      ck('...at ghost opacity (0.45)',
+         Math.abs(parseFloat(ghost?.opacity ?? '0') - 0.45) < 0.01, JSON.stringify(ghost));
+      ck("...in the habit's own colour", ghost?.color === gymColor,
+         `${ghost?.color} vs ${gymColor}`);
+      ck('...but its background is still the empty cell, not a filled one',
+         ghost?.background === emptyColor, `${ghost?.background} vs ${emptyColor}`);
+
+      if (loggedDay) {
+        const filled = await cellStyle(loggedDay);
+        ck('a logged Mon/Wed/Fri cell in the same row is a solid tick',
+           filled?.text === '✓', JSON.stringify(filled));
+        ck('...compared to the GHOST cell, not to a constant',
+           filled?.background === gymColor && filled?.background !== ghost?.background,
+           `filled=${filled?.background} ghost=${ghost?.background} habit=${gymColor}`);
+      }
+
+      // `questionMarks` restored afterward — a suite that leaks a setting
+      // poisons the next one run against the same instance.
+      await ev(`fetch('/api/settings', { method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ questionMarks: true }) })`);
+      await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+        reload: () => send('Page.navigate',{url:APP},sessionId),
+        what: 'the dashboard, with questionMarks on',
+      });
+      await sleep(600);
+      const withMarks = await cellStyle(unloggedInRun);
+      ck('with questionMarks on, that same in-run day still reads the tick, not ?',
+         withMarks?.text === '✓', JSON.stringify(withMarks));
+      await ev(`fetch('/api/settings', { method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ questionMarks: false }) })`);
+
+      /* ---- what a SCREEN READER is handed for the same three cells ----
+       *
+       * The faint tick and a solid one are the same glyph, so before this a
+       * `.check` button was named from its contents and announced "✓ S" for a
+       * day nobody logged — the app stating a habit was done on a day it was
+       * not. `paintCheckbox` labels the `.check-box`, which reaches the
+       * button's name through name-from-contents; these read the COMPUTED name
+       * over CDP rather than the attribute, because the attribute cannot show
+       * that the label survived the name computation at all.
+       */
+      await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+        reload: () => send('Page.navigate',{url:APP},sessionId),
+        what: 'the dashboard, for the accessible-name probe',
+      });
+      await sleep(600);
+
+      const sel = (date) => `.check[data-focus-key="check:${gym.id}:${date}"]`;
+      const ghostName = await axName(sel(unloggedInRun));
+      ck('an in-run day nobody logged does NOT announce as done',
+         !!ghostName && !/\bdone\b/.test(ghostName), JSON.stringify(ghostName));
+      ck('...it announces that it is in a run AND that there is no entry',
+         /in a run/.test(ghostName ?? '') && /no entry/.test(ghostName ?? ''),
+         JSON.stringify(ghostName));
+      // **The assertion that pins the ORIGINAL defect, and the reason it is
+      // written separately.** With the label dropped the name falls back to
+      // name-from-contents and reads `"✓ T"` — measured. That still satisfies
+      // "does not announce as done" and still differs from the logged cell's
+      // name, so neither of those two catches it; what is wrong is that the
+      // name is the raw GLYPH, which is the same character a done day draws.
+      ck('...and the name is prose rather than the raw glyph a done day also draws',
+         !(ghostName ?? '').includes('✓'), JSON.stringify(ghostName));
+
+      if (loggedDay) {
+        const doneName = await axName(sel(loggedDay));
+        ck('a logged day in the same row announces as done',
+           /\bdone\b/.test(doneName ?? ''), JSON.stringify(doneName));
+        ck('...so the two cells are told apart by NAME, not only by opacity',
+           doneName !== ghostName, `done=${JSON.stringify(doneName)} ghost=${JSON.stringify(ghostName)}`);
+      }
+
+      // The label went on the BOX, not on the button — so the weekday letter
+      // in `.check-day` is still part of the name. Labelling the button would
+      // have replaced its contents and silently dropped which day it is.
+      const letter = await ev(`document.querySelector(
+        ${JSON.stringify(sel(unloggedInRun))} + ' .check-day')?.textContent?.trim() ?? ''`);
+      ck('...and the weekday letter survives in the name, so the label sits on the box',
+         !!letter && (ghostName ?? '').includes(letter),
+         `letter=${JSON.stringify(letter)} name=${JSON.stringify(ghostName)}`);
+
+      // **`role="img"`, and this is the one check here that cannot be
+      // behavioural — which is exactly why it is written down.** The box is a
+      // bare `<span>`, so `aria-label` sits on `role=generic`, where ARIA 1.2
+      // prohibits it. Chrome honours it anyway: every name assertion above
+      // passes with the role removed, measured. So nothing this suite can
+      // observe holds it, and a later reader looking only at Chrome would be
+      // right that it changes nothing — on Chrome. It is here for WebKit and
+      // Gecko, which this fleet never runs, where a prohibited label may not
+      // contribute to the button's name at all and the cell would fall back to
+      // announcing the raw `"✓ T"` these checks exist to forbid.
+      const boxRole = await ev(`document.querySelector(
+        ${JSON.stringify(sel(unloggedInRun))} + ' .check-box')?.getAttribute('role') ?? ''`);
+      ck('...on a box carrying role="img", since aria-label is prohibited on a bare span',
+         boxRole === 'img', JSON.stringify(boxRole));
+
+      /* ---- a measurable day names the goal it is measured against, and
+       * names NO goal when the habit has none.
+       *
+       * `parseHabit` accepts `target_value: 0` on an at-least habit, and the
+       * shade falls back to 1 there so it has something to divide by. That
+       * fallback is not a target anybody set, so it must not be spoken: read
+       * from `habit.target_value` the cell announced "8 of 0 pages", and read
+       * from the fallback "8 of 1 pages". Both are a number the user never
+       * chose, stated as fact to the one reader who cannot see the square.
+       * `Read` (target 20) is the positive half, so a build that simply
+       * dropped the clause fails beside it.
+       */
+      const goalless = await ev(`(async () => {
+        const iso = (n) => { const d = new Date(); d.setHours(12, 0, 0, 0);
+          d.setDate(d.getDate() - n);
+          const p = (x) => String(x).padStart(2, "0");
+          return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()); };
+        const h = await (await fetch('/api/habits', { method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: 'Goalless pages', type: 'numerical',
+            unit: 'pages', target_value: 0, color: '#6366f1' }) })).json();
+        await fetch('/api/habits/' + h.id + '/entries/' + iso(1), { method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ value: 8 }) });
+        return { id: h.id, date: iso(1) };
+      })()`);
+      const read = await ev(`(async () => {
+        const iso = (n) => { const d = new Date(); d.setHours(12, 0, 0, 0);
+          d.setDate(d.getDate() - n);
+          const p = (x) => String(x).padStart(2, "0");
+          return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()); };
+        const habits = await (await fetch('/api/habits')).json();
+        const h = habits.find(x => x.name === 'Read');
+        if (!h) return null;
+        await fetch('/api/habits/' + h.id + '/entries/' + iso(1), { method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ value: 8 }) });
+        return { id: h.id, date: iso(1) };
+      })()`);
+      await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')`, {
+        reload: () => send('Page.navigate',{url:APP},sessionId),
+        what: 'the dashboard, for the measurable-day names',
+      });
+      await sleep(600);
+
+      if (read) {
+        const readName = await axName(
+          `.check[data-focus-key="check:${read.id}:${read.date}"]`);
+        ck('a measurable day names the amount AND the goal it is measured against',
+           /8 of 20 pages/.test(readName ?? ''), JSON.stringify(readName));
+      }
+      const goallessName = await axName(
+        `.check[data-focus-key="check:${goalless.id}:${goalless.date}"]`);
+      ck('a measurable habit with NO goal names the amount alone',
+         /8 pages/.test(goallessName ?? '') && !/ of /.test(goallessName ?? ''),
+         JSON.stringify(goallessName));
+
+      // The probe habit is this block's own; `fixtures.reset()` would take it
+      // anyway, but the next block in this file runs before that.
+      await ev(`fetch('/api/habits/${goalless.id}', { method: 'DELETE' })`);
+    }
   }
 
   console.log(fails===0?'\nALL GRID CHECKS PASSED':`\n${fails} FAILED`);

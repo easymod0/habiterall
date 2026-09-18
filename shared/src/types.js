@@ -170,6 +170,14 @@
  *   present only when `summaryStats` was called with `{lastMiss: true}` —
  *   for the `habitSort: 'recently missed'` ordering. Absent, not `null`,
  *   when not asked for; see the note on `coverage` above `computeStats`.
+ * @property {{start: string, end: string, length: number}[]} [runs]  every
+ *   streak clipped into the window `summaryStats` was called with
+ *   `{runs: {start, end}}`, present only when asked for — same absent-not-
+ *   empty convention as `lastMiss`. `start`/`end` are clipped into that
+ *   window; `length` is the streak's TRUE, unclipped length, so a run
+ *   longer than the window still reports what it really is. No minimum
+ *   length is applied here — that gate (`MIN_STREAK`) is the client's, in
+ *   `shared/public/charts.js`, which this module cannot import.
  */
 
 /**

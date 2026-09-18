@@ -137,10 +137,62 @@ const $ = (sel) => document.querySelector(sel);
  * falls through to the `inRun` branch below. See #176 and
  * `shared/public/CLAUDE.md`.
  */
-function ghostTick(box, habit) {
+function ghostTick(box, habit, state) {
   box.style.color = habit.color;
   box.style.opacity = '0.45';
   box.textContent = '✓';
+  says(box, state);
+}
+
+/**
+ * What a screen reader gets for this day, since the glyph alone lies.
+ *
+ * **The `aria-label` goes on the BOX, not on the button**, and that is the
+ * whole reason this needs no `date` parameter and no reach for a parent. A
+ * button with no `aria-label` of its own is named from its CONTENTS, and a
+ * child's `aria-label` is that child's contribution — so the cell announces
+ * this state followed by the weekday letter in `.check-day`, and the date and
+ * the habit's name stay where `dayCells` already put them (`btn.title`).
+ * Labelling the button instead would replace its contents wholesale, taking
+ * the weekday letter with it, and `paintCheckbox` is called BEFORE
+ * `btn.append(box, day)` in `dayCells`, so the button is not even reachable
+ * from here at that point.
+ *
+ * **It is set in the same branch that decides the glyph, never derived a
+ * second time from the same inputs.** A `describeDay(habit, …)` mirroring
+ * `paintCheckbox`'s branch order is the obvious shape and is the one this
+ * project keeps paying for: two functions over one set of inputs, drifting.
+ * Here there is one site per state, so a glyph cannot disagree with its own
+ * description.
+ *
+ * The vocabulary is Android's `describe()` (`ui/DayGrid.kt`) rather than a
+ * second one invented here — "counted as kept, no entry", "no entry", "done",
+ * "not done", "clean", "slipped", "N of M unit" — with the in-run states
+ * added, which Android does not have yet because #247's Android half is still
+ * open. When it lands, that function is where these words already are.
+ *
+ * "no entry" is said whether or not `questionMarks` is on, for the reason
+ * Android's own comment gives: a screen reader has no square to look at, and
+ * "not done" for a day nobody answered is the conflation that setting exists
+ * to undo.
+ *
+ * **`role="img"` goes on with the label, and it is not decoration.** The box is
+ * a bare `<span>`, so its role is `generic` — the one role ARIA 1.2 lists
+ * `aria-label` as PROHIBITED on, and the only place in this directory that
+ * labels anything but a `<button>`, an `<input>` or an `<svg>`. Chrome does
+ * honour it there today, and the whole of what says so is one engine: whether a
+ * prohibited label still contributes to an ancestor's name-from-contents is
+ * engine-specific rather than specified, and this app installs as a PWA onto
+ * iOS. Dropped, the name falls back to the contents and the cell announces
+ * `"✓ T"` again — the exact defect this function exists to remove, silently,
+ * with `gridcheck.mjs` green because it only ever runs Chrome. `img` supports
+ * naming, replaces the glyph with the name rather than sitting beside it, and
+ * still contributes that name to the button, so the weekday letter in
+ * `.check-day` survives exactly as before.
+ */
+function says(box, state) {
+  box.setAttribute('role', 'img');
+  box.setAttribute('aria-label', state);
 }
 
 function paintCheckbox(
@@ -149,6 +201,14 @@ function paintCheckbox(
   box.textContent = '';
   box.style.background = 'var(--grid-empty)';
   box.style.color = '#fff';
+  // Cleared for the same reason the two styles below are: `repaintCells` runs
+  // this over a cell that is already painted and already labelled, so a state
+  // that no longer applies must not keep announcing itself. Every branch below
+  // sets one, so a cell reaching the end with no label is a branch that forgot.
+  // The ROLE goes with it: `says` sets the pair, so a box left with `img` and
+  // no name would be an unnamed image rather than a plain span.
+  box.removeAttribute('aria-label');
+  box.removeAttribute('role');
   // `toggle`, not `add`: this box is repainted in place by `repaintCells`, so a
   // note that has since been cleared has to lose its dot on the same call that
   // would otherwise keep asserting one.
@@ -164,6 +224,7 @@ function paintCheckbox(
     box.style.background = 'var(--surface-2)';
     box.style.color = 'var(--text-dim)';
     box.textContent = '–';
+    says(box, 'skipped');
     return;
   }
 
@@ -183,16 +244,22 @@ function paintCheckbox(
   // the in-run tick takes the slot the `?` would have used.
   if (value == null) {
     if (habit.unlogged_is_success) {
-      ghostTick(box, habit);
+      ghostTick(box, habit, 'counted as kept, no entry');
     } else if (inRun) {
       // `unansweredCounts` only ever returns true for a non-boolean at-most
       // habit, where every unlogged day already takes the ghost tick above
       // and never reaches here — so this branch and that one are disjoint by
       // construction, and no habit shape can ever be a candidate for both.
-      ghostTick(box, habit);
-    } else if (showUnknown) {
-      box.style.color = 'var(--text-dim)';
-      box.textContent = '?';
+      ghostTick(box, habit, 'in a run, no entry');
+    } else {
+      if (showUnknown) {
+        box.style.color = 'var(--text-dim)';
+        box.textContent = '?';
+      }
+      // Outside the `questionMarks` branch: the `?` is what a SIGHTED reader
+      // gets only when the setting is on, and this is the same fact for
+      // somebody who cannot see the square either way.
+      says(box, 'no entry');
     }
     return;
   }
@@ -201,11 +268,16 @@ function paintCheckbox(
     if (value === YES) {
       box.style.background = habit.color;
       box.textContent = '✓';
+      says(box, 'done');
     } else if (inRun) {
       // A stored 0 (Loop's NO) inside a run — decision 4: a run is about
       // pace, and a stated lapse inside one is on pace. Same tick as the
       // ghost one; this cell's glyph slot was otherwise empty.
-      ghostTick(box, habit);
+      ghostTick(box, habit, 'in a run, not done');
+    } else {
+      // A stored 0 outside a run draws nothing at all, so without this the
+      // cell's only accessible name is its weekday letter.
+      says(box, 'not done');
     }
     return;
   }
@@ -219,6 +291,7 @@ function paintCheckbox(
     if (value <= target) {
       box.style.background = habit.color;
       box.textContent = '✓';
+      says(box, 'clean');
     } else {
       // The count, because how far over matters on a limit of two coffees and
       // is the whole answer on a limit of none.
@@ -228,6 +301,7 @@ function paintCheckbox(
         ? '✗'
         : (value % 1 === 0 ? String(value) : value.toFixed(1));
       box.style.fontSize = '9.5px';
+      says(box, `slipped, ${amountWords(value, habit)}`);
     }
     return;
   }
@@ -235,19 +309,35 @@ function paintCheckbox(
   // numerical: shade by progress toward target, show the raw number.
   // For an "at most" habit a low number is the good outcome, so 0 is a full
   // success and must be painted, not left blank.
+  // **Two questions about one field, and they genuinely have different
+  // answers: what the SHADE is measured against, and what there is to SAY.**
+  // `parseHabit` accepts `target_value: 0` for either direction
+  // (`Number(body.target_value ?? 0)`, refused only if negative). On a LIMIT
+  // that is a real, stated goal — "at most none" is the whole point of a habit
+  // like that — so it is both shaded and spoken. On an at-least habit it is the
+  // absence of a goal, and the `|| 1` below is a divide-by-zero fallback rather
+  // than a target anybody set: spoken, it announced "8 of 0 pages" from
+  // `habit.target_value` and "8 of 1 pages" from the fallback, and the second
+  // is an internal detail promoted to a claim. So that case says the amount
+  // alone. Either way the label reads the same binding the shade did — two
+  // readings of one field, six lines apart, is the drift this branch's own
+  // argument is about.
+  let goal, statedGoal;
   if (habit.target_type === 'at_most') {
-    const target = habit.target_value;
+    goal = habit.target_value;
+    statedGoal = goal;
     // Fade gradually past the target; scale by 3 when the target is 0 so
     // small overages remain distinguishable.
-    const scale = Math.max(target, 3);
-    const ratio = value <= target
+    const scale = Math.max(goal, 3);
+    const ratio = value <= goal
       ? 1
-      : Math.max(0.2, 1 - (value - target) / scale);
+      : Math.max(0.2, 1 - (value - goal) / scale);
     box.style.background = habit.color;
     box.style.opacity = String(ratio);
   } else {
-    const target = habit.target_value || 1;
-    const ratio = Math.min(1, value / target);
+    statedGoal = Number(habit.target_value) > 0 ? habit.target_value : null;
+    goal = statedGoal ?? 1;
+    const ratio = Math.min(1, value / goal);
     if (value > 0) {
       box.style.background = habit.color;
       box.style.opacity = String(Math.max(0.28, ratio));
@@ -255,6 +345,43 @@ function paintCheckbox(
   }
   box.textContent = value % 1 === 0 ? String(value) : value.toFixed(1);
   box.style.fontSize = '9.5px';
+  // The bare number is the one glyph that is not actually wrong — but "8" says
+  // nothing about the goal it is 8 of, which is the number the cell's SHADE is
+  // carrying for a sighted reader. Android's `describe()` reads "8 of 20
+  // pages" here for the same reason. `statedGoal` is null only where there is
+  // no goal to name (above), and there the amount alone is the whole truth.
+  says(box, statedGoal == null
+    ? amountWords(value, habit)
+    : `${amountDigits(value)} of ${amountWords(statedGoal, habit)}`);
+}
+
+/**
+ * `8` / `8.5`, the digits alone.
+ *
+ * Deliberately NOT `formatAmount`/`convention()` from `ui/amount.js`: that pair
+ * answers which CHARACTER a decimal point is, which is a question about typing
+ * and reading a number on screen. A screen reader is handed digits and reads
+ * them in its own locale, and a decimal comma inside an `aria-label` is a
+ * string a screen reader may well spell out. Same rounding as the glyph beside
+ * it, so the two cannot disagree.
+ */
+function amountDigits(value) {
+  const n = Number(value) || 0;
+  return n % 1 === 0 ? String(n) : n.toFixed(1);
+}
+
+/**
+ * The same digits plus the habit's unit — for an amount said ON ITS OWN.
+ *
+ * **The unit belongs to the PAIR, not to each half of it.** A goal reading
+ * spells the amount with `amountDigits` and the goal with this, so it lands as
+ * "8 of 20 pages" — the wording Android's `describe()` already uses and the
+ * wording this file's own comments claimed. Built from two `amountWords` it
+ * read "8 pages of 20 pages", which is what shipped until `gridcheck.mjs` was
+ * made to assert the sentence rather than its parts.
+ */
+function amountWords(value, habit) {
+  return habit.unit ? `${amountDigits(value)} ${habit.unit}` : amountDigits(value);
 }
 
 /* ---------- building the row ---------- */
@@ -268,11 +395,13 @@ function paintCheckbox(
  * @param {string} todayIso
  * @param {Set<string>} [inRun]  dates inside a run of `MIN_STREAK`+ days
  *   (`charts.js`'s `streakDates`), for the same faint tick the calendar's
- *   connector stroke draws. Defaults to an empty set, which is what leaves
- *   `ui/dashboard.js` — the OTHER caller of this function — undrawing nothing:
- *   the dashboard strip is deliberately out of scope for #176 (see
- *   `shared/public/CLAUDE.md`), and passing no set is how that stays true
- *   without a second code path here.
+ *   connector stroke draws. **Both callers pass one now** — `ui/detail.js`
+ *   from `stats.streaks` (#176) and `ui/dashboard.js` from the `runs` field
+ *   `/overview` ships (#247) — so the empty default is for a caller that has
+ *   no run set to give rather than for a surface deliberately abstaining.
+ *   Until #247 it was the latter, and this paragraph said so; a reader
+ *   arriving here for the Android half (still open) would otherwise get the
+ *   opposite of what `shared/public/CLAUDE.md` now says.
  * @returns {HTMLElement} a `.checks` element
  */
 export function dayCells(host, habit, dates, todayIso, inRun = new Set()) {
@@ -393,8 +522,11 @@ export function dateColumns(dates, todayIso) {
  * @param {ParentNode} root  the element the cells were appended under
  * @param {StripHost} host
  * @param {any} habit
- * @param {Set<string>} [inRun]  same as `dayCells`'; defaults to an empty set
- *   for the same reason — `ui/dashboard.js` calls this too and passes none.
+ * @param {Set<string>} [inRun]  same as `dayCells`'. The default is reached by
+ *   NOBODY: `ui/detail.js:461` is the only call site in the app and it passes
+ *   `stripRuns`. It said "`ui/dashboard.js` calls this too and passes none",
+ *   which contradicted the paragraph three lines above it and was never true —
+ *   the dashboard repaints through a whole `paint()`.
  */
 export function repaintCells(root, host, habit, inRun = new Set()) {
   const showUnknown = settings.get('questionMarks');

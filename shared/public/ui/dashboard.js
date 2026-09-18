@@ -15,6 +15,7 @@
  * pages by slicing memory.
  */
 
+import { MIN_STREAK, streakDates } from '/shared/charts.js';
 import { formatAmount } from '/shared/ui/amount.js';
 import { api } from '/shared/ui/api.js';
 import { focusKeyOf, habitIcon, restoreFocus } from '/shared/ui/components.js';
@@ -954,7 +955,13 @@ function habitRow(habit, dates, todayIso, reorderable) {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openHabit(habit.id); }
   });
 
-  row.append(meta, dayCells(listHost, habit, dates, todayIso));
+  // `habit.runs` may be absent — a service-worker-cached `/overview` predating
+  // the field — and `streakDates` already answers an empty `Set` for a
+  // nullish argument (`charts.js`), so no `?? []` is needed here, the same
+  // way `h.notes ?? []` above covers the identical staleness for a different
+  // field.
+  row.append(meta, dayCells(listHost, habit, dates, todayIso,
+                             streakDates(habit.runs, MIN_STREAK)));
   return row;
 }
 

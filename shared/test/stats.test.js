@@ -4183,6 +4183,16 @@ test('pass invocations counted at the boundary — a counting `freq_denominator`
   // counting getter therefore counts PASS INVOCATIONS exactly, insensitive to
   // every per-day internal.
   //
+  // **There is a THIRD site since #247 and it is deliberately unreachable from
+  // here: `summaryStats`' slice-edge guard, which reads the denominator only
+  // when the caller asked for `runs`.** No call below passes that option, so
+  // every count here is still one-read-per-pass. That is the whole reason the
+  // read sits inside the `if (runsWindow)` branch rather than beside the other
+  // locals — hoisted out, it would add one to every `summaryStats` row in this
+  // test and the instrument would stop measuring what it claims. If a case
+  // asking for `runs` is ever added here, it expects `2 + 1` and the comment
+  // above it has to say which of the three the extra read is.
+  //
   // On master, `computeStats` built the on-pace series TWICE — once via the
   // exported `computeStreaks`, once via `computeResilience`'s
   // `computeMissRuns` — so the count was 3: scores + onPace-via-streaks +

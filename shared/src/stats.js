@@ -2350,10 +2350,29 @@ export function computeStats(habit, entries,
  * when the account's sort needs it, so the dashboard's hot path — `manual`,
  * which is almost everybody — pays nothing extra for it.
  *
+ * **`runs` is a fourth, opt-in field, for the dashboard's in-run ghost tick
+ * (#247).** Declined — the default — the key is ABSENT from the return, the
+ * same convention `lastMiss` sets above and `coverage` sets in `computeStats`.
+ * Asking for it (`{runs: {start, end}}`) folds the `streaks` array this
+ * function has already built (`clipRuns`, module-private, right below) into
+ * the window named by `start`/`end` — which a bounded caller must make the
+ * GRID window it is about to answer, never `summaryEnd`: both editions'
+ * `/overview` derive those two from different things and using the wrong one
+ * would ship run ranges for a window the grid is not showing. Every run that
+ * intersects the window comes back clipped into it, but with its TRUE,
+ * unclipped `length` — a 40-day run showing two days at the edge of a 14-day
+ * window still reports `length: 40`, because reporting the clipped span
+ * instead is exactly what makes `streakDates(runs, MIN_STREAK)`
+ * (`shared/public/charts.js`) drop it as a 2-day run, right at the left edge
+ * of the grid, which is where the ghost ticks matter most and where nobody
+ * looks. No minimum length is applied here: `MIN_STREAK` lives in a
+ * presentation module this file cannot import, so the gate is the client's.
+ *
  * @param {import('./types.js').Habit} habit
  * @param {import('./types.js').Entry[]} entries
  * @param {{start?: string, end?: string, unlogged?: string,
- *          creditFrom?: string, birth?: string|null, lastMiss?: boolean}} [opts]
+ *          creditFrom?: string, birth?: string|null, lastMiss?: boolean,
+ *          runs?: {start: string, end: string}}} [opts]
  *   `birth: null` and `birth: undefined` are NOT the same instruction to
  *   `onPaceSeries` — see its own doc comment for why a lookup miss (`null`)
  *   stays strict where an absent override (`undefined`) does not.
@@ -2362,7 +2381,7 @@ export function computeStats(habit, entries,
 export function summaryStats(habit, entries,
                              { start, end, unlogged = UNLOGGED_DEFAULT,
                                creditFrom: creditGiven, birth: birthGiven,
-                               lastMiss = false } = {}) {
+                               lastMiss = false, runs: runsWindow } = {}) {
   const { entryMap, from, creditFrom, birth: derivedBirth } =
     resolveWindow(entries, start, end, creditGiven);
   // **`!== undefined` and NOT `??`, which is the opposite of the line
@@ -2402,13 +2421,95 @@ export function summaryStats(habit, entries,
   // eight-walk shape.
   const runs = lastMiss ? missRunsFrom(series) : null;
 
+  // **The first `den - 1` days of a BOUNDED slice carry an unreliable verdict,
+  // and `runs` is the one field that would DRAW one.** `onPaceSeries` judges a
+  // day against the trailing `den`-day window ending on it, so a day less than
+  // `den - 1` from the start of the walked range is judged against a window
+  // missing history that really happened — and #340's leniency is deliberately
+  // withheld there, because the range opened at the slice's edge rather than at
+  // the habit's birth. The verdict that falls out is not merely lenient or
+  // strict, it is WRONG: measured on a 3x/7 habit kept perfectly for 500 days,
+  // a 400-day slice reports its first fortnight as a 4-day run, a one-day hole,
+  // and then the real run — where the habit's own page reports one unbroken 499.
+  // Drawn, that is a blank square in the middle of a band on the dashboard while
+  // the calendar strokes straight through the same day, which is the
+  // "two surfaces disagreeing about one habit" shape `shared/CLAUDE.md` names.
+  //
+  // So the affected days are DROPPED rather than drawn: absent, which is what
+  // the bound already promises, instead of wrong. The same figures still reach
+  // `score` and `currentStreak` — this is not a fix to `onPaceSeries`, whose
+  // slice-edge behaviour is #340's settled decision, and both of those are read
+  // at the range's far end where no truncation applies.
+  //
+  // Gated on `from > birth` for exactly #340's reason: a range that DID open at
+  // the habit's birth has no missing history to be wrong about, and its early
+  // days are the leniency's own, correctly judged. A daily habit (`den` 1) has a
+  // one-day window that cannot be truncated, so this is a no-op for it.
+  //
+  // **Computed inside the `runsWindow` branch, and that placement is load
+  // bearing rather than tidy.** This is the THIRD site in this file that reads
+  // `habit.freq_denominator`, and `stats.test.js`'s counting-getter guard
+  // depends on there being exactly two — it counts PASS INVOCATIONS through
+  // that property, which only works while every read is one pass. Taking the
+  // read only when a caller asks for `runs` keeps that instrument measuring
+  // what it claims for every other call shape; the guard's own comment now
+  // names this site and the condition. Hoist it out of the branch and the
+  // guard fails, correctly.
+  let runsField;
+  if (runsWindow) {
+    const den = Math.max(1, Number(habit.freq_denominator) || 1);
+    const edgeSafe = birth != null && from > birth ? addDays(from, den - 1) : from;
+    runsField = clipRuns(
+      streaks,
+      runsWindow.start > edgeSafe ? runsWindow.start : edgeSafe,
+      runsWindow.end
+    );
+  }
+
   return {
     score: scores.length ? scores[scores.length - 1].score : 0,
     currentStreak: currentStreak(streaks, end),
     // Spread rather than assigned, so a caller that did not ask for this
     // gets no key at all — see the note above on why absent and not null.
     ...(lastMiss ? { lastMiss: runs.length ? runs[runs.length - 1].end : null } : {}),
+    // Same reasoning, same spread: a caller that passed no `runs` window
+    // gets no `runs` key, not `null` and not `[]`.
+    ...(runsWindow ? { runs: runsField } : {}),
   };
+}
+
+/**
+ * Folds a habit's `streaks` (`streaksFrom`, already in hand at the call
+ * site — see the `runs` paragraph on `summaryStats` above) into the window
+ * `[from, to]`: drops any run that does not intersect it, clips the reported
+ * `start`/`end` into it, and keeps `length` as the run's TRUE, unclipped
+ * length. That third part is the one that matters — see `summaryStats`'s own
+ * doc comment for what reporting the clipped span instead would break.
+ *
+ * String comparison, not `daysBetween`: every date here is already
+ * canonical, the same trust `totalCompleted`'s `date >= from && date <= end`
+ * filter puts in its own `from`/`end` above — a streak's `start`/`end` were
+ * spelled by `boundedRange`'s walk, and `from`/`to` here are a route's own
+ * grid window rather than a raw, possibly-phantom one out of storage.
+ *
+ * No minimum length is applied — that gate (`MIN_STREAK`) is the client's.
+ *
+ * @param {import('./types.js').Streak[]} streaks
+ * @param {string} from
+ * @param {string} to
+ * @returns {{start: string, end: string, length: number}[]}
+ */
+function clipRuns(streaks, from, to) {
+  const out = [];
+  for (const streak of streaks) {
+    if (streak.end < from || streak.start > to) continue; // no intersection
+    out.push({
+      start: streak.start < from ? from : streak.start,
+      end: streak.end > to ? to : streak.end,
+      length: streak.length,
+    });
+  }
+  return out;
 }
 
 /* ---------- comparing categories ---------- */
