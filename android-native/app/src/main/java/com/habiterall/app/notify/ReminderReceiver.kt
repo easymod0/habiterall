@@ -131,22 +131,34 @@ class ReminderReceiver : BroadcastReceiver() {
             if (!Reminders.stillAboutToday(about, today)) {
                 return drop(habitId, "a snoozed reminder arrived after the day it was for")
             }
-            // Already answered today, or not a weekday this habit reminds on —
-            // either way a notification would be noise. If the check itself
-            // fails we err toward notifying: a redundant reminder is a far
-            // smaller harm than a missed one.
+            // Not a weekday this habit reminds on, asked AHEAD of whether the
+            // day was answered and reported as its own reason — the same order
+            // and the same separation `dueReminders` keeps
+            // (`not_this_weekday` before `done_today`, shared/src/notify.js).
+            // The two verdicts are not one verdict: an inexact alarm armed for
+            // an allowed 23:52 arriving at 00:03 on a Saturday the mask does
+            // not name has answered nothing, and a line saying it had is the
+            // reading that sends somebody to check the alarm. `needsReminder`
+            // asks this again below and is right to — it is the rule's one
+            // home — but a shared verdict has no shared explanation.
+            if (!ReminderTime.remindsOn(habit.reminderDays, today)) {
+                return drop(habitId, "not a weekday it reminds on")
+            }
+            // Already answered today, so a notification would be noise. If the
+            // check itself fails we err toward notifying: a redundant reminder
+            // is a far smaller harm than a missed one.
             //
             // `needsReminder`, not "a row exists for today": the two are not the
             // same question, and the difference silenced a day recorded as three
             // of eight glasses while the server went on asking about it.
             //
             // Erring is done by asking it with NO entries rather than by
-            // answering `true` outright, and that is what puts the offline
-            // branch under the same weekday gate as the online one. With
-            // nothing known about today the only thing left for it to refuse on
-            // is `reminder_days` — which is exactly right, since a day the mask
-            // does not name is not a reminder worth erring toward, and a phone
-            // with no network is the case this whole path exists for.
+            // answering `true` outright, which keeps the offline branch under
+            // every gate the online one has rather than above them. The weekday
+            // is the one it would otherwise refuse on, and the gate above has
+            // already answered that — so what this leaves is a phone with no
+            // network notifying about a day it knows nothing else about, which
+            // is the case this whole path exists for.
             val needed = try {
                 Reminders.needsReminder(
                     habit,
@@ -156,7 +168,7 @@ class ReminderReceiver : BroadcastReceiver() {
             } catch (e: Exception) {
                 Reminders.needsReminder(habit, emptyList(), today)
             }
-            if (!needed) return drop(habitId, "already answered, or not a weekday it reminds on")
+            if (!needed) return drop(habitId, "already answered")
 
             Notifications.ensureChannel(applicationContext)
             Notifications.post(
@@ -176,7 +188,7 @@ class ReminderReceiver : BroadcastReceiver() {
         /**
          * Say why nothing was posted, and succeed.
          *
-         * Six conditions end this worker early and every one of them is
+         * Seven conditions end this worker early and every one of them is
          * invisible from outside — a reminder that does not arrive looks
          * identical to a broken alarm, which sends people to check the thing
          * that is working. The server's tick has explained itself per habit for

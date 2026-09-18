@@ -255,9 +255,13 @@ reminder is judged against the day before it goes off.
 With no API to ask it answered a bare `true` — the right instinct (a redundant
 reminder beats a missed one) applied one level too high, so the weekday mask
 could not reach it at all. It errs toward notifying *through* `needsReminder`
-with an empty entry list now, which leaves the weekday as the only thing left to
-refuse on. That is exactly the question a phone with no network can answer for
-itself, and it is why the mask is field **9** of the pipe-delimited reminder
+with an empty entry list now, which puts it under every gate the online branch
+has rather than above them. The weekday is asked one level higher still — its
+own `remindsOn` check, ahead of the answered check and reported as its own
+reason, because "already answered" and "not a weekday it reminds on" are two
+verdicts and a shared line reads as the wrong one for a late alarm that
+answered nothing. That weekday question is exactly what a phone with no network
+can settle for itself, and it is why the mask is field **9** of the reminder
 cache — **appended, never inserted**, like every field after the sixth, because
 the reader indexes by position and tolerates a short line so an upgraded phone
 keeps arming yesterday's alarms until the next sync. `reminderCacheLine` /
