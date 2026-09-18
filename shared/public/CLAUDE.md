@@ -321,116 +321,85 @@ exists to protect the dashboard's habit-name column, which this card does not
 have.
 
 **Offline, the strip, the calendar card and the notes card agree about a day
-(#230, extended by #297).** They draw one pair of maps — three, with the notes
-— and a tap moves them before it writes, so `detailHost.repaint` redraws the
-calendar beside the cells rather than waiting on the refetch `writeDay` ends
-in, which offline never runs. All of them are nulled by `render()` before a
-rebuild, or a tap redraws a card that has been detached.
-
-**The notes card is the third redraw, and it was missed on the first pass of
-#297 — both reviewers found it independently, which is worth knowing because
-the reasoning that omitted it is easy to repeat.** The card is drawn from
-`notesByDate`, the very live map this section argues for passing to the
-calendar, and it was built once by `render()` and never rebuilt — so offline a
-cleared note left a GHOST ROW with the old text after the dot and the strip
-mark had both already gone, and a first note on a previously-noteless day lit
-both marks with no row to show for it. `notesRedraw` is its `calRedraw`, with
-the same lifecycle. Note this is squarely INSIDE the redraw rule and not an
-instance of the accepted staleness two paragraphs down: that paragraph excuses
-figures the SERVER computed, which nothing local could move, and a note is
-local data the edit itself moved.
+(#230, extended by #297).** They draw one set of maps and a tap moves them
+before it writes, so `detailHost.repaint` redraws all three beside the cells
+rather than waiting on the refetch `writeDay` ends in, which offline never
+runs. All are nulled by `render()` before a rebuild, or a tap redraws a card
+that has been detached. **The notes card is the third redraw and was missed on
+the first pass** — `notesRedraw` is its `calRedraw`, with the same lifecycle —
+because offline a cleared note otherwise left a GHOST ROW after the dot and
+the strip mark had gone. That is squarely INSIDE the redraw rule, not an
+instance of the accepted staleness below: that excuses figures the SERVER
+computed, and a note is local data the edit itself moved.
 
 **One case a repaint deliberately cannot cover: a habit's FIRST note written
-offline gets no card at all until the next full render.** `buildNotesCard`
-returns `null` for a habit with no notes, so there is no card in the page to
-redraw, and inserting one is `render()`'s job — it owns card ORDER, from the
-stored `detailCards` list, which a repaint has no business deciding. That
-habit's dot and strip mark still light immediately; only the card lags. The
-mirror case IS covered, because there the card exists: clearing a habit's last
-remaining note offline hides the card rather than leaving an empty list, which
-is the same "a card with nothing in it is hidden" promise the settings help
-text makes.
+offline gets no card until the next full render.** `buildNotesCard` returns
+`null` for a habit with no notes, so there is no card to redraw, and inserting
+one is `render()`'s job — it owns card ORDER, from the stored `detailCards`
+list, which a repaint has no business deciding. The dot and strip mark still
+light immediately. The mirror case IS covered, because there the card exists.
 
 **A QUEUED write from the day editor closes the dialog and repaints too.**
-`saveDay` (`ui/day-dialog.js`) awaits `api()` and offline `api()` stages the
-write and THROWS, so with the close and the `emit('change')` both after the
-await, a toast said *Saved offline* while the dialog stayed open on the old
-value and both grids painted the pre-edit day — three contradictions of a write
-that was correct and durable. It takes the opening page's host, exactly as
-`openCountDialog` does, and does `edit` + `repaint`; it reaches no
-`emit('change')`, because that is a refetch offline cannot answer and could
-repaint the queued write straight back out. **`edit` therefore takes a NOTE:**
-absent means the write says nothing about it — every tap from a strip, matching
-`PUT /entries/:date` preserving a note it was not asked to change — a string is
-a stated note, `''` a stated clear, and a `'clear'` takes the note with the
-row. A genuine failure (anything ANSWERED; only an unsent request carries
-`queued`) still leaves the dialog open and says so.
+`saveDay` awaits `api()`, and offline `api()` stages the write and THROWS — so
+with the close and the `emit('change')` both after the await, a toast said
+*Saved offline* while the dialog stayed open on the old value and both grids
+painted the pre-edit day. It takes the opening page's host and does `edit` +
+`repaint`, and reaches no `emit('change')`, which is a refetch offline cannot
+answer and could repaint the queued write straight back out. **`edit`
+therefore takes a NOTE:** absent means the write says nothing about it —
+matching `PUT /entries/:date` preserving one it was not asked to change — a
+string is a stated note, `''` a stated clear, and a `'clear'` takes the note
+with the row. A genuine failure (anything ANSWERED; only an unsent request
+carries `queued`) still leaves the dialog open and says so.
 
-**The redraw draws the STORED position, and re-resolves today when there is
-none** — not "the window on screen", which is the same sentence only while a
-position exists. `draw` reads `state.calEnd` and never writes it, so #274
-cannot repeat; but with `calEnd` null, which is the default, `draw` and
-`calendarChart` both resolve today afresh. That used to mean a page left open
-across local midnight had its calendar jump a day on the next tap while the
-strip kept its pre-midnight columns — cured now by the day watch below, which
-is the whole view rather than this card.
+**The calendar redraw draws the STORED position, and re-resolves today when
+there is none.** `draw` reads `state.calEnd` and never writes it, so #274
+cannot repeat; with `calEnd` null — the default — `draw` and `calendarChart`
+both resolve today afresh.
 
 **The page is drawn for ONE local day, and it asks again when that day ends.**
 `render()` records `todayISO()` and `refreshIfDayChanged` refetches when the
-browser's own calendar day has moved past it — the whole view, because the
-strip's columns, both draws' `todayISO()`, `calendarChart`'s `realToday` and
-every window on the page are frozen at render time the same way, and fixing one
-card moves the page from "one card is stale" to "one card jumps differently".
-The browser's own date, never a named zone: this is the question `callerDay`
-answers, not the one `resolveTimeZone` does
-(`docs/decisions/timezones.md`). **Two triggers, and neither is enough alone** —
-one timer armed for the next local midnight (`setHours(24, 0, 0, 0)`, so a DST
+browser's own day has moved past it — the WHOLE view, because every window on
+the page is frozen at render time the same way, and fixing one card moves the
+page from "one card is stale" to "one card jumps differently". The browser's
+own date, never a named zone: `callerDay`'s question, not `resolveTimeZone`'s
+(`docs/decisions/timezones.md`). **Two triggers, and neither is enough alone**
+— a timer armed for the next local midnight (`setHours(24, 0, 0, 0)`, so a DST
 day gets the right instant) and re-armed per fire, plus `visibilitychange`,
-because a suspended device runs no timer and the staleness costs nothing until
-somebody looks. Both ask the same date comparison, so a timer that fires early
-or a tab switch on the same day does nothing, and a zone CHANGE is covered by
-the same rule. A refetch and not a local redraw: every figure on the page is
-computed as of a date the SERVER anchors, so redrawing locally would move the
-columns and leave the numbers answering yesterday.
+since a suspended device runs no timer. Both ask the same date comparison, so
+an early fire or a same-day tab switch does nothing, and a zone CHANGE is
+covered by the same rule. A refetch and not a local redraw: every figure is
+computed as of a date the SERVER anchors.
 
 **A memoised `Intl` formatter is only valid while the device's clock stays
 put, and `ui/dates.js` drops its own when the UTC offset moves.** A formatter
 resolves its zone at CONSTRUCTION, so one built at page load goes on rendering
-for the zone a device has left — a laptop carried across the date line, an OS
-clock corrected — and every caption, readout and popover is an offset out while
-the cells beside them are right. The check is at the USE (`clockNow` /
+for a zone the device has left. The check is at the USE (`clockNow` /
 `perClock`), not in a reset a caller has to remember: **every** path that
-redraws after a zone change reaches this — paging, a tap, a save, the midnight
-rebuild — so an invalidator wired to one of them fixes that one and leaves the
-rest silently stale. `getTimezoneOffset()` and never
-`resolvedOptions().timeZone`, which constructs the very thing being memoised on
-a per-cell path; it over-fires on a DST transition and under-fires between two
-zones sharing an offset, and **both are harmless and neither is a reason to
-tighten it**. Three memos hang off the one question, and the REFERENCE WEEK is
-the one to know about: those seven sample dates are local midnights, so
-rebuilding the formatters while freezing the sample renders each as the
-previous day and rotates every weekday caption in the app by one — the defect
-`weekcheck.mjs` exists for, introduced by fixing half of this.
+redraws after a zone change reaches this, so an invalidator wired to one of
+them fixes that one and leaves the rest silently stale. `getTimezoneOffset()`
+and never `resolvedOptions().timeZone`, which constructs the very thing being
+memoised on a per-cell path; it over-fires on a DST transition and under-fires
+between two zones sharing an offset, and **both are harmless**. Three memos
+hang off the one question, and the REFERENCE WEEK is the one to know about:
+those seven sample dates are local midnights, so rebuilding the formatters
+while freezing the sample rotates every weekday caption in the app by one —
+the defect `weekcheck.mjs` exists for, introduced by fixing half of this.
 
 **A calendar rebuild keeps the roving tab stop.** `calendarChart` takes a
-`tabStop` date and `draw` reads it off the outgoing grid before removing it, so
-paging, Today and #230's repaint no longer send a keyboard user back to the most
-recent day. A DATE and not an index — the cell array is only the editable
-cells, so the same index in a window with fewer future days is a different day —
-and a date the new window does not draw falls back to the last cell, which is
-what paging gets. No cell-level repaint was added: see the #230 argument above.
+`tabStop` DATE — not an index, since the cell array is only the editable cells
+— and `draw` reads it off the outgoing grid before removing it; a date the new
+window does not draw falls back to the last cell.
 
 **What the repaint cannot reach stays stale, and THAT is accepted rather than
-missed**: strength, streaks, resilience, history, awards, the weekday
-breakdowns and times-per-week are all figures the server computed, so nothing
-local could move them. The run BANDS are the non-obvious one, and the one to
-know before reading a screenshot — a calendar cell is redrawn from the maps and
-is right, while the band around it comes from `stats.streaks` on the payload the
-page was built with. So an offline tap closing a gap in a run paints the day and
-not the run it extended; and one ERASING a day leaves the connectors and the
-stroke drawn through a cell that is now blank, which also ticks `data-run-marks`
-up and can raise an "In a run" legend swatch. The same staleness the dashboard
-row already has offline, now narrowed to what genuinely needs the server.
+missed**: strength, streaks, resilience, history, awards and the weekday
+breakdowns are figures the server computed. The run BANDS are the non-obvious
+one, and the one to know before reading a screenshot — a calendar cell is
+redrawn from the maps and is right, while the band around it comes from
+`stats.streaks` on the payload the page was built with. So an offline tap
+closing a gap paints the day and not the run it extended, and one ERASING a
+day leaves the stroke drawn through a blank cell, which also ticks
+`data-run-marks` up and can raise an "In a run" swatch.
 
 **The stored shape is `{id, on}[]`, not a bare list of the ids that are on**
 (#163). Membership and order are two different decisions, and a bare array can
@@ -702,39 +671,29 @@ still one answer to the decimal-point question rather than a second guess at
 it. `readTarget` (`ui/habit-dialog.js`) is the reader, and two decisions about
 it are not obvious from the code alone.
 
-**And a target is an AMOUNT wherever it is WRITTEN DOWN too, which
-`targetLabel` was left out of.** It spells the number through the caller's
-`showAmount` — `formatAmount` bound to `convention()`, declared as one line in
-`ui/detail.js` and in `ui/dashboard.js` — so the detail head and the dashboard
-row read `≥ 8,5 pages` on the same account whose Edit box holds `8,5`, instead
-of `≥ 8.5` three lines away from it. Passed IN rather than looked up because
-`ui/dates.js` has NO imports (`label-widths.mjs` evaluates its source in a
-page; `dates.test.js` imports it under Node), and DEFAULTED to `String`
-because `shellFirst` can serve one boot this module over a cached older caller
-and that boot must be an old-looking label rather than a TypeError in
-`render()`. Every live caller passes one, and `countcheck.mjs` pins the two
-visible surfaces on a comma account, because a default nobody notices is how a
-call site comes to rely on it.
+**A target is an AMOUNT wherever it is WRITTEN DOWN, and that rule reached
+four surfaces one at a time.** `targetLabel` spells the number through the
+caller's `showAmount` — `formatAmount` bound to `convention()` — so the detail
+head and the dashboard row read `≥ 8,5 pages` on the same account whose Edit
+box holds `8,5`. It is passed IN rather than looked up, because `ui/dates.js`
+has NO imports, and DEFAULTED to `String`, because `shellFirst` can serve one
+boot this module over a cached older caller and that boot must show an
+old-looking label rather than throw in `render()`.
 
-**The FOURTH surface is not a `targetLabel` caller and needed the same rule
-separately.** The day editor's subtitle (`openDayDialog`, `ui/day-dialog.js`)
-says the direction in words — `target at most 8,5 cigs`, not `≤ 8,5 cigs` —
-because it is a sentence about the day being edited rather than a label, so it
-had its own template literal and read `at most 8.5` four lines above the amount
-box `dayCountField.set` had just filled with `8,5`. It declares the same
-`formatAmount(n, convention())` one-liner, now written in three modules for the
-reason it was written in two: a helper either could import would be a new export
-under `shared/public/`, and that is a `CACHE_VERSION` bump.
+**The FOURTH surface is not a `targetLabel` caller and needed the rule
+separately**: the day editor's subtitle says the direction in words (`target
+at most 8,5 cigs`), so it had its own template literal and read `at most 8.5`
+four lines above a box holding `8,5`. That makes the same
+`formatAmount(n, convention())` one-liner declared in three modules, for the
+reason it was already in two — a helper either could import would be a new
+export under `shared/public/`, and that is a `CACHE_VERSION` bump.
 
 **Two suites pin it and they pin different halves.** `daydialog.mjs` hands the
-formatter into the sliced-out function with every other free identifier and
-reads one FRACTIONAL target under both conventions, which pins the
-PASS-THROUGH — the fixture's `8` and `0` targets are spelled the same either
-way, so they could never have failed on this. It cannot see which formatter the
-module ASKS for: `convention()` replaced by a literal `'point'` passes every
-case in it with `typecheck` clean, measured. The WIRING is `countcheck.mjs`'s
-comma section, which opens the day editor from the calendar on an account
-already set to `comma` with a fractional target and requires `#day-sub` to end
+formatter in with every other free identifier, so it pins the PASS-THROUGH and
+cannot see which formatter the module ASKS for — `convention()` replaced by a
+literal `'point'` passes every case in it, typecheck clean, measured. The
+WIRING is `countcheck.mjs`'s comma section, which opens the day editor on a
+`comma` account with a fractional target and requires `#day-sub` to end
 `at least 9,5 pages` and hold no `9.5`.
 
 **The target box submits what was typed; an untouched box submits what was
@@ -1204,18 +1163,16 @@ month captions in 11 of 14 non-English locales with room to spare. Over-
 reserving costs pixels; over-degrading costs the label. Both call sites now name
 which they are doing.
 
-**#132: `estimateTextWidth` no longer bills a combining mark twice.** `solid`
-(the code points that are not marks) already chose between the `LONE` and
-`JOINED` rate tables; the sum still walked every code point, so a mark was
-billed its own rate on top of the base glyph it rides on. The sum now walks
-`solid` too — one filter, used once — so a mark costs nothing beyond its
-cluster, which is what the function's doc comment always claimed. This makes
-some estimates SMALLER, the dangerous direction, so `WIDTH_SAFETY` was
-re-measured rather than carried over (`shared/test/label-widths.mjs`) and is
-safe only because #131 had already raised `LONE.indic` from a rate near 1.0 to
-1.7 — the mark-billing this removes was covering for that OLD, lower rate, not
-for a property of marks. `docs/decisions/dashboard-and-detail.md` has the
-numbers and why the two changes are coupled.
+**#132: `estimateTextWidth` no longer bills a combining mark twice.** The sum
+walks `solid` (the non-mark code points) as the rate-table choice already did,
+so a mark costs nothing beyond its cluster — what the doc comment always
+claimed. This makes some estimates SMALLER, the dangerous direction, so
+`WIDTH_SAFETY` was re-measured rather than carried over
+(`shared/test/label-widths.mjs`) and is safe only because #131 had already
+raised `LONE.indic` from ~1.0 to 1.7 — the mark-billing this removes was
+covering for that OLD rate, not for a property of marks.
+`docs/decisions/dashboard-and-detail.md` has the numbers and why the two
+changes are coupled.
 
 **A caption that is thinned away must not be the newest one.** The drop is a
 left-to-right walk, and at the right-hand edge the collision is always with the
@@ -1230,32 +1187,24 @@ somewhere else.** Every defect above passes the whole unit suite in the locale
 CI runs in — a `getMonth()`-indexed table is 12 for 12 in English. The sweep is
 `LC_ALL` and a subprocess, so there is no test-only hook in the module under
 test, and it runs `dates.test.js`, `calendar.test.js`, `window.test.js` and
-`weekcheck.mjs` in ten locales chosen for a PROPERTY each (a non-Gregorian
-calendar, non-ASCII digits, a different era, long weekday names) rather than for
-coverage. It asserts the locale actually took, because ICU falls back silently
-for a name it does not know and ten runs of en-US report ten passes.
-`weekcheck` is in there because a LAYOUT is locale-shaped too: the row gutter's
-ceiling binds in ten locales at 328px and in none in English, so running it only
-in the runner's locale pinned the one case where the bound never applies.
+`weekcheck.mjs` in ten locales chosen for a PROPERTY each rather than for
+coverage. **It asserts the locale actually took**, because ICU falls back
+silently and ten runs of en-US report ten passes. `weekcheck` is in there
+because a LAYOUT is locale-shaped too: the row gutter's ceiling binds in ten
+locales at 328px and in none in English.
 
 **A chart's labels and its data have to be asserted TOGETHER.** `weekcheck.mjs`
-exists because a review broke the week-start plumbing four ways at once — bars
-read positionally while captions rotated, the calendar's row labels left
-unrotated, Home/End back on `getDay()`, the month grid reading rows by index —
-and the whole unit suite and every browser suite still passed. The arithmetic
-was covered; nothing looked at a rendered chart. The failure that matters is not
+exists because a review broke the week-start plumbing four ways at once and the
+whole unit suite and every browser suite still passed — the arithmetic was
+covered and nothing looked at a rendered chart. The failure that matters is not
 "the wrong day is first", it is a caption and a datum moving independently,
-which reads as deliberate.
-
-Note where each half is pinned, because the split is forced rather than chosen.
-`weekcheck.mjs` is OFFLINE and covers the labels and the pairing. **Home/End is
-in `feat4.mjs`, in a real browser**, because the handler is reached through a
-`keydown` listener that only exists when the calendar is interactive and it
-reads `dataset`, which the offline fake DOM does not have — a first version of
-`weekcheck` claimed to cover it and did not, and the `getDay()` mutation passed
-every suite in the repo. The month chart needs BOTH its tooltip and its drawn
-caption asserted: they are built from different arrays, so checking one leaves
-the other free to move.
+which reads as deliberate. Note where each half is pinned, because the split is
+forced rather than chosen: `weekcheck.mjs` is OFFLINE and covers the labels and
+the pairing, while **Home/End is in `feat4.mjs`, in a real browser**, because
+that handler needs a `keydown` listener and `dataset` the fake DOM does not
+have — a first version of `weekcheck` claimed to cover it and did not. The
+month chart needs BOTH its tooltip and its drawn caption asserted: they are
+built from different arrays.
 
 **Charts with a time axis page rather than shrink.** `slot = width / count`
 silently squeezes bars to hairlines once a habit has a year of daily data.
@@ -1268,24 +1217,20 @@ screens — `test/window.test.js` asserts no column is ever strandable.
 **`columnsForWidth`'s `reserved` is the CALLER's own non-plot width, and a
 chart whose gutter is MEASURED must pass its own (#285).** The `46` default is
 not a general-purpose figure — it is `scoreChart`'s and `historyChart`'s own
-literal `pad.left + pad.right`, which is why those two callers pass nothing.
-`weekdayMonthChart` measures its `pad.left` from the account's localised short
-weekday names instead of using a fixed one, so it is the one caller that
-passes its own figure — `weekdayMonthReserve(width)` (`charts.js`), read by
-both the chart's own `pad` and by `ui/detail.js` — rather than the shared
-default. Handing `columnsForWidth` a reserve narrower than the chart's real
-gutter computes a column count for a plot area wider than that chart actually
-has, and the per-column width it ends up with falls below `MIN_SLOT` — the
-very floor the function exists to enforce. `frequencyChart` is the trap this
-generalises to: it calls `gutterFor` too and still takes the shared default,
-because its `windowedChart` capacity (`density: 60`) is a vertical ROW count,
-and a horizontal gutter cannot constrain how many rows fit — a chart calling
-`gutterFor` is not by itself a reason to pass `reserved`. Do not widen the
-shared default for one caller's sake instead of giving that caller its own
-figure: a reverted `Math.max(46, …)` version of this did, and it cost `score`
-and `history` about 30% of their columns at every width, at every locale, to
-fix a defect neither chart had. See `docs/decisions/dashboard-and-detail.md`
-(#285) for the measured figures.
+`pad.left + pad.right`, which is why those two pass nothing.
+`weekdayMonthChart` measures its `pad.left` from the account's localised
+weekday names, so it is the one caller that passes its own
+(`weekdayMonthReserve(width)`). Handing `columnsForWidth` a reserve narrower
+than the real gutter computes a column count for a plot area wider than the
+chart has, and the per-column width falls below `MIN_SLOT` — the floor the
+function exists to enforce. **`frequencyChart` is the trap this generalises
+to**: it calls `gutterFor` too and still takes the default, because its
+capacity (`density: 60`) is a vertical ROW count and a horizontal gutter
+cannot constrain rows — calling `gutterFor` is not by itself a reason to pass
+`reserved`. Do not widen the shared default for one caller instead: a reverted
+`Math.max(46, …)` version cost `score` and `history` ~30% of their columns at
+every width and locale, to fix a defect neither had.
+`docs/decisions/dashboard-and-detail.md` (#285) has the figures.
 
 **Connectivity needs more than the `online` event.** That event tracks the
 network interface, not the server, so a restarted server left the app stuck
@@ -1480,28 +1425,22 @@ server to use the settings it *holds*, so it is disabled while the draft is
 dirty rather than quietly testing the old value.
 
 **A section can also SAY something, and that arrives late.**
-`SECTION_NOTICES` mirrors `SECTION_ACTIONS` — keyed by section, given the draft,
-returning prose — and the one entry is "your last reminder was not delivered",
-from `GET /api/notify/status`. Three things about how it is rendered. It is
-*not* awaited by `openSettings`: waiting on a request before showing the
-settings would make every open feel slow to spare the one that has something to
-report, and offline the dialog would never open at all. What lands when the
-answer does is **`paintNotices`, which repaints the prose and touches no
-control**, and that is the whole of why a late answer is safe. It used to be
-`renderSettingsBody`, hedged twice — only on a clean draft, and only when the
-set of notices had changed — because a rebuild tears every control out and takes
-a text field's focus and CONTENT with it: `change` never fires on a removed
-input, so a half-typed webhook URL was simply gone. Both guards are now
-unnecessary rather than merely absent, and removing them was the point: a clean
-draft is exactly the state nobody is in when they most need the sentence, so the
-old rule withheld it from the person mid-edit trying to work out why their
-reminders had stopped. Do not put the rebuild back; `test/browser/nudgecheck.mjs`
-holds `/api/notify/status` open, types into the webhook field and releases it, so
-it fails if you do. The notices read the **draft**, so switching a destination
-off makes its warning disappear immediately rather than after a save and a
-refetch. Pressing "send a test notification" re-asks, because a test is a real
-delivery attempt and is what clears the notice once a replacement webhook
-works.
+`SECTION_NOTICES` mirrors `SECTION_ACTIONS` — keyed by section, given the
+draft, returning prose — and the one entry is "your last reminder was not
+delivered", from `GET /api/notify/status`. It is *not* awaited by
+`openSettings`: waiting would make every open feel slow to spare the one with
+something to report, and offline the dialog would never open. What lands when
+the answer does is **`paintNotices`, which repaints the prose and touches no
+control**, and that is the whole of why a late answer is safe — a rebuild
+tears every control out and takes a text field's focus and CONTENT with it,
+since `change` never fires on a removed input. **Do not put the rebuild
+back**; `test/browser/nudgecheck.mjs` holds `/api/notify/status` open, types
+into the webhook field and releases it, so it fails if you do. It is
+deliberately unhedged: an earlier version repainted only on a clean draft,
+which is exactly the state nobody is in when they most need the sentence. The
+notices read the **draft**, so switching a destination off clears its warning
+immediately; pressing "send a test notification" re-asks, because a test is a
+real delivery attempt.
 
 **A setting the server normalises cannot be judged here.** Whether a webhook
 URL is acceptable depends on a host allowlist that lives with the fetch, so the
@@ -1524,23 +1463,20 @@ nothing once a toggle has been touched. Read through the accessor, never
 **Saving a habit returns you to where the edit started**, and so does adding a
 category from the same dialog. `habit-dialog`'s `announce()` emits `'reload'`
 only when `dashboardShowing()`, `'change'` otherwise — see "A dialog does not
-know which view it was opened over" under Routing for the whole rule. So
-editing from a habit's own page reloads that page and creating from the
-dashboard reloads the list. It cannot simply call the detail view — that is the
-import cycle the store exists to break — and it cannot always emit `'change'`,
-because on the dashboard that is a repaint from stale state and a newly created
-habit would not appear. Deleting still goes home: the page you were on is gone.
+know which view it was opened over" under Routing. It cannot simply call the
+detail view (the import cycle the store exists to break) and it cannot always
+emit `'change'`, because on the dashboard that is a repaint from stale state
+and a newly created habit would not appear. Deleting still goes home.
 
-**...and the page it returns you to is SEEDED from the save, not left to the
-refetch.** `announce(saved)` passes the reply on, and `ui/detail.js` redraws
-from it synchronously before starting its `/stats` + `/entries` round trips —
-because the head's Edit button captures the habit it was drawn from, so in that
-gap pressing Edit reopened the dialog on the pre-save habit and Save from there
-wrote the edit back out. The seed is the SERVER's answer (`parseHabit`
-normalises as well as validates) merged OVER the habit the page holds, never
-assigned wholesale: `unlogged_is_success` rides on the `/stats` payload and not
-on a habit write, so assigning would drop it and a limit would lose its ghost
-ticks until the refetch landed.
+**...and the page it returns to is SEEDED from the save, not left to the
+refetch.** `announce(saved)` passes the reply on and `ui/detail.js` redraws
+from it synchronously, because the head's Edit button captures the habit it
+was drawn from — so in that gap pressing Edit reopened the dialog on the
+pre-save habit and Save from there wrote the edit back out. The seed is the
+SERVER's answer merged OVER the habit the page holds, **never assigned
+wholesale**: `unlogged_is_success` rides on the `/stats` payload and not on a
+habit write, so assigning would drop it and a limit would lose its ghost ticks
+until the refetch landed.
 
 **The time picker's parser is mirrored in Kotlin.** `public/ui/time.js` and
 `android-native/.../ReminderTime.kt` accept the same inputs and produce the same
