@@ -625,6 +625,50 @@ test('#247 case 4: a caller that passes no `runs` option gets no key at all', ()
 // edge case, it is the ordinary paged request, and only the two editions'
 // integration suites were holding it. A window with run B open at BOTH ends is
 // what pins both clips at once.
+// A BOUNDED slice — which is the only kind either `/overview` hands this — is
+// judged by `onPaceSeries` against a trailing window that is missing real
+// history for its first `den - 1` days, with #340's leniency correctly withheld
+// because the range did not open at the habit's birth. The verdict there is not
+// lenient or strict but WRONG, and `runs` is the one field that would draw it.
+// Measured against the unguarded code, this exact fixture: two runs,
+// `[day401..day404] length 4` and `[day406..] length 395`, with day 405 a HOLE —
+// a blank square mid-band on the dashboard while the calendar, which sees the
+// whole history, strokes through the same day.
+test('#247 case 6: a slice that opens AFTER the habit\'s birth draws no run in ' +
+     'the days its own edge makes unreliable', () => {
+  const thrice = { ...boolHabit, freq_numerator: 3, freq_denominator: 7 };
+  const end = '2026-03-01';
+  const day = (n) => addDays(end, n - 500);
+  // Kept perfectly: exactly 3 in every trailing 7 days, for 500 days.
+  const all = [];
+  for (let n = 1; n <= 500; n++) if (n % 7 === 1 || n % 7 === 3 || n % 7 === 5) {
+    all.push({ date: day(n), value: YES });
+  }
+  const birth = all[0].date;
+  // What the route hands it: the last 100 days only, birth supplied from SQL.
+  const slice = all.filter((e) => e.date >= day(401));
+  const stats = summaryStats(thrice, slice, {
+    end, birth, runs: { start: day(395), end: day(410) },
+  });
+
+  assert.equal(stats.runs.length, 1,
+    'ONE run, not a fragment and a hole — the slice edge must not split a run '
+    + 'the habit\'s own page reports unbroken');
+  assert.ok(stats.runs[0].start >= day(407),
+    `nothing may be drawn before the first day with a full trailing window `
+    + `(day 401 + 7 - 1 = day 407); got ${stats.runs[0].start} vs ${day(407)}`);
+
+  // The other half, and the one that stops the guard being "return []": a slice
+  // that DID open at the habit's birth keeps its early days, because there the
+  // leniency is #340's own and the verdict is right.
+  const fromBirth = summaryStats(thrice, all, {
+    end, birth, runs: { start: day(1), end: day(20) },
+  });
+  assert.ok(fromBirth.runs.some((r) => r.start <= day(7)),
+    'a range opening at the birth is not suppressed — it has no missing '
+    + 'history to be wrong about');
+});
+
 test('#247 case 5: a window INSIDE a run is clipped at both ends, and the ' +
      'length is still the run\'s own', () => {
   const inside = { start: runsDay(20), end: runsDay(30) };

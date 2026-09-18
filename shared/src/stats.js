@@ -2421,6 +2421,51 @@ export function summaryStats(habit, entries,
   // eight-walk shape.
   const runs = lastMiss ? missRunsFrom(series) : null;
 
+  // **The first `den - 1` days of a BOUNDED slice carry an unreliable verdict,
+  // and `runs` is the one field that would DRAW one.** `onPaceSeries` judges a
+  // day against the trailing `den`-day window ending on it, so a day less than
+  // `den - 1` from the start of the walked range is judged against a window
+  // missing history that really happened — and #340's leniency is deliberately
+  // withheld there, because the range opened at the slice's edge rather than at
+  // the habit's birth. The verdict that falls out is not merely lenient or
+  // strict, it is WRONG: measured on a 3x/7 habit kept perfectly for 500 days,
+  // a 400-day slice reports its first fortnight as a 4-day run, a one-day hole,
+  // and then the real run — where the habit's own page reports one unbroken 499.
+  // Drawn, that is a blank square in the middle of a band on the dashboard while
+  // the calendar strokes straight through the same day, which is the
+  // "two surfaces disagreeing about one habit" shape `shared/CLAUDE.md` names.
+  //
+  // So the affected days are DROPPED rather than drawn: absent, which is what
+  // the bound already promises, instead of wrong. The same figures still reach
+  // `score` and `currentStreak` — this is not a fix to `onPaceSeries`, whose
+  // slice-edge behaviour is #340's settled decision, and both of those are read
+  // at the range's far end where no truncation applies.
+  //
+  // Gated on `from > birth` for exactly #340's reason: a range that DID open at
+  // the habit's birth has no missing history to be wrong about, and its early
+  // days are the leniency's own, correctly judged. A daily habit (`den` 1) has a
+  // one-day window that cannot be truncated, so this is a no-op for it.
+  //
+  // **Computed inside the `runsWindow` branch, and that placement is load
+  // bearing rather than tidy.** This is the THIRD site in this file that reads
+  // `habit.freq_denominator`, and `stats.test.js`'s counting-getter guard
+  // depends on there being exactly two — it counts PASS INVOCATIONS through
+  // that property, which only works while every read is one pass. Taking the
+  // read only when a caller asks for `runs` keeps that instrument measuring
+  // what it claims for every other call shape; the guard's own comment now
+  // names this site and the condition. Hoist it out of the branch and the
+  // guard fails, correctly.
+  let runsField;
+  if (runsWindow) {
+    const den = Math.max(1, Number(habit.freq_denominator) || 1);
+    const edgeSafe = birth != null && from > birth ? addDays(from, den - 1) : from;
+    runsField = clipRuns(
+      streaks,
+      runsWindow.start > edgeSafe ? runsWindow.start : edgeSafe,
+      runsWindow.end
+    );
+  }
+
   return {
     score: scores.length ? scores[scores.length - 1].score : 0,
     currentStreak: currentStreak(streaks, end),
@@ -2429,7 +2474,7 @@ export function summaryStats(habit, entries,
     ...(lastMiss ? { lastMiss: runs.length ? runs[runs.length - 1].end : null } : {}),
     // Same reasoning, same spread: a caller that passed no `runs` window
     // gets no `runs` key, not `null` and not `[]`.
-    ...(runsWindow ? { runs: clipRuns(streaks, runsWindow.start, runsWindow.end) } : {}),
+    ...(runsWindow ? { runs: runsField } : {}),
   };
 }
 

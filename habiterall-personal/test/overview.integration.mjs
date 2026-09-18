@@ -243,10 +243,17 @@ ck('a run\'s length is the TRUE, unclipped length — greater than the days requ
   runsRow.runs.every((r) => r.length > GRID_DAYS),
   `requested ${GRID_DAYS}, runs ${JSON.stringify(runsRow.runs)}`);
 
-// The accepted bound (decision 2): `windowed` never reads further back than
-// `SUMMARY_WINDOW_DAYS` (400) from `summaryEnd`, so a streak's own start/end
-// can never precede that cutoff — a grid window entirely before it cannot
-// intersect any run, regardless of the habit's fixture.
+// A window with no runs in it answers with an empty array rather than a
+// missing key or a 500 — and note what this does NOT pin, because its first
+// version claimed to. It does not pin the 400-day bound (decision 2): this
+// fixture holds 60 days of entries, so a window at −456..−450 intersects no
+// run for a reason that has nothing to do with `SUMMARY_WINDOW_DAYS`, and
+// deleting that constant from the route entirely leaves this passing. The
+// bound is `summaryStats`' behaviour rather than the route's and is pinned
+// where it can be reached with a 500-day fixture and no HTTP: `#247` cases 2
+// and 6 in `shared/test/streaks.test.js`. What this DOES bite is the grid
+// window being threaded through at all — swap `summaryEnd` in for `end` and
+// it answers with a run.
 const pagedPastWindow = await overview({ days: 7, end: daysAgo(450) });
 const pagedPastWindowRow = pagedPastWindow.habits.find((h) => h.id === runsHabit.id);
 ck('?end= paged back past the summary window returns runs: []',

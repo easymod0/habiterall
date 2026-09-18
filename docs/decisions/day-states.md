@@ -457,6 +457,34 @@ coded around.
   - The 1830-day scan is rejected for the reason above: it is the STALE-cache
     path, so using it here would make the marks themselves flicker between
     two loads of one page.
+  - **The bound needed one more clause than the first version of this section
+    claimed, and a review round found it.** "A grid paged back past the
+    400-day window shows no run marks" was written as though the slice's own
+    edge were harmless, and it is not: `onPaceSeries` judges a day against the
+    trailing `den`-day window ending on it, so the first `den - 1` days of any
+    bounded slice are judged against a window missing history that really
+    happened — with #340's leniency correctly withheld, since the range opened
+    at the slice edge rather than at the habit's birth. Reproduced on a 3x/7
+    habit kept perfectly for 500 days, `?days=14&end=<cutoff+8>`:
+
+    ```
+    /habits/:id/stats  -> one run, 2025-05-07..2026-09-17, length 499
+    /overview          -> [{2025-08-13..2025-08-16, length 4},
+                           {2025-08-18..2025-08-21, length 396}]
+                          ... 2025-08-17 drawn BLANK, mid-band
+    ```
+
+    So the promise was false in the worse direction — a wrong mark inside the
+    bound rather than an absent one past it, on the one surface this issue
+    exists to fix, and disagreeing with the calendar about the same day.
+    `summaryStats` now floors the `runs` window at `from + (den - 1)` when
+    `from > birth`, which makes the documented promise true rather than
+    aspirational. The hole was ~`den - 1` days wide: 2 days at 3x/7, 6 at
+    1x/7. Nothing about `onPaceSeries` changed — its slice-edge behaviour is
+    #340's settled decision, and `score`/`currentStreak` read the far end of
+    the range where no truncation applies. Reachability was low (~28
+    page-backs on the web, one call for a direct `?days=365` caller), which
+    is why it is a MEDIUM and not the reason to leave it.
   - A second entries read plus a second `onPaceSeries` pass, scoped to
     whatever narrower window a paged-back request asked for, was rejected
     too: `onPaceSeries` pro-rates its requirement near a habit's own BIRTH

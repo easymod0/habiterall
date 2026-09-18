@@ -877,6 +877,24 @@ days, accepted rather than coded around, and each run's `length` on the wire
 is the TRUE unclipped length, never the span visible in whatever grid window
 clipped it.
 
+**"No marks past the bound" needs the first `den - 1` days of the slice
+suppressed too, and without that the boundary drew WRONG marks rather than
+none.** `onPaceSeries` judges a day against the trailing `denominator`-day
+window ending on it, so a day less than `den - 1` from the start of the walked
+range is judged against a window missing history that really happened — with
+#340's leniency correctly withheld, because the range opened at the slice's
+edge and not at the habit's birth. Measured on a 3x/7 habit kept perfectly for
+500 days: the 400-day slice reported its own first fortnight as a 4-day run,
+then a ONE-DAY HOLE, then the real run, where the habit's own page reports one
+unbroken 499. Drawn, that is a blank square mid-band on the dashboard while the
+calendar strokes through the same day. `summaryStats` therefore floors the
+`runs` window at `from + (den - 1)` whenever `from > birth`, so those days are
+absent instead of wrong — `score` and `currentStreak` are untouched, both being
+read at the range's far end where nothing is truncated. The read of
+`freq_denominator` that needs sits INSIDE the `runs` branch, because
+`stats.test.js`'s counting-getter guard measures pass invocations through that
+property and a third unconditional read would stop it meaning what it says.
+
 **The run set is exactly as stale as the rest of the row it draws.** It is the
 one `/overview` last answered with, so an offline tap that turns a day into a
 stored 0 keeps drawing that cell's in-run tick until the next load corrects
