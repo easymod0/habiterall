@@ -99,10 +99,11 @@ test('a live query narrows the list the same way for both', () => {
 // one module asks it and `store.js` is the file all of them can import. Until
 // `#/categories` existed, every one of them could spell it
 // `state.openHabitId == null` and be right — and when a second full-page view
-// arrived, two of the six hand-written copies were missed. What this file can
-// pin is the DECISION only; that a caller actually reads it is the browser
-// suites' half (`comparecheck.mjs`, `categorycheck.mjs`), because a predicate
-// being right does not make its caller use it.
+// arrived, two of the six hand-written copies were missed. A third arrived with
+// `#/category/<id>` (#259) and is the case below. What this file can pin is the
+// DECISION only; that a caller actually reads it is the browser suites' half
+// (`comparecheck.mjs`, `categorycheck.mjs`), because a predicate being right
+// does not make its caller use it.
 
 test('dashboardShowing is true only when neither other view is up', async () => {
   const { dashboardShowing } = await import('../public/ui/store.js');
@@ -125,6 +126,39 @@ test('dashboardShowing is true only when neither other view is up', async () => 
   } finally {
     state.openHabitId = before.habit;
     state.openCategories = before.cats;
+  }
+});
+
+test('dashboardShowing is false while one category’s own page is up', async () => {
+  const { dashboardShowing } = await import('../public/ui/store.js');
+  const before = {
+    habit: state.openHabitId,
+    cats: state.openCategories,
+    one: state.openCategoryId,
+  };
+  try {
+    // The THIRD full-page view (#259, `#/category/<id>`), and the half neither
+    // older spelling can see: no habit is open and the comparison is not up, so
+    // both `state.openHabitId == null` and that AND `!state.openCategories`
+    // answer TRUE here while one category's own page is what is on screen.
+    state.openHabitId = null;
+    state.openCategories = false;
+    state.openCategoryId = 3;
+    assert.equal(dashboardShowing(), false,
+      'a category’s own page is showing, and it has no habit id to give it away');
+
+    // And it has to come BACK. The flag is cleared by whatever paints over the
+    // page — `paint()` in ui/dashboard.js, `render()` in ui/detail.js and in
+    // ui/categories.js — so a predicate that never reaches true again is the
+    // dashboard silently declining to repaint itself for the rest of the
+    // session.
+    state.openCategoryId = null;
+    assert.equal(dashboardShowing(), true,
+      'cleared, the list is the dashboard again');
+  } finally {
+    state.openHabitId = before.habit;
+    state.openCategories = before.cats;
+    state.openCategoryId = before.one;
   }
 });
 

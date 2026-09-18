@@ -38,6 +38,48 @@ test('a near miss at the comparison is the dashboard', () => {
   }
 });
 
+test("a category fragment names that category's own page", () => {
+  assert.deepEqual(parseRoute('#/category/3'), { view: 'category', id: 3 });
+  assert.deepEqual(parseRoute('/category/3'), { view: 'category', id: 3 });
+  assert.deepEqual(parseRoute(' #/category/3 '), { view: 'category', id: 3 });
+});
+
+test('a near miss at a category page is the dashboard', () => {
+  // Anchored at both ends and digits only, like HABIT_RE: the fragment arrives
+  // from a bookmark or a typed URL, so anything that is not exactly an id
+  // names nothing.
+  for (const hash of [
+    '#/category/3x',      // trailing junk
+    '#/category/3/',      // a route that does not exist
+    '#/category/',        // no id
+    '#/category',         // no id at all
+    '#/category/-1',      // negative
+    '#/category/1.5',     // not an integer
+    '#/category/0',       // not an id
+    '#/CATEGORY/3',       // wrong case
+    '#/category/3?x',     // a query on a fragment
+  ]) {
+    assert.deepEqual(parseRoute(hash), LIST, hash);
+  }
+});
+
+test('a category id too large to be an id is refused', () => {
+  // `\d+` will happily match 30 digits, and Number() turns those into a float
+  // that would be sent to the server as an id — the same bound the habit arm
+  // carries, stated again because a second arm does not inherit the first's.
+  assert.deepEqual(parseRoute('#/category/' + '9'.repeat(30)), LIST);
+});
+
+test('the comparison and a category page do not cross-talk', () => {
+  // One is plural and carries no id, the other is singular and carries one.
+  // The order they are tested in is stable, and neither may answer for the
+  // other: `#/categories` opening one category's page would be a page over
+  // the wrong set of habits.
+  assert.deepEqual(parseRoute('#/categories'), CATEGORIES);
+  assert.deepEqual(parseRoute('#/category/3'), { view: 'category', id: 3 });
+  assert.notDeepEqual(parseRoute('#/category/3'), CATEGORIES);
+});
+
 test('anything unrecognised is the dashboard, never an error', () => {
   // A URL is typed, pasted and truncated by chat clients. Every one of these
   // has to land somewhere useful rather than throw on the way to first paint.
@@ -88,6 +130,14 @@ test('the comparison route and its fragment round trip', () => {
   // through two functions that agree with each other pins neither spelling.
   assert.equal(hashFor(CATEGORIES), '#/categories');
   assert.deepEqual(parseRoute('#/categories'), CATEGORIES);
+});
+
+test("a category page's route and its fragment round trip", () => {
+  // The literal again, and singular: `#/categories` is a different page, and
+  // a round trip through two functions that agree with each other would not
+  // notice one spelling the other's.
+  assert.equal(hashFor({ view: 'category', id: 3 }), '#/category/3');
+  assert.deepEqual(parseRoute('#/category/3'), { view: 'category', id: 3 });
 });
 
 /* ---------- writing the URL ---------- */
@@ -212,6 +262,34 @@ test('a traversal onto the comparison leaves that entry unwindable', () => {
   // through the Forward button.
   const { calls, fire } = fakeUrl('');
   globalThis.location.hash = '#/categories';
+  fire();
+  go(LIST);
+  assert.deepEqual(calls, [['back']]);
+});
+
+test("opening a category's own page from the dashboard pushes one entry", () => {
+  const { calls } = fakeUrl('');
+  go({ view: 'category', id: 3 });
+  assert.deepEqual(calls, [['push', '#/category/3']],
+    'a push, so Back has an entry of its own to leave through');
+  assert.equal(calls.filter(([kind]) => kind === 'replace').length, 0);
+
+  // ...and returning to the list unwinds that one push rather than writing
+  // over it, exactly as a habit's and the comparison's do. Replacing is the
+  // tidy-looking wrong answer: a same-document open counts an entry in
+  // `WebBackStack.floorAfterShow`, so it leaves `currentIndex` AT the floor
+  // and the next system Back closes the screen instead of reaching the
+  // dashboard.
+  go(LIST);
+  assert.deepEqual(calls, [['push', '#/category/3'], ['back']]);
+});
+
+test("a traversal onto a category's own page leaves that entry unwindable", () => {
+  // Forward onto it is as much "our" entry as opening it was — `init` asks
+  // "does this route have a fragment", so a third fragment route needed
+  // nothing there, and this is what says so.
+  const { calls, fire } = fakeUrl('');
+  globalThis.location.hash = '#/category/3';
   fire();
   go(LIST);
   assert.deepEqual(calls, [['back']]);

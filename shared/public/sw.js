@@ -307,7 +307,31 @@ const sw = self;
 // which is the #224 destruction the argument exists to prevent. Both halves
 // are exactly why a shell may not be allowed to mix these two modules across
 // this change. No file added or removed, so `SHELL` is unchanged.
-const CACHE_VERSION = 'v32';
+// v33: a new EXPORT and no new file — `openCategory` in `ui/categories.js`
+// (#259), a category's own page at `#/category/<id>`, imported STATICALLY by
+// `app.js` (the boot's deep-link branch and the routing dispatcher). That is
+// v20's and v31's case: `shellFirst`
+// is stale-while-revalidate and writes into the RUNNING worker's cache, so a
+// shell can hold the new `app.js` over a cached v32 `ui/categories.js` that
+// declares no such export — "does not provide an export named 'openCategory'"
+// at module LINK time, before `start()` runs and so outside `#view-error`.
+//
+// `ui/store.js` gains a FIELD rather than an export, `openCategoryId`, and that
+// is v26's case beside it — and it is NOT benign, which is the half worth
+// saying out loud. `undefined == null` would only save it if the field and the
+// predicate lived in different modules: `dashboardShowing()` lives in
+// `store.js` itself, so a cached v32 `store.js` under the new
+// `ui/categories.js` runs v32's PREDICATE — `state.openHabitId == null &&
+// !state.openCategories` — which answers TRUE while a category's own page is
+// showing, because that page sets neither. In that window the breakpoint
+// reflow, the day-change refetch and the `'change'` repaint all paint the
+// dashboard over the category page and unwind the fragment, which is the
+// failure `shared/public/CLAUDE.md` records the comparison meeting twice. The
+// bump is what closes it: the two modules cannot be mixed across this change.
+// `index.html` and `style.css` do not move: the page reuses `#view-categories`
+// and the comparison's own rules. No file added or removed, so `SHELL` is
+// unchanged — `ui/categories.js` is already in it.
+const CACHE_VERSION = 'v33';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 
