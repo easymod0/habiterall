@@ -65,7 +65,7 @@ export const PAGES = [
     slug: 'install/https',
     title: 'HTTPS and the guards',
     blurb: 'Why TLS is load-bearing here, and which protections can be turned off.',
-    claims: ['Put HTTPS in front', 'Turning the guards off'],
+    claims: ['Put HTTPS in front', 'Compression is the proxy\'s job', 'Turning the guards off'],
   },
   {
     slug: 'reminders',
