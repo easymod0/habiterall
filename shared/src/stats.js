@@ -2451,43 +2451,47 @@ export function summaryStats(habit, entries,
   const runs = lastMiss ? missRunsFrom(series) : null;
 
   // **The first `den - 1` days of a BOUNDED slice carry an unreliable verdict,
-  // and `runs` is the one field that would DRAW one.** `onPaceSeries` judges a
-  // day against the trailing `den`-day window ending on it, so a day less than
-  // `den - 1` from the start of the walked range is judged against a window
-  // missing history that really happened — and #340's leniency is deliberately
-  // withheld there, because the range opened at the slice's edge rather than at
-  // the habit's birth. The verdict that falls out is not merely lenient or
-  // strict, it is WRONG: measured on a 3x/7 habit kept perfectly for 500 days,
-  // a 400-day slice reports its first fortnight as a 4-day run, a one-day hole,
-  // and then the real run — where the habit's own page reports one unbroken 499.
-  // Drawn, that is a blank square in the middle of a band on the dashboard while
-  // the calendar strokes straight through the same day, which is the
-  // "two surfaces disagreeing about one habit" shape `shared/CLAUDE.md` names.
+  // and `runs` is the one field here that would DRAW one.** The rule and its
+  // whole justification are `edgeSafeStart`'s, above — since #346 this is the
+  // interval model's own shortfall (a block is anchored to a completion, and a
+  // slice cannot see the completions before its opening) rather than the
+  // trailing window's, and the expression is now shared with
+  // `computeCategoryStats` rather than restated. Drawn, an affected day is a
+  // blank square in the middle of a band on the dashboard while the calendar
+  // strokes straight through the same day, which is the "two surfaces
+  // disagreeing about one habit" shape `shared/CLAUDE.md` names — so the
+  // affected days are DROPPED rather than drawn: absent, which is what the
+  // bound already promises, instead of wrong.
   //
-  // So the affected days are DROPPED rather than drawn: absent, which is what
-  // the bound already promises, instead of wrong. The same figures still reach
-  // `score` and `currentStreak` — this is not a fix to `onPaceSeries`, whose
-  // slice-edge behaviour is #340's settled decision, and both of those are read
-  // at the range's far end where no truncation applies.
-  //
-  // Gated on `from > birth` for exactly #340's reason: a range that DID open at
-  // the habit's birth has no missing history to be wrong about, and its early
-  // days are the leniency's own, correctly judged. A daily habit (`den` 1) has a
-  // one-day window that cannot be truncated, so this is a no-op for it.
+  // **`score` and `currentStreak` on the same payload are NOT floored, and
+  // that is a stated limit rather than an oversight.** Both are read at the
+  // range's far end, so no truncation applies to the day they report — but
+  // `currentStreak` walks BACK from it, and a run reaching into the slice's
+  // unreliable head is reported short. Measured on a 3x/7 habit kept perfectly
+  // for 500 days: the habit's own page reads 500 and a 400-day slice reads
+  // **396** — 400 of that is the slice itself, which no floor could return, and
+  // the remaining 4 is this shortfall. Flooring `currentStreak` would not
+  // recover them either; only fetching further back would, which is the cost
+  // `summaryStats` exists to avoid. So the dashboard's streak is a floor on the
+  // habit's, never a contradiction of it, and a caller wanting the true figure
+  // asks the habit's own page. `clipRuns` is applied where a WRONG verdict
+  // would be drawn, not everywhere a bounded one is reported.
   //
   // **Computed inside the `runsWindow` branch, and that placement is load
   // bearing rather than tidy.** This is the THIRD site in this file that reads
   // `habit.freq_denominator`, and `stats.test.js`'s counting-getter guard
-  // depends on there being exactly two — it counts PASS INVOCATIONS through
-  // that property, which only works while every read is one pass. Taking the
-  // read only when a caller asks for `runs` keeps that instrument measuring
-  // what it claims for every other call shape; the guard's own comment now
-  // names this site and the condition. Hoist it out of the branch and the
-  // guard fails, correctly.
+  // depends on this call shape reading it exactly twice — it counts PASS
+  // INVOCATIONS through that property, which only works while every read is one
+  // pass. Taking the read only when a caller asks for `runs` keeps that
+  // instrument measuring what it claims for every other call shape; the guard's
+  // own comment now names this site and the condition. Hoist it out of the
+  // branch and the guard fails, correctly. (There is a FOURTH site, in
+  // `computeCategoryStats`, and it is unreachable from that guard for the
+  // different reason that the guard never calls it.)
   let runsField;
   if (runsWindow) {
     const den = Math.max(1, Number(habit.freq_denominator) || 1);
-    const edgeSafe = birth != null && from > birth ? addDays(from, den - 1) : from;
+    const edgeSafe = edgeSafeStart(from, birth, den);
     runsField = clipRuns(
       streaks,
       runsWindow.start > edgeSafe ? runsWindow.start : edgeSafe,
@@ -2508,6 +2512,58 @@ export function summaryStats(habit, entries,
 }
 
 /**
+ * The first day of a walked range whose on-pace verdict can be trusted, given
+ * where the habit actually began.
+ *
+ * `onPaceSeries` covers a day with a `den`-day block anchored to a real
+ * completion, so a block covering day `D` begins no earlier than
+ * `D - (den - 1)` — which means that from `from + (den - 1)` onward, every
+ * block that could reach a day opens INSIDE the walk and a bounded caller
+ * reads exactly what a full-history one does. Before that point it is missing
+ * completions it never fetched, and reads days as uncovered that the habit's
+ * own page covers. That shortfall is the one real bound on #346's
+ * window-independence, and it is not cosmetic: it turns an unbroken habit into
+ * one carrying a lapse, which is the two-surfaces-disagree shape #340 exists
+ * to close.
+ *
+ * `birth` is what tells a bounded SLICE from a range that opened at the
+ * habit's own start: a range opening at or before the first row has no missing
+ * history to be wrong about, so it is returned unmoved. An explicit `null` —
+ * both routes' spelling for "`MIN(date)` found no row at all" — is that same
+ * case rather than a third one: a habit with no rows has no completions to be
+ * missing, and its whole window is an honest lapse.
+ *
+ * **One function rather than one expression per caller, deliberately.**
+ * `summaryStats` (#247) and `computeCategoryStats` (#346's review round) ask
+ * the identical question about ranges they were handed, and two spellings of
+ * one question is the defect this project keeps hitting — the second copy is
+ * the one that does not get the fix. The denominator is a PARAMETER so the
+ * read stays at the call site, which `stats.test.js`'s counting-getter guard
+ * depends on.
+ *
+ * **What a floored range does NOT repair**, stated so nobody reads more into
+ * it than is there. A run STRADDLING the boundary is kept — rightly, it is
+ * real — and keeps its true length, which still counts the under-covered days
+ * at its head; the inflation is bounded by `den - 1` days and only a wider
+ * fetch could remove it. And a phantom `birth` sorting ABOVE `from`
+ * (`9999-99-99`) reads as "the range opens at the birth" and withholds the
+ * floor, where one sorting below applies it; both routes hand this straight
+ * from SQL's `MIN(date)`, so both spellings are reachable. Shared residue,
+ * shared by every caller, rather than a different compromise in each.
+ *
+ * @param {string} from the walked range's first day.
+ * @param {string|null|undefined} birth the habit's LIFETIME earliest row.
+ *   Required, not optional: both call sites have one in hand, and a defaulted
+ *   parameter here would silently withhold the floor from a third caller that
+ *   forgot it — the wrong direction to fail in.
+ * @param {number} den the habit's frequency denominator, already clamped.
+ * @returns {string} `from`, or the first day past the unreliable head of it.
+ */
+function edgeSafeStart(from, birth, den) {
+  return birth != null && from > birth ? addDays(from, den - 1) : from;
+}
+
+/**
  * Folds a habit's `streaks` (`streaksFrom`, already in hand at the call
  * site — see the `runs` paragraph on `summaryStats` above) into the window
  * `[from, to]`: drops any run that does not intersect it, clips the reported
@@ -2523,10 +2579,26 @@ export function summaryStats(habit, entries,
  *
  * No minimum length is applied — that gate (`MIN_STREAK`) is the client's.
  *
- * @param {import('./types.js').Streak[]} streaks
+ * **It folds MISS runs too** (`computeCategoryStats`, #346's review round),
+ * which is why `open` is carried through when the run carries one. The two
+ * shapes clip identically, and a second copy of "drop, clip, keep the true
+ * length" is the duplication this file already refuses elsewhere — but
+ * `missRunsFrom` sets `open` at the point it knows the answer, EXPLICITLY
+ * rather than leaving it to be inferred from `end === to` later, because a
+ * lapse whose final days were skipped stops short of the range's end and any
+ * such comparison reads it as closed (see the note in `missRunsFrom`). Dropping
+ * the flag here would hand `computeRecovery` exactly that misreading, and put
+ * an ONGOING lapse into the recovery rate.
+ *
+ * Spread conditionally, so a caller folding streaks — which carry no `open` —
+ * still gets the same three keys it always did. `summaryStats`' `runs` rides
+ * on a response payload; this must not grow it a key.
+ *
+ * @param {(import('./types.js').Streak|{start: string, end: string,
+ *   length: number, open?: boolean})[]} streaks
  * @param {string} from
  * @param {string} to
- * @returns {{start: string, end: string, length: number}[]}
+ * @returns {{start: string, end: string, length: number, open?: boolean}[]}
  */
 function clipRuns(streaks, from, to) {
   const out = [];
@@ -2536,6 +2608,7 @@ function clipRuns(streaks, from, to) {
       start: streak.start < from ? from : streak.start,
       end: streak.end > to ? to : streak.end,
       length: streak.length,
+      ...('open' in streak ? { open: streak.open } : {}),
     });
   }
   return out;
@@ -3064,19 +3137,52 @@ export function computeCategoryStats(categories, members,
       // `computeScores` above keeps its own, wider, per-member walk
       // (`[memberWarm, end]`), which is not this range and must not share it.
       //
-      // **No `birth` is threaded here any more (#346), and its absence is
-      // deliberate rather than an oversight.** Until #346 this passed the
-      // member's LIFETIME earliest row as `onPaceSeries`'s `birth`, because a
-      // comparison axis is a window the route was ASKED for and its `dates[0]`
-      // is not the member's own start — so the trailing window's leniency had
-      // to be told to stay shut at that edge. The interval model has no such
-      // leniency and `onPaceSeries` no longer reads `birth` at all, so
-      // computing one here would be a phantom-filtered read of `firstEntry`
-      // feeding a parameter nothing consumes. `warmAnchor` a few lines up is a
-      // DIFFERENT question — a warm-up start for `computeScores`, which still
-      // needs it — and is deliberately left alone.
+      // **No `birth` is threaded into `onPaceSeries` any more (#346), and the
+      // member's lifetime first row is still read — for the EDGE FLOOR
+      // instead.** Until #346 this passed it as `onPaceSeries`'s `birth`, to
+      // hold the trailing window's leniency shut at an edge that is not the
+      // member's own start. The interval model has no such leniency and
+      // `onPaceSeries` no longer reads `birth` at all; what it has instead is
+      // the shortfall `edgeSafeStart` describes, and a comparison axis is
+      // exactly the shape that suffers it — `dates[0]` is a window the ROUTE
+      // was asked for, so a member alive long before it opens has completions
+      // this walk cannot see, and the days before its first visible block read
+      // as a lapse its own page does not have.
+      //
+      // **That is not a rounding difference, it is a different sentence about
+      // the member** (#346's review round). Measured on a 3x/7 member kept
+      // late-clustered and never missing, `end` fixed, varying ONLY which day
+      // the comparison window opens on across one 7-day cycle: unfloored, four
+      // of the seven opening days gave it a closed lapse, reading
+      // `recoveryRate` 0 — "never recovers" — and 1 on a fifth, against its own
+      // page's `null`, "has never missed". Which of those a user saw depended
+      // on nothing but the phase of a window that slides every day.
+      //
+      // So the runs are clipped exactly as `summaryStats` clips the ones it
+      // DRAWS, through the same `edgeSafeStart`. A lapse confined to the
+      // unreliable head is dropped as the artifact it is; one that extends past
+      // the boundary is real, and is kept — with its true, unclipped length, so
+      // `computeRecovery`'s `length === 1` test still asks about the whole
+      // lapse. The residue `edgeSafeStart` names applies here too: such a
+      // straddling run's length still counts the under-covered days at its
+      // head, which can report a genuinely one-day lapse as longer and so as
+      // unrecovered. Bounded by `den - 1` days, and only a wider fetch removes
+      // it — which is the cost this route exists to avoid.
+      //
+      // `firstEntry` is handed over raw, NOT filtered through `isRealDay` the
+      // way `warmAnchor` a few lines up filters it. Those are different
+      // questions: `warmAnchor` CHOOSES a day to start scoring at, where a
+      // phantom would be a day the habit never lived, and this one merely asks
+      // "could the walk be missing history" — for which both spellings of a
+      // phantom are already `edgeSafeStart`'s stated residue, shared with
+      // `summaryStats` rather than compromised differently here.
+      const memberDen = Math.max(1, Number(habit.freq_denominator) || 1);
       rate = computeRecovery(
-        missRunsFrom(onPaceSeries(habit, entryMap, dates, unlogged, memberCredit)),
+        clipRuns(
+          missRunsFrom(onPaceSeries(habit, entryMap, dates, unlogged, memberCredit)),
+          edgeSafeStart(dates[0], firstEntry, memberDen),
+          end
+        ),
         end
       ).rate;
     }

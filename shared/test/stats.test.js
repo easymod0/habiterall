@@ -2645,11 +2645,26 @@ test('#346: a comparison axis reads the same habit its own page does, with no ' 
   // `start` and has nothing to do with when the member began, so the trailing
   // window's leniency had to be told to stay shut there.
   //
-  // #346 deleted that wiring, and this now pins the property that made it
-  // deletable rather than the wiring itself — a test that pins dead wiring is
-  // the "guard that cannot fail" shape the root CLAUDE.md warns about. The
-  // member's coverage is a function of its own completions, so a comparison
-  // window cannot produce a lapse the member's own page does not have.
+  // #346 deleted that wiring and replaced it with an EDGE FLOOR
+  // (`edgeSafeStart`, shared with `summaryStats`' `runs` clip), because
+  // deleting it outright was wrong: the interval model has its own slice-edge
+  // shortfall, and a comparison axis is exactly the shape that suffers it.
+  //
+  // **The review round that found this found it by varying the fixture's
+  // opening day, so that is what this case does now.** The first version
+  // asserted the property at a single `CAT_START` of `2026-06-01` — which for
+  // this fixture is a completion day, so the axis earned a block on its very
+  // first day and the assertion held for a reason that had nothing to do with
+  // the property. Measured unfloored across one 7-day cycle of opening days,
+  // the same member read:
+  //
+  //     06-01 null/1   06-02 null/1   06-03 0/0   06-04 0/0
+  //     06-05 0/0      06-06 1/0      06-07 null/1
+  //
+  // — four opening days handing a never-missing member a closed lapse, and a
+  // fifth handing it a rate of 1, purely on the phase of a window that slides
+  // every day. A single-start assertion cannot see any of that, so the loop
+  // below is the assertion and the single number is not.
   //
   // The member is 3x/7, alive since a year before the window, and kept
   // LATE-CLUSTERED in each 7-day cycle — never Mon/Wed/Fri, the one layout that
@@ -2665,29 +2680,108 @@ test('#346: a comparison axis reads the same habit its own page does, with no ' 
       status: '' });
   }
 
-  const health = computeCategoryStats(CATS,
-    [{ habit: clustered, entries, firstEntry: lifetime }], CAT_WINDOW).categories[0];
-
   // The member keeps 3 completions in every 7-day cycle, so every block it
-  // earns abuts the next and its coverage is unbroken — it has no lapse, and
-  // is therefore EXCLUDED from the recovery rate as "has never missed" rather
-  // than carried in it at 0. Under the trailing window it read 0 / 0: the
-  // comparison window's own opening edge manufactured a lapse the member's own
-  // page did not have, which is the disagreement `birth` was threaded to
-  // prevent and which is now prevented by construction.
-  assert.equal(health.recoveryRate, null,
-    'no lapse, so no rate — a clustered-but-kept member must not acquire one ' +
-    'from the edge of a window it was merely compared inside');
-  assert.equal(health.recoveryExcluded, 1);
+  // earns abuts the next and its coverage is unbroken: it has no lapse, and is
+  // EXCLUDED from the recovery rate as "has never missed" rather than carried
+  // in it at 0 — from EVERY opening day, not from the lucky ones.
+  for (const start of dateRange(CAT_START, addDays(CAT_START, 6))) {
+    const health = computeCategoryStats(CATS,
+      [{ habit: clustered, entries, firstEntry: lifetime }],
+      { start, end: CAT_END }).categories[0];
+    assert.equal(health.recoveryRate, null,
+      `opening at ${start}: no lapse, so no rate — a clustered-but-kept ` +
+      'member must not acquire one from the edge of a window it was merely ' +
+      'compared inside');
+    assert.equal(health.recoveryExcluded, 1, `opening at ${start}`);
+  }
 
-  // The claim that makes the two numbers above mean something: the member's
-  // OWN page, over its own full history, must say the same. If a comparison
-  // axis could still differ from this, the property is not window-independence.
+  // The claim that makes the loop above mean something: the member's OWN page,
+  // over its own full history, must say the same. Asserted over the whole
+  // lifetime rather than filtered to a date — a filter on `start` drops a run
+  // that BEGINS earlier and reaches into the compared range, which is the one
+  // shape that would make a disagreement invisible here.
   const own = computeMissRuns(clustered,
     new Map(entries.map((e) => [e.date, { value: e.value, status: e.status }])),
     lifetime, CAT_END);
-  assert.deepEqual(own.filter((r) => r.start >= '2026-04-01'), [],
-    'and its own page agrees — no lapse inside the compared range either');
+  assert.deepEqual(own.map((r) => ({ start: r.start, end: r.end })),
+    [{ start: lifetime, end: '2026-04-04' }],
+    'its own page has exactly one lapse, and it closes before the compared ' +
+    'range opens — so every reading above had to be null');
+});
+
+test('#346 review: clipping the axis keeps `open`, so a lapse that is still ' +
+     'running does not join the recovery rate', () => {
+  // `clipRuns` folds miss runs for the axis now, and `missRunsFrom` sets
+  // `open` at the point it knows the answer rather than leaving
+  // `computeRecovery` to infer it from `end` — because skips are transparent,
+  // so a lapse whose final days were SKIPPED stops short of `end` and any such
+  // comparison reads it as closed. A clip that dropped the flag would hand
+  // `computeRecovery` exactly that misreading and put an ONGOING lapse into the
+  // rate, which is the one thing `recoveryRate` promises it never does.
+  //
+  // Mutation-checked: delete the `open` spread in `clipRuns` and the first
+  // assertion below reads 0 instead of null. Nothing else in this file moves,
+  // which is why this case has to exist rather than be assumed covered.
+  const lifetime = '2025-06-01';
+  const clustered = { ...boolHabit, id: 17, name: 'Row', category_id: 1,
+    freq_numerator: 3, freq_denominator: 7 };
+  // Kept to pace until 2026-06-09, then nothing — and the last three days of
+  // the window are skipped, so the open run ENDS on 06-27, not on CAT_END.
+  const upTo = (stop) => {
+    const rows = [{ date: lifetime, value: YES, status: '' }];
+    for (const d of dateRange('2026-04-01', CAT_END)) {
+      if (d >= '2026-06-28') { rows.push({ date: d, value: UNSET, status: 'skip' }); continue; }
+      const kept = daysBetween('2026-04-01', d) % 7 >= 4 && d <= stop;
+      rows.push({ date: d, value: kept ? YES : 0, status: '' });
+    }
+    return rows;
+  };
+
+  const stopped = computeCategoryStats(CATS,
+    [{ habit: clustered, entries: upTo('2026-06-09'), firstEntry: lifetime }],
+    CAT_WINDOW).categories[0];
+  assert.equal(stopped.recoveryRate, null,
+    'the lapse is still running at the window\'s end — it stops short of it ' +
+    'only because the last three days are skips, and being mid-slip is not ' +
+    'a failure to recover');
+  assert.equal(stopped.recoveryExcluded, 1);
+
+  // The contrast that proves the lapse is real and long: let the habit resume
+  // for the last fortnight and the same lapse CLOSES, and is counted at 0.
+  const resumed = upTo(CAT_END).filter((r) => !(r.date > '2026-06-09' && r.date < '2026-06-18'));
+  const back = computeCategoryStats(CATS,
+    [{ habit: clustered, entries: resumed, firstEntry: lifetime }],
+    CAT_WINDOW).categories[0];
+  assert.equal(back.recoveryExcluded, 0, 'a closed lapse is counted');
+  assert.equal(back.recoveryRate, 0, 'and it was longer than a day');
+});
+
+test('#346 review: the comparison axis floor drops the artifact and KEEPS a ' +
+     'lapse that is real', () => {
+  // The other half of the case above, and the one that stops the floor from
+  // being "suppress every lapse near the edge". Same member, same axis, but
+  // the habit genuinely stops for three weeks partway into the window: that
+  // lapse has to survive, or the fix has bought agreement by going blind.
+  const lifetime = '2025-06-01';
+  const clustered = { ...boolHabit, id: 17, name: 'Row', category_id: 1,
+    freq_numerator: 3, freq_denominator: 7 };
+  const entries = [{ date: lifetime, value: YES, status: '' }];
+  for (const d of dateRange('2026-04-01', CAT_END)) {
+    const kept = daysBetween('2026-04-01', d) % 7 >= 4
+      && !(d >= '2026-06-08' && d <= '2026-06-21');
+    entries.push({ date: d, value: kept ? YES : 0, status: '' });
+  }
+
+  for (const start of dateRange(CAT_START, addDays(CAT_START, 6))) {
+    const health = computeCategoryStats(CATS,
+      [{ habit: clustered, entries, firstEntry: lifetime }],
+      { start, end: CAT_END }).categories[0];
+    assert.equal(health.recoveryExcluded, 0,
+      `opening at ${start}: the three-week stop is real and must be counted`);
+    assert.equal(health.recoveryRate, 0,
+      `opening at ${start}: one closed lapse, longer than a day, not recovered ` +
+      'from in a day — a rate of 0 rather than "never missed"');
+  }
 });
 
 test('a category of one is its own best and worst member', () => {
@@ -4202,21 +4296,33 @@ test('computeStats and summaryStats each build the shared `dates` array with exa
 });
 
 test('pass invocations counted at the boundary — a counting `freq_denominator` getter', () => {
-  // `habit.freq_denominator` is read at exactly two sites in stats.js — once
-  // per `computeScores`/`scoresOver` call and once per `onPaceSeries` call —
-  // and nowhere else in the file, in awards.js or in summary-cache.js. A
-  // counting getter therefore counts PASS INVOCATIONS exactly, insensitive to
-  // every per-day internal.
+  // `habit.freq_denominator` is read at two PASS sites in stats.js — once per
+  // `computeScores`/`scoresOver` call and once per `onPaceSeries` call — and
+  // nowhere else in the file, in awards.js or in summary-cache.js. A counting
+  // getter therefore counts PASS INVOCATIONS exactly, insensitive to every
+  // per-day internal.
   //
-  // **There is a THIRD site since #247 and it is deliberately unreachable from
-  // here: `summaryStats`' slice-edge guard, which reads the denominator only
-  // when the caller asked for `runs`.** No call below passes that option, so
-  // every count here is still one-read-per-pass. That is the whole reason the
-  // read sits inside the `if (runsWindow)` branch rather than beside the other
-  // locals — hoisted out, it would add one to every `summaryStats` row in this
-  // test and the instrument would stop measuring what it claims. If a case
-  // asking for `runs` is ever added here, it expects `2 + 1` and the comment
-  // above it has to say which of the three the extra read is.
+  // **Two further sites exist and neither is reachable from the two calls
+  // below, for two DIFFERENT reasons — which is why each is named rather than
+  // lumped together as "not counted".**
+  //
+  //   - `summaryStats`' slice-edge floor (#247) reads the denominator only when
+  //     the caller asked for `runs`, and no call below passes that option. That
+  //     is the whole reason the read sits inside the `if (runsWindow)` branch
+  //     rather than beside the other locals — hoisted out, it would add one to
+  //     every `summaryStats` row in this test and the instrument would stop
+  //     measuring what it claims. If a case asking for `runs` is ever added
+  //     here, it expects `2 + 1`.
+  //   - `computeCategoryStats`' own edge floor (#346's review round) is
+  //     unreachable because this test never calls that entry point at all. It
+  //     is NOT inside a branch and does not need to be: a category comparison
+  //     has no call shape this guard measures. If a `computeCategoryStats` case
+  //     is ever added here, it reads the denominator once per member per
+  //     recovery axis ON TOP of that member's own two passes.
+  //
+  // Both are listed because an empty offender list means nothing until the
+  // denominator is known — the root CLAUDE.md's rule about what a guard must
+  // print, applied to the guard's own comment.
   //
   // On master, `computeStats` built the on-pace series TWICE — once via the
   // exported `computeStreaks`, once via `computeResilience`'s

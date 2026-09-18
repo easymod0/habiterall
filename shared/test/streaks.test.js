@@ -681,19 +681,36 @@ test('#247 case 6: a slice that opens AFTER the habit\'s birth draws no run in '
   assert.equal(stats.runs.length, 1,
     'ONE run, not a fragment and a hole — the slice edge must not split a run '
     + 'the habit\'s own page reports unbroken');
-  assert.ok(stats.runs[0].start >= day(407),
-    `nothing may be drawn before the first day with a full trailing window `
-    + `(day 401 + 7 - 1 = day 407); got ${stats.runs[0].start} vs ${day(407)}`);
+  // **An EQUALITY, and the day is 408 rather than 407** (#346's review round).
+  // This read `>= day(407)`, and both halves of that were wrong: `>=` cannot
+  // tell the floor from a floor one day short, and the arithmetic behind 407
+  // assumed `from` is the slice's nominal first day. It is not — `summaryStats`
+  // takes no `start` here, so `resolveWindow` derives `from` from the EARLIEST
+  // ENTRY in the slice, and day 401 carries no entry (`401 % 7 === 2`, where
+  // this fixture logs on 1, 3 and 5). `from` is day 402, so the floor is
+  // 402 + 7 - 1 = day 408. Pinned exactly, because a boundary asserted with an
+  // inequality is a boundary that moves without telling anyone.
+  assert.equal(stats.runs[0].start, day(408),
+    `nothing may be drawn before the first trustworthy day — the slice's own `
+    + `earliest ENTRY (day 402) + 7 - 1; got ${stats.runs[0].start}`);
 
   // The other half, and the one that stops the guard being "return []": a slice
-  // that DID open at the habit's birth keeps its early days, because there the
-  // leniency is #340's own and the verdict is right.
+  // that DID open at the habit's birth keeps its early days, because it has no
+  // missing history to be wrong about.
+  //
+  // **Asserted as an EQUALITY on the birth day, and that is the whole point of
+  // the case** (#346's review round). It read `some((r) => r.start <= day(7))`,
+  // which is satisfied by `day(7)` itself — exactly the value an unconditional
+  // `addDays(from, den - 1)` produces — so deleting the `birth` gate from
+  // `edgeSafeStart` left the entire suite green. The habit's first three
+  // completions are days 1, 3 and 5, a span of 5 inside 7, so the block they
+  // earn opens on day 1 and the run must start THERE.
   const fromBirth = summaryStats(thrice, all, {
     end, birth, runs: { start: day(1), end: day(20) },
   });
-  assert.ok(fromBirth.runs.some((r) => r.start <= day(7)),
-    'a range opening at the birth is not suppressed — it has no missing '
-    + 'history to be wrong about');
+  assert.equal(fromBirth.runs[0].start, day(1),
+    'a range opening at the birth is not floored at all — not floored to the '
+    + 'same day the floor would have chosen');
 });
 
 test('#247 case 5: a window INSIDE a run is clipped at both ends, and the ' +
@@ -827,12 +844,25 @@ test('#346: coverage does not depend on where the caller opened its range', () =
   // And the boundary that is REAL, asserted rather than left to look like the
   // same thing failing: a range opening ON the day cannot see the completions
   // whose block would cover it, so the first `den - 1` days of any bounded
-  // slice are under-covered. That is why `summaryStats` floors its `runs`
-  // window at `from + (den - 1)` (#247) instead of trusting this.
+  // slice are under-covered. That is what `edgeSafeStart` floors, for
+  // `summaryStats`' `runs` (#247) and for `computeCategoryStats`' recovery
+  // axis (#346's review round).
   assert.equal(holds('2026-03-20', '2026-03-20'), false,
     'the slice-edge shortfall is a known bound, not window-dependence — ' +
     'widening this assertion to `true` would be claiming the model sees ' +
     'rows the caller never fetched');
-  assert.equal(holds('2026-03-13', '2026-03-20'), true,
-    'and it is exactly `den - 1` wide: seven days of lead-in is enough');
+
+  // `den - 1` days of lead-in is SUFFICIENT, and that is the whole claim — it
+  // is not the tight boundary for this fixture and an earlier version of this
+  // comment said it was. Measured here, `2026-03-16` (four days of lead-in)
+  // already holds, because where the shortfall actually ends depends on where
+  // this habit's completions fall and not on `den` alone. `edgeSafeStart` is
+  // the SAFE bound rather than the tight one for exactly that reason: it is
+  // the only one derivable without reading the rows a bounded caller does not
+  // have. So assert sufficiency at `den - 1` and insufficiency at 0, and claim
+  // nothing in between.
+  assert.equal(holds(addDays('2026-03-20', -(7 - 1)), '2026-03-20'), true,
+    '`den - 1` days of lead-in is always enough — the literal is derived from ' +
+    'the habit\'s own denominator so a frequency change cannot leave this ' +
+    'asserting a span that no longer means anything');
 });
