@@ -616,3 +616,25 @@ test('#247 case 4: a caller that passes no `runs` option gets no key at all', ()
   assert.equal('runs' in stats, false,
     'absent, not `undefined` and not `[]` — the same convention `lastMiss` sets');
 });
+
+// Cases 1-3 all ask for a window ending at `runsEnd`, so no run of theirs ever
+// runs PAST the window's far end and `clipRuns`' right-hand clip is never
+// exercised: delete `end: streak.end > to ? to : streak.end` and all four pass.
+// That branch is what a PAGED-BACK dashboard reaches on every load — the grid's
+// `end` is then strictly inside a run that continues to today — so it is not an
+// edge case, it is the ordinary paged request, and only the two editions'
+// integration suites were holding it. A window with run B open at BOTH ends is
+// what pins both clips at once.
+test('#247 case 5: a window INSIDE a run is clipped at both ends, and the ' +
+     'length is still the run\'s own', () => {
+  const inside = { start: runsDay(20), end: runsDay(30) };
+  const stats = summaryStats(boolHabit, runsEntries, { end: runsEnd, runs: inside });
+  assert.equal(stats.runs.length, 1,
+    'only run B (days 11-50) spans this window; A ended at 5 and C starts at 53');
+  assert.equal(stats.runs[0].start, runsDay(20), 'clipped UP to the window start');
+  assert.equal(stats.runs[0].end, runsDay(30), 'clipped DOWN to the window end');
+  assert.equal(stats.runs[0].length, 40,
+    'still the whole run — 11 days of it are visible and 40 is what a client '
+    + 'gates on, so an 11 here is a run that would survive MIN_STREAK anyway '
+    + 'and tells you nothing; the mutation to watch is case 1\'s');
+});

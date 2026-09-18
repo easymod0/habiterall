@@ -268,11 +268,13 @@ function paintCheckbox(
  * @param {string} todayIso
  * @param {Set<string>} [inRun]  dates inside a run of `MIN_STREAK`+ days
  *   (`charts.js`'s `streakDates`), for the same faint tick the calendar's
- *   connector stroke draws. Defaults to an empty set, which is what leaves
- *   `ui/dashboard.js` — the OTHER caller of this function — undrawing nothing:
- *   the dashboard strip is deliberately out of scope for #176 (see
- *   `shared/public/CLAUDE.md`), and passing no set is how that stays true
- *   without a second code path here.
+ *   connector stroke draws. **Both callers pass one now** — `ui/detail.js`
+ *   from `stats.streaks` (#176) and `ui/dashboard.js` from the `runs` field
+ *   `/overview` ships (#247) — so the empty default is for a caller that has
+ *   no run set to give rather than for a surface deliberately abstaining.
+ *   Until #247 it was the latter, and this paragraph said so; a reader
+ *   arriving here for the Android half (still open) would otherwise get the
+ *   opposite of what `shared/public/CLAUDE.md` now says.
  * @returns {HTMLElement} a `.checks` element
  */
 export function dayCells(host, habit, dates, todayIso, inRun = new Set()) {
@@ -393,8 +395,11 @@ export function dateColumns(dates, todayIso) {
  * @param {ParentNode} root  the element the cells were appended under
  * @param {StripHost} host
  * @param {any} habit
- * @param {Set<string>} [inRun]  same as `dayCells`'; defaults to an empty set
- *   for the same reason — `ui/dashboard.js` calls this too and passes none.
+ * @param {Set<string>} [inRun]  same as `dayCells`'. The default is reached by
+ *   NOBODY: `ui/detail.js:461` is the only call site in the app and it passes
+ *   `stripRuns`. It said "`ui/dashboard.js` calls this too and passes none",
+ *   which contradicted the paragraph three lines above it and was never true —
+ *   the dashboard repaints through a whole `paint()`.
  */
 export function repaintCells(root, host, habit, inRun = new Set()) {
   const showUnknown = settings.get('questionMarks');
