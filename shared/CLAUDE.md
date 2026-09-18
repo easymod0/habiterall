@@ -209,280 +209,91 @@ and 60 so it cannot drift back.
 **Every date range is clamped**, and `computeStats` starts at
 `from = start ?? firstEntry`, clamped to `MAX_RANGE_DAYS` (`end - 3660`).
 `resolveWindow` answers a **second** date beside it — `creditFrom`, the same
-expression over the earliest row that STATES a value — which every pass reading
-`unlogged` is handed so that an unanswered day counts as success only once the
-habit has answered once (#223). A route that computes a pass ITSELF, or that
+expression over the earliest row that STATES a value — which every pass
+reading `unlogged` is handed, so an unanswered day counts as success only once
+the habit has answered once (#223). A route that computes a pass ITSELF, or
 hands `summaryStats` a bounded SLICE — both editions' `/overview` does both —
 must ask `creditAnchor` with the habit's LIFETIME first answer out of SQL, and
-must hand the one date to every figure on the row: whether a habit has ever
-answered is not a question a 400- or an 1830-day window can answer, and two
-windows deriving it separately disagree exactly when the answer falls between
-them.
-That window is derived inside `computeStats` and never returned, which is why anything
-needing a figure from it gets a returned field rather than walking the entries
-again — `computeRecovery` answers `longest` and `lastEnd` for that reason. Every
-aggregation in `stats.js` already uses `boundedRange`; keep it that way, because
-the unbounded `dateRange` on a distant-past entry turns one request into
+hand the one date to every figure on the row: whether a habit has ever answered
+is not a question a 400- or an 1830-day window can answer, and two windows
+deriving it separately disagree exactly when the answer falls between them.
+
+That window is derived inside `computeStats` and never returned, which is why
+anything needing a figure from it gets a returned field rather than walking the
+entries again — `computeRecovery` answers `longest` and `lastEnd` for that
+reason. Every aggregation here uses `boundedRange`; keep it that way, because
+an unbounded `dateRange` on a distant-past entry turns one request into
 ~700,000 iterations on a single-threaded server.
 
 **`boundedRange`'s clamp compares two `Date`s, and that is the one comparison
-in this file that is deliberately not lexical.** It was
-`start < earliest`, and a phantom `start` can sort one side of that boundary
-while landing on the other: `2017-00-05` is lexically ABOVE an `earliest` of
-`2016-12-11` (2017 > 2016) while month 00 rolls back into the previous
-December, so the walk opened six days early and the range came back **3667**
-days — the cap escaped on exactly the input class the function's JSDoc tells a
-caller reading a start out of STORAGE to rely on it for. It is the argument and
-not the output that cannot be trusted, which is the same reasoning
-`dateRange`'s past-end trim already carries about `end`. Not reachable through
-a route today (`assertDate` guards route dates, `isRealDay`/`earliestRealDay`
-guard all six stored anchors — #270), and the overrun was ~one month at worst
-because month 13 rolls the other way; the guarantee is what was broken.
-The two DATES are compared, and neither their spellings nor the elapsed SPAN
-between them — both of those were written first and each is wrong, which is why
-they are named here rather than left to be re-derived. Comparing against a
-RE-PARSED `earliest` fails because `earliest` is a string this file spelled and
-`fromISO` cannot read every one of them back: an `end` of `0100-03-05` (year
-0100 is `assertDate`'s floor) puts the boundary in year 0090, which parses as
-**1990**, and clamping through it answered `[]` for nine ordinary year-0100
-ranges. Comparing the elapsed span against the cap fails for a subtler reason
-and only a zone finds it: `daysBetween` counts elapsed 24-hour spans while
-`setDate` takes CALENDAR steps, so under `Pacific/Apia`, which deleted
-2011-12-30 outright, 3,660 calendar steps back from 2020-02-29 land on
-2010-02-21 while the elapsed distance to 2010-02-20 is exactly −3,660 — the
-span test keeps a start the calendar boundary clamps. The whole of
-`stats.test.js` passes under that version; `test/timezones.test.js`, which
-re-runs the literals in a child process under a fixed `TZ`, is the only thing
-that catches it. So the boundary is built by the same calendar walk it always
-was, kept as a `Date`, and spelled only on the branch that returns it.
-Clamping a phantom start is not REFUSING one — where a window may open stays
-the caller's question, which is #303.
+in this file that is deliberately not lexical.** It was `start < earliest`, and
+a phantom `start` can sort one side of that boundary while landing on the
+other. The two DATES are compared — not their spellings, and not the elapsed
+SPAN between them. Both of those were written first and each is wrong: a
+re-parsed `earliest` cannot be read back for every spelling this file produces,
+and `daysBetween` counts elapsed 24-hour spans while `setDate` takes CALENDAR
+steps, which part company in a zone that deleted a day. Both failures are in
+full in `docs/decisions/phantom-dates.md`.
 
-**`dateRange` walks one local-time `Date` with `setDate`, never an epoch
-integer.** It used to re-derive every day from a string — two `fromISO` calls
-and a `toISO` per element — measured at 92% of `computeScores`' total time;
-advancing a single `Date` instead is the same ~8x cheaper on every aggregation
-in this file, since all of them go through `boundedRange`. The obvious faster
-rewrite, `t += 86400000`, is wrong: it repeats `2026-11-01` under
-`America/New_York`'s fall-back transition, because that calendar day is 25
-hours long and an epoch walk cannot see the extra hour. The literals in
-`test/stats.test.js` hold in this repo's own zone under *either* walk, which is
-exactly why `test/timezones.test.js` exists — it sweeps both `stats.test.js`
-and `streaks.test.js` under fixed `TZ`s in a child process, because `TZ` is
-read once at process start and nothing short of a fresh process observes a
-changed one.
-
-**The `Date` cannot leave that loop, and what is left to save is the STRINGS.**
-Stepping the calendar arithmetically instead — increment the day, roll over on
-a days-in-month table — needs no `Date` at all and is faster again. It is wrong
-the same way the epoch walk is: it knows the calendar but not which of its days
-a zone actually LIVED. Under `Pacific/Apia`, which deleted 2011-12-30 outright,
-it emits a day no entry can be keyed by and then ends the range a day SHORT of
-`end`. `test/timezones.test.js` pins both that deletion and `Pacific/Kwajalein`
-repeating a day, which is what makes this checkable rather than a story. So the
-walk keeps `setDate` and spends its remaining effort on formatting: the
-`'YYYY-MM-'` prefix is rebuilt on a rollover rather than per day, and the two
-digit fields are a lookup rather than a `String()` plus a `padStart`. Measured
-at **1.28x on `boundedRange`** and ~8% of a whole `/overview` per-habit cost.
-That makes `dateRange` the one place in the file that spells a date without
-calling `toISO`, so a test compares every element against `toISO` directly —
-every other assertion in that suite is a literal and would pin the wrong half.
-
-**Building the list is one walk now, not eight, and building `onPaceSeries` is
-one build, not two (#219).** One `computeStats` call used to call
-`boundedRange` on the identical window eight times — once each in
-`computeScores`, `computeHistory`, `computeWeekdays`, `computeWeekdayByMonth`,
-`computeFrequency` and `computeCoverage`, and once per `onPaceSeries`, which
-`computeStreaks` and `computeMissRuns` each built separately — and built
-`onPaceSeries` itself twice for exactly that reason. `/habits/:id/stats`, the
-only route left calling `computeStats`, paid for all eight walks every time,
-`coverage` defaulting to **true** there. `summaryStats`, what `/overview` calls
-instead, walked the window twice for the same reason (`computeScores` and
-`computeStreaks`'s `onPaceSeries`). Both now walk once and build the series
-once, and `computeCategoryStats` now shares its own bucket-axis walk with the
-`computeMissRuns` call it runs per member — its per-member `computeScores` call
-keeps its own walk on purpose, because that one runs over a different,
-per-member warm-up window and sharing it would change scores.
-
-The shape is module-private `*Over(dates)` cores behind exported wrappers whose
-signatures did **not** change: `computeStats` / `summaryStats` /
-`computeCategoryStats` each build one clamped `dates = boundedRange(from, end)`
-and hand it to every core that needs it, while every exported pass — still
-called the old way by `summary-cache.js` and every test — builds its own
-`dates` and delegates to its core, unchanged in behaviour. This was chosen over
-a memo or a cache: `dateRange` trims its own array during the past-end walk, so
-a memo handing one retained array to many callers across calls is a hazard, and
-a cache is #191's eviction question, which this change does not re-open. The
-reason the cores are private is the one a future reader most needs: not being
-exported, and taking no optional `dates` parameter, means nothing outside
-`stats.js` can hand a pass an unclamped range — the `boundedRange` clamp stays
-reachable only through the wrappers and through the three entry points
-themselves, which is what makes it structurally inescapable rather than merely
-followed by convention.
-
-Measured on the same 1,464-row fixture, before -> after: `computeStats`
-(`coverage: true`, the `/habits/:id/stats` shape) 1.77 -> 1.20 ms/habit (-32%);
-`computeStats` (`coverage: false`) 1.65 -> 1.16 ms/habit (-30%); `summaryStats`
-(the `/overview` shape) 0.30 -> 0.22 ms/habit (-27%); `boundedRange` walks per
-`computeStats(coverage: true)` call, 8 -> 1; `onPaceSeries` builds per
-`computeStats` call, 2 -> 1.
-
-**One thing changed meaning with that rewrite, deliberately: the FIRST
-element.** The old walk pushed the string it was handed before normalising
-anything, so element 0 was the raw `start` and every later element was
-`toISO`'d. The two differ exactly when `toISO(fromISO(start)) !== start`, which
-is a date that is not a real day — `dateRange('2026-02-30', …)` opened on
-2026-02-30 and then skipped 2026-03-02, the real day the rollover lands on.
-A year before 1000 used to be a second case, because `toISO` dropped the
-padding and the old list was internally inconsistent — `0100-02-25` followed
-by `100-02-26`; both `toISO` and `dateRange`'s own prefix pad the year to four
-digits now. Building the `Date` up front means every element is normalised, so
-the list is a contiguous run of days that happened, spelled one way.
+**`dateRange` walks one local-time `Date` with `setDate`** — never an epoch
+integer, and never an arithmetic day-and-rollover step. Both are faster and
+both are wrong: an epoch walk repeats a 25-hour DST day, and an arithmetic one
+knows the calendar but not which of its days a zone actually LIVED.
+`test/timezones.test.js` is the only thing that catches either, because it
+re-runs the suites under fixed `TZ`s in a child process.
+`docs/decisions/runtime.md` has the measurements, the two refused rewrites, and #219's
+eight-walks-to-one rewrite — whose lasting rule is that the `*Over(dates)`
+cores are module-private, so nothing outside `stats.js` can hand a pass an
+unclamped range.
 
 **A date is a real day spelled `YYYY-MM-DD`, and the padding is not
-cosmetic.** The whole stats model compares dates as strings — `from <= date <=
-end`, `windowStart`'s `from < earliest` clamp — which is correct and cheap
-only while every date has four year digits, two month digits and two day
-digits. `999-12-31` sorts ABOVE `2016-…`, so a day a thousand years in the past
-reads as one in the future to every comparison in the file. `toISO` pads all
-three fields, and `dateRange` — the one place in `stats.js` that spells a date
-without calling `toISO` — pads the year on its cached `'YYYY-MM-'` prefix, not
-per element, so the walk costs the same as it did. `test/stats.test.js` pins
-both, in literals rather than against a second implementation, and in the days
-themselves rather than in a LENGTH: `String(-1).padStart(4, '0')` is `'00-1'`,
-so `'00-1-01-01'` is ten characters and not a date, and a guard a malformed
-value satisfies is weaker than it reads. `toISO`'s domain is years 1-9999 and
-its JSDoc says so.
-
-**There is a third site and it is in the browser: `iso()` in
-`public/ui/dates.js`.** It is the source of `todayISO()` and `addDaysISO()`,
-and `ui/dashboard.js` compares its output against server dates lexically, so
-the same rule holds there and it pads the year too (`test/dates.test.js`). No
-client can reach a year before 1000 — `todayISO()` is the device clock — so
-that one is unreachability being made into canonicality, which is what stops
-the property depending on who calls it.
-
-Only the first of those is reachable through the app: `boundedRange` clamps a
-low-year start long before `dateRange` sees it, while a phantom date survives
-the clamp. `assertDate` refuses one at every write path, so it takes a row
-predating that guard, a direct insert or an import that went around it — and
-it matters because `computeStats` takes `from` as the earliest STORED entry
-when a caller names no window. An account holding such a row sees its derived
-figures move once. That is the phantom day leaving them, not a regression.
+cosmetic.** The whole stats model compares dates as strings, which is correct
+and cheap only while every date has four year digits, two month digits and two
+day digits — `999-12-31` sorts ABOVE `2016-…`. `toISO` pads all three, and
+`dateRange`, the one place here that spells a date without calling it, pads the
+year on its cached prefix. `test/stats.test.js` pins this in literals and in
+the days themselves rather than in a LENGTH, since `String(-1).padStart(4,'0')`
+is `'00-1'` — ten characters, and not a date. **There is a third site and it is
+in the browser**: `iso()` in `public/ui/dates.js`, source of `todayISO()`, whose
+output `ui/dashboard.js` compares against server dates lexically.
 
 **Every route that takes a date into a RANGE calls `assertDate`, and one route
 deliberately does not.** `DATE_RE` is a shape and nothing more, so it admits
-`2026-00-10` and `2026-02-30` — and a route that takes one of those into the
-window arithmetic gets two answers to one question, because `fromISO` ROLLS the
-bad component over while `totalCompleted` compares the raw string. `queryDate`
-(`src/validate.js`) is the one guard for that: absence returns the caller's
-fallback, everything else goes through `assertDate`, and a non-string — a
-REPEATED query parameter is an array — is turned into `''` rather than
-string-coerced. That last clause is a rule stated, not a bug patched, and the
-JSDoc there says which: under Express 5's default `simple` parser a repeated
-`end` is always a two-or-more-element array, so it carries a comma and
-`DATE_RE` refuses it either way. It is the `extended` parser, which can produce
-a ONE-element array, where the coercion yields a valid-looking date and
-`assertDate` then calls `.split` on an array — a 500. Neither edition sets that
-parser; the guard is what makes it not matter if one ever does.
-Three routes and five parameters, in each of the two editions: `end` and
-`start` on `GET /habits/:id/stats` and on `GET /categories/stats`, and `end` on
-`GET /overview`. The exception is
-`DELETE /habits/:id/entries/:date`, which stays on `DATE_RE` — its date keys a
-single row and reaches no range, no comparison and no computed figure, and rows
-filed under a day that does not exist are exactly what the paragraph above says
-are out there, so `assertDate` on that path would make one permanently
-undeletable through the API. `habiterall-personal/test/querydate.integration.mjs`
-and the matching block in `habiterall-cloud/test/api.integration.mjs` pin it,
-at the routes, because nothing here can say which validator a route reached
-for. What those two do NOT pin is the `typeof` clause: a repeated `end` is a
-400 without it, on the comma, and both suites say so where they used to credit
-the guard. The clause is pinned in `shared/test/validate.test.js` instead,
-since no route as configured can be pointed at the one-element array it exists
-for.
+`2026-00-10` and `2026-02-30` — and a route taking one into window arithmetic
+gets two answers to one question, because `fromISO` ROLLS the bad component
+over while `totalCompleted` compares the raw string. `queryDate`
+(`src/validate.js`) is the one guard: absence returns the caller's fallback,
+everything else goes through `assertDate`, and a non-string — a REPEATED query
+parameter is an array — becomes `''` rather than being string-coerced. Three
+routes and five parameters per edition. The exception is
+`DELETE /habits/:id/entries/:date`, which stays on `DATE_RE`: its date keys a
+single row and reaches no range, and rows filed under a day that does not exist
+are exactly what `assertDate` there would make permanently undeletable.
 
-`computeStats` therefore normalises `from`, and that half is not optional:
-`totalCompleted` selects by STRING comparison against `from` while every other
-figure is read off the walked list, so an un-normalised `from` counts the
-phantom row in one figure and in none of the others — exactly the disagreement
-the note above `totalCompleted` says was fixed.
+**`computeStats` normalises `from` AFTER the two clamps, never before.**
+Normalising is a ROLLOVER of a string out of storage, and a rollover moves the
+date by an amount nothing in `resolveWindow` bounds: `9999-99-99` lands in year
+10007, which sorts BELOW `2026-…`. Normalised first it clamps to `earliest`, so
+one junk row opens the widest window `MAX_RANGE_DAYS` allows on every request;
+clamped first it is `end`. Same ordering, same reason, in
+`computeCategoryStats`' `memberWarm`. It is not optional that it normalises at
+all: `totalCompleted` selects by STRING comparison against `from` while every
+other figure is read off the walked list.
 
-**It normalises AFTER the two clamps, never before, and the ordering is still
-load bearing even though #270 is fixed.** Normalising is a ROLLOVER of a string
-that came out of storage, and a rollover moves the date by an amount nothing in
-`resolveWindow` bounds: `9999-99-99` lands in year 10007, five digits, which
-sorts BELOW `2026-…` however the year is padded. Normalised first it clamps to
-`earliest`, so one junk row opens the widest window `MAX_RANGE_DAYS` allows on
-every request for a habit that has none of those days; clamped first it is
-`end`. The same ordering, for the same reason, in `computeCategoryStats`'
-`memberWarm`, where that five-digit year would otherwise compare as OLDER than
-`warmStart` and score a member over a warm-up it never had. `windowStart`'s
-`creditAnchor` tests in `shared/test/stats.test.js` still exercise both
-orderings directly, even though `creditAnchor` itself now refuses a non-real
-`anchor` before ever calling `windowStart` (a review round found it had not,
-and #223's own fail-open direction was reachable through it — see
-`docs/decisions/phantom-dates.md`): the ordering is pinned there rather than
-against a live caller, because `windowStart` is a general-purpose function and
-is also reached with a caller-NAMED `start`, which nothing in this file itself
-asserts is a real day.
-
-**#270 is now two rules, not one: a phantom cannot be CHOSEN as an anchor, and
+**#270 is two rules, not one: a phantom cannot be CHOSEN as an anchor, and
 `windowStart` re-clamps as a backstop for one that arrives anyway.** A date
-that is not the canonical spelling of a real day (`isRealDay`, beside
-`addDays`) is not a day the habit lived, so it can never be picked as the
-earliest entry — `resolveWindow`'s `firstEntry` loop and `firstStatedAnswer`
-both skip it via `earliestRealDay`, the same way a `skip` row is skipped, for a
-different reason: a skip states nothing, a phantom is not a day that could
-state anything. The junk row stays in storage and in `entryMap` — nothing here
-deletes it or hides it from a per-day lookup — it is simply never emitted by a
-range walk. `windowStart` still re-applies both clamps AFTER the reformat as a
-backstop: `2026-07-99` sorts below an `end` of `2026-08-18`, normalises to
-`2026-10-07`, and without the re-clamp `boundedRange` would answer `[]` —
-every figure zero for a habit with a live nine-day streak.
-
-**A raw `MIN(date)` route read no longer reaches `windowStart` unfiltered
-through any caller, `creditAnchor` included.** A route's own credit-date read
-(`MIN(date) FILTER (WHERE status <> 'skip')`) is exactly as phantom-capable as
-the plain `MIN(date)` that feeds `firstEntry`/`warmAnchor`, and a first
-version of this fix left `creditAnchor` filtering nothing — a phantom CREDIT
-date normalises *inside* `[earliest, end]` far more often than it rolls out of
-it, so the re-clamp above mostly did not catch it, and `/overview`'s own score
-disagreed with the habit's own page for the identical rows (#223's fail-open
-direction, arriving through #270's own fix). `creditAnchor` now refuses a
-non-real `firstAnswer` itself, the same way `firstStatedAnswer` (the derived
-path) and `computeCategoryStats`'s supplied `firstAnswer` already do. The
-category routes hand `computeCategoryStats` that same raw `MIN(date)` read
-too, as `firstEntry` and `firstAnswer` — it does reach that function, it is
-not routed around it — where `warmAnchor` and the credit anchor beside it
-filter both through `isRealDay` before either ever calls `windowStart`, so
-neither lands there raw from inside it. See `docs/decisions/phantom-dates.md`
-for the measured before/after and why `2026-02-30` moving too (170 → 9 history
-entries) is correct rather than collateral.
-
-The year padding closed the same trap one step earlier, and it was LATENT
-rather than live — say it that way round, because the difference is the whole
-of what a reader can check. `toISO` used to pad the month and the day and not
-the year, so normalising `0999-12-31` yielded `999-12-31` — ABOVE `2016-…`,
-and above the `earliest` clamp `MAX_RANGE_DAYS` is enforced by. What stopped
-that being a wrong figure is the ordering above: `from` has already been
-clamped to `earliest` by the time anything reformats it, and
-`toISO(fromISO('2016-08-10'))` is a no-op under both spellings. Measured, by
-reverting the padding on the fixed tree: the year-0999 test in
-`test/stats.test.js` still passes and only the canonical-spelling literals
-fail. So no account's figures moved, and the padding is worth having for what
-it stops being true — invert that ordering, or normalise an unclamped stored
-date anywhere else (`assertDate` accepts `0999-12-31`, 999 being a real year
-that does not roll over where `0050` does), and an unpadded year is a payload
-collapsed to a single day with nothing findable behind it.
-
-**And `n` counts elapsed 24-hour spans while the loop takes calendar steps**,
-which agree everywhere except a zone that moved the date line WESTWARD and so
-lived one local calendar day twice — `Pacific/Kwajalein` in 1969. There the
-loop takes a step the elapsed count never saw and ends a day past `end`, so
-the walk trims anything beyond it. A DELETED day needs no counterpart: the
-elapsed count shrinks along with the calendar, which is why Apia round-trips
-untouched. Both cases are pinned in `test/timezones.test.js`, under their own
-zones, because neither is observable from anywhere else.
+that is not the canonical spelling of a real day (`isRealDay`) is not a day the
+habit lived, so `resolveWindow`'s `firstEntry` loop and `firstStatedAnswer`
+both skip it via `earliestRealDay` — the row stays in storage and in
+`entryMap`, it is simply never emitted by a range walk. `creditAnchor` refuses
+a non-real `firstAnswer` itself, because a route's own `MIN(date) FILTER (WHERE
+status <> 'skip')` read is exactly as phantom-capable as the plain `MIN(date)`
+that feeds `firstEntry`, and a phantom CREDIT date normalises *inside* the
+window far more often than it rolls out of it — so the re-clamp mostly did not
+catch it and `/overview`'s score disagreed with the habit's own page for
+identical rows. `docs/decisions/phantom-dates.md` has the measured
+before/after, the year-padding trap that closed the same hole one step earlier,
+and why `2026-02-30` moving too is correct rather than collateral.
 
 **`onPaceSeries` pro-rates the requirement near the start, but only at a
 habit's own BIRTH** —
@@ -1146,61 +957,29 @@ habits have no entries exported a lone header line and restored as
 the other file, were parsed and thrown away. `parseZipExport` unions the two
 now, which also covers a habit named in one file and not the other.
 
-**`parseUpload` answers `{habits, categories}` from one `unzip`, not two
-(#282).** `parseZipExport`'s zip branch already inflated every member to reach
-`Checkmarks.csv`/`Habits.csv`; it now reads `Categories.csv` out of that same
-pass instead of a route calling `backupCategories(buf)` afterwards on the
-identical buffer. `backupCategories` remains the buffer-only reader — a caller
-holding nothing but bytes still has one function to ask, and a zip handed to
-it directly still pays its own inflate — but neither route reaches it for a
-zip any more. The per-request inflate ceiling on the zip path drops from two
-`MAX_TOTAL_BYTES` to one — 128 MiB to 64 MiB — and members considered from
-1,024 (2 × `MAX_ENTRIES`) to 512; the per-member ceiling stays `MAX_ENTRY_BYTES`
-(32 MiB), untouched either way. Peak resident decompressed bytes is unchanged,
-because the two passes never overlapped — each `files` Map was already garbage
-once its caller returned. This is a CPU-cost fix, not a new cap: every bound
-that held on both passes before holds on the one pass now.
+**`parseUpload` answers `{habits, categories}` from one `unzip`, not two**
+(#282). The zip branch already inflated every member, so it reads
+`Categories.csv` out of that same pass rather than a route calling
+`backupCategories(buf)` afterwards on the identical buffer; `backupCategories`
+remains the buffer-only reader for a caller holding nothing but bytes. The
+per-request inflate ceiling on the zip path halves, 128 MiB to 64 MiB. **A CPU
+fix, not a new cap** — every bound that held on both passes holds on the one.
 
-**One input class got DEARER, and a perf change has to say which.** The
-categories are now read inside `parseUpload`, so they are parsed BEFORE the
-route's `no habits found in the uploaded file` 400 — where the second call used
-to sit after it. A zip whose `Checkmarks.csv` is a bare `Date\n` and whose
-`Categories.csv` is enormous therefore 400s having done that work, where the
-old ordering answered in 3 ms without ever reaching it. The per-request
-CEILING still went down rather than up — the same attacker buys strictly more
-work on the old ordering by adding one column to `Checkmarks.csv`, which makes
-it do two inflates AND the same category parse — so this is a cost moved onto a
-request that answers 400, not a bound weakened.
+**And the cap bounds what the category reader BUILDS, not only what it
+RETURNS.** Reading a `Categories.csv` used to materialise every row three times
+before slicing to `LIMITS.categories`, so thirty rows cost a file's worth of
+memory. `forEachCsvRow` hands each row to a callback instead of pushing it onto
+an array, and `categoryCollector` keeps at most the cap while still COUNTING
+every named row — the count must keep going past the thirtieth, because
+`overCapSkip`'s sentence names the total in the whole file. A per-row bound is
+the rule `MAX_PARSE_HABITS` and `MAX_PARSE_ENTRIES` already follow.
 
-**The cap bounds what the category reader RETURNS, and it now bounds what the
-reader BUILDS too.** It did not before, in any version of this file: reading a
-`Categories.csv` materialised every row three times — `parseCSV`'s whole
-`string[][]`, a `.map` into raw objects, a second `.map` + `.filter` — and only
-then ran `.slice(0, LIMITS.categories)`, so thirty rows cost a file's worth of
-memory. `forEachCsvRow` is `parseCSV`'s char loop with the row handed to a
-callback instead of pushed onto an array (`parseCSV` is now a thin collector
-over it, unchanged for its own callers), and `categoryCollector` keeps at most
-`LIMITS.categories` repaired rows while counting every NAMED one — the count
-has to keep going after the thirtieth, because `overCapSkip`'s sentence names
-the exact total in the whole file.
-
-Measured through `parseUpload` on the input above, a 22.9 MiB / 654,990-row
-member: **535 ms and 498 MiB of RSS growth before, 320 ms and 66 MiB after** —
-and the residual is now bounded by `unzip`'s own `MAX_TOTAL_BYTES` (its `files`
-Map, plus the member decoded to text) rather than by how many rows the file
-declares, which is the property that was missing. A per-row bound is the rule
-`MAX_PARSE_HABITS` and `MAX_PARSE_ENTRIES` already follow one section up, for
-the reason stated there: anything materialising the array first has already
-spent the memory.
-
-**This is a HARDENING and not a regression that this change introduced** — the
-triple materialisation is as old as the category reader and cost master the
-same. Do not read it as closing a class: the ceiling is still `MAX_ENTRY_BYTES`
-worth of text arriving as a deflated member, and what changed is the multiple
-on top of it. The blank-row filter that moved into `forEachCsvRow` with the
-split is pinned by its own test in `test/import.test.js`, because when it was
-deleted deliberately to check the split, the entire suite stayed green — every
-`Checkmarks.csv` fixture in the repo has a non-blank `Date` cell.
+One input class got DEARER and a perf change has to say which: a zip with a
+bare `Checkmarks.csv` and an enormous `Categories.csv` now 400s having parsed
+the categories, where the old ordering answered in 3 ms. The per-request
+ceiling still went DOWN. `docs/decisions/import-and-loop.md` has the measured
+535 ms / 498 MiB before against 320 ms / 66 MiB after, and why this is a
+hardening rather than a regression the change introduced.
 
 ## Reminders and destinations
 
@@ -1551,121 +1330,83 @@ was the exception and did not know it — six passes wrote `?? UNSET`, harmless
 for an at-least habit, and a limit with no entries at all reported a 30-day
 streak.
 
-**`server.close()` is not a drain.** On Node 26 it does sweep the connections
-that are idle at the instant it is called, which is what makes the obvious fix
-look like it works; it says nothing about a connection that was IN FLIGHT when
-the signal landed and goes idle a moment later. Nothing closes that one — it sits
+**`server.close()` is not a drain.** On Node 26 it sweeps the connections that
+are idle at the instant it is called, which is what makes the obvious fix look
+like it works; it says nothing about a connection that was IN FLIGHT when the
+signal landed and goes idle a moment later. Nothing closes that one — it sits
 until `keepAliveTimeout`, and a pooling reverse proxy never leaves it idle long
-enough to expire at all, so the process runs until Docker's SIGKILL takes it with
-its in-flight requests. Measured on the real personal server: 5ms when the socket
-was already idle, **6158ms** when it went idle after the signal, and **20188ms
-having served 70 further requests** when the peer kept using the pool.
-`docs/decisions/connectivity.md` has the numbers and the mutations behind them.
+enough to expire, so the process runs until Docker's SIGKILL takes it with its
+in-flight requests. Measured on the real personal server: 5 ms when the socket
+was already idle, **6158 ms** when it went idle after the signal, and
+**20188 ms having served 70 further requests** when the peer kept using the
+pool.
 
 The mechanism is therefore the sweep hooked to **every response's `close` while
-draining**, and it is attached at INSTALL time rather than by the signal handler.
-A request already in flight had its `request` event long ago, so a hook installed
+draining**, attached at INSTALL time rather than by the signal handler: a
+request already in flight had its `request` event long ago, so a hook installed
 by the handler could never see it — and that is the only case that hangs.
 
-**The sweep is a trade, and every measurement flatters it, so say the other half
-out loud.** Shutting a pooled socket the moment it goes idle DROPS a request the
-peer had already written onto it — those 70 requests master served are requests
-this branch does not — and a proxy will not retry that one, because bytes were
-already on the wire when the connection went. Caddy pools upstream connections
-and `examples/Caddyfile` is a bare `reverse_proxy` with no retry configured, so
-it surfaces as a 502. The trade is still right (one bounded loss against an
-unbounded wait that ends in a SIGKILL losing in-flight work anyway) and it is
-still not free, which is why check 2 of the personal drain suite bounds "further
-requests served" at `<= 1` rather than `=== 0`. It is also the argument for #208:
-a readiness signal is the only thing that stops the proxy handing us the request
-we are about to drop.
+**The sweep is a trade, and every measurement flatters it, so say the other
+half out loud.** Shutting a pooled socket the moment it goes idle DROPS a
+request the peer had already written onto it, and a proxy will not retry that
+one, because bytes were already on the wire. Caddy pools upstream connections
+and `examples/Caddyfile` configures no retry, so it surfaces as a 502. The
+trade is still right — one bounded loss against an unbounded wait that ends in
+a SIGKILL losing in-flight work anyway — which is why the personal drain
+suite's check 2 bounds "further requests served" at `<= 1` rather than `=== 0`.
+It is also the argument for #208.
 
-Two more consequences worth knowing before touching `installShutdown`: the
-deadline is a
-constant (8s) and not an environment variable, because it has to hold for an
-operator who never sets `stop_grace_period` and so gets Docker's default 10s; and
-the deadline path deliberately runs **no** `cleanup`, since something is already
+Two consequences before touching `installShutdown`: the deadline is a constant
+(8 s) and not an environment variable, because it has to hold for an operator
+who never sets `stop_grace_period` and so gets Docker's default 10 s; and the
+deadline path deliberately runs **no** `cleanup`, since something is already
 stuck and a `closePool()` that hangs too would lose the exit the deadline just
 bought. A cleanup that REJECTS **or throws synchronously** — cloud's
 `closePool()` is the first, personal's `db.close()` the second, and
-`.then(() => cleanup())` rather than `Promise.resolve(cleanup())` is the one line
-that covers both — is the third exit: `shutdown.cleanup_failed` and
-`exit(1)`, caught rather than left to become an unhandled rejection — because
-there the drain SUCCEEDED and only the storage teardown failed, and an unhandled
-rejection would have reported that as a crash: no line, a raw stack, and nothing
-to tell it from the SIGKILL this whole module exists to get ahead of.
+`.then(() => cleanup())` rather than `Promise.resolve(cleanup())` is the one
+line covering both — is the third exit: `shutdown.cleanup_failed` and
+`exit(1)`, caught rather than left to become an unhandled rejection.
 
 **There is a second hole and it is earlier: the signal that arrives before
-anything is listening.** Node is PID 1 in both images (exec-form `CMD`, no init),
-and for PID 1 a signal with DEFAULT disposition is *discarded* rather than
-fatal — so between process start and `installShutdown` a `docker stop` did
-nothing whatever and the operator waited the full grace for the SIGKILL, which is
-the failure above arriving by a second route and before the server it drains
-exists. Both editions have the window and **neither is unbounded** — cloud's is
-merely the long one. `await initAuth()` there is OIDC discovery, and
-openid-client 6.8.5's `performDiscovery` is `const timeout = options?.timeout ??
-30`, which neither call site in `habiterall-cloud/src/auth.js` overrides, so an
-IdP that accepts the connection and never answers aborts the boot with a
-`TimeoutError` at ~30s. That is what makes the arm necessary rather than what
-would: 30s is **three times** the `stop_grace_period: 10s` all three shipped
-compose files set, so a `docker stop` landing anywhere in that window waits out
-the whole grace and is SIGKILLed regardless of the bound. Check the bound again
-after an openid-client bump. Personal's window is `await initAuth()` too, where
-`verifyPassword` runs scrypt with the cost parameters read out of the STORED
-hash — measured with a p=128 credential, `shutdown.armed` at 91-101 ms against a
-`startup` at 3292-3382 ms, and signalled inside that it left in 30-34 ms;
-cloud's in 12-19 ms. Spreads rather than single figures, over the runs this
-took: one number here is pinned to whichever run got written down.
+anything is listening.** Node is PID 1 in both images, and for PID 1 a signal
+with DEFAULT disposition is *discarded* rather than fatal — so between process
+start and `installShutdown` a `docker stop` did nothing whatever. Both editions
+have the window and neither is unbounded; cloud's is merely the long one, since
+`await initAuth()` is OIDC discovery and openid-client's 30 s default is
+**three times** the `stop_grace_period: 10s` the compose files set. Check that
+bound again after an openid-client bump.
+
+`armShutdown` closes it: a bare handler taken at the top of each entry point's
+module body ahead of every `await` — in cloud ahead of the `config_missing` env
+check too, and in personal gated on `isEntryPoint`, because importing the
+module for its routes must not install process signal handlers. It cannot drain
+anything, so it closes whatever HAS been opened and exits **0**; 1 stays
+reserved for the two failures above. **`installShutdown` then ADOPTS it and
+registers nothing of its own** — a second registration beside the arm is not a
+harmless redundancy but this fix's own defect re-created: one press runs both
+sequences, the early exit wins at ~5 ms, and the in-flight request goes with
+it. The two boot-window checks cannot see that and the drain checks can, which
+is why the unit suite asserts `installShutdown` given an arm calls `onSignal`
+never. `shutdown.armed` is one info line per start, and it is the predicate
+both drain suites wait on.
 
 **What the arm covers is the entry module's BODY onward, and on personal that
 leaves the larger window outside it.** ES modules evaluate every import fully
 before the importing module's body runs, so the express/helmet/session import
-cost (~100–300 ms, fixed) is ahead of any arm placed in a module body — and so,
-on personal, is `habiterall-personal/src/db.js`, which at module scope opens the
-handle, runs the whole schema and runs the one-time `entries.status` migration:
-`ALTER TABLE entries ADD COLUMN status …` then an `UPDATE entries SET status =
-'skip' … WHERE value = 3 AND habit_id IN (…)`. That `UPDATE` is
-data-proportional and unbounded by anything this code controls, and it runs on
-the FIRST start after an upgrade from a pre-`status` build — the boot an operator
-is most likely to interrupt. What the arm does cover on personal is
-`await initAuth()`, which is one or two p=1 scrypts at 28 ms each on an instance
-with an environment credential and NO scrypt at all on one whose credential is
-in the database — `initAuth` hashes only inside `if (env)`, and the shipped
-compose file leaves all three credential variables empty. The suite has to seed
-a p=128 credential to make the window measurable at all, and that is the tell.
-So personal's covered window is small in production and cloud's
-is the one that matters. It is not closed here because closing it is a different
-change: a wrapper entry point that arms and then dynamically `import()`s the
-server touches a new entry file, both Dockerfiles' `CMD`, both `start` scripts and
-both drain suites' `serverPath`. Do not add one without deciding that separately.
+cost is ahead of any arm in a module body — and so, on personal, is
+`src/db.js`, which at module scope opens the handle, runs the schema and runs
+the one-time `entries.status` migration, data-proportional and on the first
+start after an upgrade. **`DATABASE_URL` is likewise not covered**, however the
+cloud env loop reads: `db/pool.js` calls `assertConnectionString` at MODULE
+scope and `server.js` imports it, so a missing one kills the process at import
+time, before the arm — it exits in microseconds, so there is no window worth
+having. Closing personal's remaining window means a wrapper entry point that
+arms and then dynamically `import()`s the server, which touches a new entry
+file, both Dockerfiles' `CMD`, both `start` scripts and both drain suites. Do
+not add one without deciding that separately.
 
-`armShutdown` is what closes it: a bare handler taken at the top of each entry
-point's module body ahead of every `await` — in cloud ahead of the `config_missing`
-env check too, so a process that exits on a missing `SESSION_SECRET` or
-`PUBLIC_URL` is still one that could have been stopped, and in personal gated on
-`isEntryPoint`, because importing the module for its routes must not install
-process signal handlers. **`DATABASE_URL` is not one of those two**, however that
-loop reads: `db/pool.js` calls `assertConnectionString(process.env.DATABASE_URL,
-…)` at MODULE scope and `server.js` imports it, and every import is evaluated
-before the importing module's body — so a missing or malformed `DATABASE_URL`
-kills the process on an uncaught throw at import time, before the arm and before
-the loop, whose `DATABASE_URL` branch is unreachable for the missing case. No arm
-in a module body could have covered it, and it exits in microseconds, so there is
-no window there worth having. It cannot drain
-anything, nothing having been accepted, so it closes whatever HAS been opened and
-exits **0**: nothing was dropped, and 1 stays reserved for the two failures
-above. It runs no `beforeClose`, because at arm time neither the notifier nor the
-runtime watcher exists. `installShutdown` then ADOPTS it and registers nothing of
-its own — a `process.off` + `process.on` pair has a gap between the two calls and
-this has none, and a second registration beside the arm is not a harmless
-redundancy but this fix's own defect re-created: one press runs both sequences,
-the early exit wins at ~5 ms, and the in-flight request goes with it. The two
-boot-window checks cannot see that (inside the window a doubled handler is
-indistinguishable from a single one) and the drain checks can, which is why the
-unit suite asserts `installShutdown` given an arm calls `onSignal` never.
-`shutdown.armed` is one info line per start, and it is also the predicate both
-drain suites wait on — what lets them signal INSIDE the window rather than after
-a sleep.
+`docs/decisions/connectivity.md` has the numbers and the mutations behind all
+of it, including the measured arm timings on both editions.
 
 **`shared/src` is not served to the browser.** Only `shared/public` is mounted,
 so `ui/settings.js` cannot import `notify.js` — the channel list is declared in

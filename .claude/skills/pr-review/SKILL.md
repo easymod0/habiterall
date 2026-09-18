@@ -44,8 +44,9 @@ A review is a bounded read, not an exploration. Aim for **under 25 tool calls**.
 2. Read a touched file only when the diff's context is too thin to judge it, and
    then read the region, not the file.
 3. To learn *why* something is the way it is, `grep` the CLAUDE.md files for the
-   concept — they are 3,000 lines total and record the reason for nearly every
-   rule here. Never read one end to end.
+   concept — they record the reason for nearly every rule here, and
+   `docs/decisions/` holds the long form behind each. Never read either end to
+   end; grep, and follow the pointer only if the rule alone does not settle it.
 4. Run something only to confirm a finding you already suspect. See
    `references/verify.md`.
 
@@ -97,6 +98,18 @@ They account for most of what has shipped broken.
    is not a test of its caller; "all suites pass" in a worktree with no
    `node_modules` may have tested master. See `references/verify.md`.
 
+## And one placement check, if the diff writes prose
+
+`docs/decisions/` is not loaded into context and every `CLAUDE.md` is, so where
+a paragraph lands is a cost paid on every future task in that directory. If the
+diff adds more than ~20 lines to a `CLAUDE.md`, ask of each: does it say what to
+do here, or how this was found? Measurements, retrospectives ("the first
+version…") and rejected alternatives belong in the archive with a pointer left
+behind. A rule already stated in another `CLAUDE.md` should be cited, not
+restated. Density is not bloat — do not report placement on a small diff, and
+never rewrite prose you merely find wordy. Shapes and the CI guard:
+`references/traps.md`.
+
 ## Then, by what the diff touches
 
 For anything beyond a one-line change, read `references/traps.md` once — it is
@@ -115,6 +128,7 @@ checks above already cover.
 | an env var, compose, `.env.example`, README blocks | Configuration plumbing |
 | CSS, a chart, the fake-DOM suites, a dialog | DOM and rendering |
 | a notification, an alarm, a widget, `Reminders`, `NotifyWorker` | Android wiring |
+| a `CLAUDE.md`, a `docs/decisions/` record, a rule newly written down | Where a decision gets written down |
 
 ## Reporting
 

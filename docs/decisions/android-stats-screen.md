@@ -144,3 +144,38 @@ chart on a Compose `Canvas` or ships with numbers only — "a summary with no
 score chart is much cheaper and may be enough." None of those four questions
 is this record's to resolve; they are Mark's, the same way #144's
 server-prose question is `translations.md`'s.
+
+## `Record.figuresStale`: why `record.date` alone cannot answer "are these current"
+
+**The figures are as of `record.date`, on a line a user can see — except
+`record.date` alone cannot answer "are they current".** Same rule as the
+checkmark cell's own note above, and the same precedent behind it: the first
+version of THAT put the explanation in `setContentDescription` alone ("It has
+to be VISIBLE, not just described"), so a stats widget repeating that mistake
+would have been the identical bug on a second surface. But `record.date` names
+the day the ENTRY is about, not when `score`/`currentStreak` were last
+fetched, and `Widgets.answered` can record an answer with no network at all — a
+notification button, its number pad, or the checkmark widget's own tap. A
+morning sync leaves the figures at yesterday's answer; a 9am tap in the shade
+moves the strip to today with no fetch behind it, and `record.date == today`
+then read as "everything here is current" for up to six hours, contradicting
+the strip cell sitting right beside it. `Record.figuresStale` is the second
+flag this needed: set on BOTH of `answered`'s branches — an answer has been
+recorded with no fetch behind it, not "the strip moved", so the branch that
+leaves `date` unchanged (an older-day answer) still sets it — cleared in
+`Widgets.refreshed` (a successful fetch is exactly what makes the figures
+current again), and shown as its own sentence (`stats_figures_behind`) rather
+than the dated one — naming a date would be a false claim when the day itself
+is not stale, only the score and streak are. `WidgetSync.noteRefused` leaves
+the flag untouched rather than setting or clearing it, but not because
+setting it would put the note line on screen: on every path that can produce
+a refusal (the shade, the number pad, a widget's own tap), the `answered`
+that preceded the write already set the flag, so the note line is already
+showing before the refusal ever runs, and leaving it alone changes nothing
+there. The decision only matters on the one path that enqueues without
+calling `noteAnswer` — the list screen's own tap (`MainActivity`). A refusal
+never reached the server, so it is neither evidence the figures are stale nor
+evidence they are current, and a boolean cannot hold "this refusal's own
+answer" apart from "an earlier one still unfetched" — so it is left exactly
+as found, and over-reporting staleness is the fail-safe direction.
+

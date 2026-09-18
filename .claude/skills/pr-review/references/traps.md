@@ -327,3 +327,46 @@ Checks:
   boot re-opens all three.
 - **`Outbox`'s 4xx rule** and `taskAffinity=""` on `CountEntryActivity` — see
   Offline, and the root CLAUDE.md.
+
+## Where a decision gets written down
+
+`docs/decisions/` is **not** loaded into context; every `CLAUDE.md` is. So a
+paragraph's placement is a running cost paid on every future task in that
+directory, and the split erodes one way — nobody ever moves prose *into* the
+loaded tier by accident, but a PR that explains itself in `shared/CLAUDE.md`
+does exactly that. One cleanup already had to reverse ~1,100 lines of it.
+
+The test is what a paragraph is FOR, not how interesting it is:
+
+| it answers | belongs in |
+|---|---|
+| what must I do / not do here, and what breaks if I get it wrong | `CLAUDE.md` |
+| how was this found, what was measured, which version shipped wrong | `docs/decisions/` |
+| the alternatives weighed and why each lost | `docs/decisions/` |
+| the before/after numbers behind a perf claim | `docs/decisions/` |
+
+**What to flag.** A diff adding more than ~20 lines of prose to a `CLAUDE.md`
+is worth one look, and these are the shapes:
+
+- **A measurement in the loaded tier.** Timings, byte counts, node counts, "N
+  of M passed" — a figure nobody reads while writing code. The rule it supports
+  stays; the figure goes to the archive, with a pointer.
+- **A retrospective.** "The first version…", "both reviewers found…", "shipped
+  that way and nobody noticed". Pure provenance. The rule it produced is what a
+  reader needs.
+- **A rule restated where it already lives.** Grep the other `CLAUDE.md` files
+  for the concept before accepting a second copy — `PUT /habits/:id` REPLACES
+  was in four files at once. A citation is not a duplicate; a re-derivation is.
+- **A subsystem rule in the root file.** The root is "rules that reach
+  everywhere". A rule naming one edition's helper, or one test directory's
+  harness, reaches one place and belongs beside it.
+- **A record with no pointer.** A new `docs/decisions/*.md` needs an index row
+  in `docs/decisions/README.md` — `shared/test/decision-archive.test.js` fails
+  otherwise, and the `archive` CI job is not gated on the docs-only filter. It
+  also floors how many archive references exist repo-wide, so a cut that strips
+  pointers instead of leaving them will trip it.
+
+**What is NOT a finding.** Long prose that is genuinely rule-shaped — this
+project's files earn their length, and density is not bloat. Do not report
+placement on a diff that adds a few lines, and never rewrite prose you merely
+find wordy: that is the `simplify` skill's, and this one owns defects.

@@ -112,234 +112,99 @@ different things by width: above 640px `.check` is a fixed 44px so the gain is
 room for the NAME; under 640px the row shares evenly and the gain is thumb
 targets.
 
-**The drag gate is five clauses now, named in `canReorder` rather than an
-inline `&&` chain, because #65 phase 2's grouping work already wants a
-sixth.** `sort !== 'manual'` is the fifth: a drop computes a new `position`
-from the habit's ON-SCREEN neighbours and `persistOrder` sends the whole
-`state.habits.map(h => h.id)`, which under any other sort IS the sorted
-order — so a single drag under `strength` or `recently missed` would rewrite
-every habit's stored `position` into that sort's order and destroy the manual
-order the user is one setting away from returning to. That is stored-data
-corruption, the same class the other four clauses guard against, not merely a
-handle that would look wrong.
+**The drag gate is five clauses, named in `canReorder` rather than an inline
+`&&` chain, because #65 phase 2's grouping work already wants a sixth.**
+`sort !== 'manual'` is the fifth: a drop computes a new `position` from
+ON-SCREEN neighbours and `persistOrder` sends the whole
+`state.habits.map(h => h.id)`, which under any other sort IS the sorted order —
+so one drag under `strength` would rewrite every habit's stored `position` into
+that sort's order. Stored-data corruption, the class the other four clauses
+guard against, not a handle that merely looks wrong.
 
-**This is the first gate whose SUBJECT the server decides, and that is why it
-is read from `state.habitSort` — the `/overview` payload — rather than from
+**It reads `state.habitSort` — the `/overview` payload — and not
 `settings.get('habitSort')`, unlike every other clause here.** The other four
-clauses are local view state (`showArchived`, `filtering`, `grouped`) or the
-web's OWN rendering decision, so gate and render cannot disagree about them by
-construction. `habitSort` is different: `settings.init()` runs once per page
-load and nothing re-reads `/api/settings` afterwards, while `state.habits` is
+are local view state or the web's own rendering decision, so gate and render
+cannot disagree by construction. This one can: `settings.init()` runs once per
+page load and nothing re-reads `/api/settings`, while `state.habits` is
 refetched by every `load()` — so a tab open since before a SECOND tab changed
-the account's sort setting could see its cached `settings.get('habitSort')`
-still say `'manual'` while its next `load()` came back in `strength` order,
-drawing a handle on every row and letting one drag rewrite every habit's
-`position` into that order (issue #200, review round). `/overview` now echoes
-the RESOLVED sort it actually applied, `load()` installs it on `state.habitSort`
-under the same `loadSeq` guard as `habits` itself, and `canReorder` reads it
-from there — so the gate and the order it guards come from one response and
-cannot disagree, including offline, where the cached payload carries both.
-`SERVER_COMPUTED` (`ui/settings-dialog.js`) is unaffected by this — the
-refetch it triggers on a settings-dialog save is still needed and still right,
-only where the gate reads the ANSWER moved — and it is what makes the handle
-disappear on the same press that changed the setting, rather than on the next
-reload. See `shared/CLAUDE.md`'s "Habit order" section for why the sort itself
-is a server decision. Compare against `'manual'` specifically, not against
-`!== undefined`: an untouched account's `/overview` reply has no `habitSort`
-key at all — a server that predates this field never sends one, and its list
-is already in `position` order — so `load()` treats an absent key as
-`'manual'` and dragging must go on working there exactly as it always has.
+the sort saw a cached `'manual'` over a list that came back in `strength` order
+(#200, review round). `/overview` echoes the RESOLVED sort, `load()` installs
+it under the same `loadSeq` guard as `habits`, so the gate and the order it
+guards come from one response, offline included. Compare against `'manual'`
+specifically, not `!== undefined`: an untouched account's reply has no
+`habitSort` key at all, and dragging must go on working there. See
+`shared/CLAUDE.md`'s "Habit order" for why the sort is a server decision.
 
 **A grouped section header's mean and spread hide under the same two guards
-`reorderable` already answers to, and for the same reason.** `reorderable`
-(`dashboard.js:299`) is false while a search filter is on and while archived
-habits are shown, because a drag write reorders the wrong set otherwise;
-`summarised` sits right beside it and refuses the same two things, because a
-mean over a filtered or an archive-inflated set is a figure over a different
-set of habits than the count sitting right next to it, and because `#/categories`
-already excludes archived habits from the same aggregation — a dashboard figure
-that included them would disagree with the comparison view about the same
-category. `summarised` can still be true while there is nothing to draw:
-`state.categorySummaries` is read as possibly `undefined` even then —
-`?archived=true` sends no such key at all, and an older cached payload under
-`shellFirst`'s stale-while-revalidate may carry none either — and `sectionHeader`
-treats a missing summary exactly like `summarised` being false, by drawing the
-header it always drew and nothing more.
+`reorderable` answers to.** `summarised` refuses a search filter and shown
+archived habits, because a mean over a filtered or archive-inflated set is a
+figure over a different set of habits than the count beside it — and
+`#/categories` already excludes archived habits from the same aggregation.
+`summarised` can be true with nothing to draw: `state.categorySummaries` is
+read as possibly `undefined` (`?archived=true` sends no such key, and a cached
+payload may carry none), and `sectionHeader` treats that exactly like
+`summarised` being false.
 
 **A grouped section's ORDER is `position`, and the habit dialog's category
 manage list is the one surface that writes it.** Both editions already read
-every category list `ORDER BY position, id` and a create already lands a new
-one at `MAX(position) + 1`, so `POST /categories/reorder` (`moveCategory`,
-`ui/habit-dialog.js`) is a caller for existing storage semantics rather than
-new ones — nothing on the read side, including the grouped dashboard's own
-section order, had to learn anything. The ↑/↓ pair on each manage row are
+categories `ORDER BY position, id` and land a create at `MAX(position) + 1`, so
+`POST /categories/reorder` (`moveCategory`) is a caller for existing storage
+semantics — nothing on the read side had to learn anything. The ↑/↓ pair are
 disabled while `editingCategoryId != null`, because `repaintCategories` will
-not rebuild that list while a rename box is open (a live `<input>` a rebuild
-would tear out from under whoever is typing in it); a press there would send a
-write and repaint nothing, which reads as the click having done nothing at
-all. See `docs/decisions/categories.md`'s phase 5 for the disable rules in
-full and for why `moveCategory` keeps the optimistic order on `err.queued`
-where `persistOrder` (the habit list's own reorder) does not.
+not rebuild a list holding a live rename `<input>`, so a press there would
+write and repaint nothing. `docs/decisions/categories.md` phase 5 has the
+disable rules in full.
 
 **`state.categories` has several writers that can be in flight at once, so a
 read may only INSTALL its answer if it is still the newest one.**
-`state.categoryReadSeq` (`ui/store.js`) is that counter. It lives beside the
-field it protects rather than beside any one reader, because **the writers are
-in two modules and the one that is easiest to forget is in the other one**:
-`load()` (`ui/dashboard.js`) assigns `data.categories` from `/overview`, and
-`announce()` sends every category mutation in the habit dialog EXCEPT
-`moveCategory` through `'reload'`, which is what calls it. Five halves, and
-each fails differently — a version with any four of them still ships the bug:
+`state.categoryReadSeq` (`ui/store.js`) is that counter, and it lives beside
+the field rather than beside any one reader because the writers are in two
+modules. The rule for anything added next is the shape rather than the list:
+**a writer of `state.categories` that is not itself the newest read must take
+a ticket** — an optimistic write bumps, a read installs only while it holds
+one. Five writers obey it today: `refreshCategoryPicker`, `load()`
+(`ui/dashboard.js`), `moveCategory`'s optimistic splice, `moveCategory`'s
+catch, and the queued DELETE's optimistic removal. Each fails differently and
+a version with any four of them still ships the bug; two of the five were
+found by review after the counter shipped. `habits` and `categorySummaries`
+are deliberately NOT ticketed — no category writer can be newer than the reply
+— while `loadSeq`, added later, tickets those for a second `load()`.
+`categorycheck.mjs` blocks `j` to `n` pin one half each, and each passes with
+any of the other four deleted.
 
-- `refreshCategoryPicker` takes a ticket and assigns only while it holds the
-  current one.
-- `moveCategory` bumps at its optimistic splice, so a press retires every read
-  already out. **Not implied by the first** — the read in flight is often
-  `openDialog`'s fire-and-forget refetch, fired before the press existed and
-  landing while the press's own read has not started, so nothing newer has
-  taken a ticket to supersede it.
-- `load()` takes a ticket before `/overview` goes out and installs
-  `data.categories` only while it holds it. Its own `paint()` does not rebuild
-  the manage list, so under the unfixed code the dialog goes on showing a move
-  the store no longer has. Add a category and press ↑ on it — the ordinary
-  gesture, since a create lands at `MAX(position) + 1` and so at the BOTTOM —
-  and the Add's own `'reload'` is in flight for exactly that press. `habits`
-  and `categorySummaries` are deliberately NOT ticketed: neither has a writer
-  that can be newer, and summaries are read by id rather than by position.
-  (`loadSeq`, added later, tickets those two and the rest of what a load
-  installs, for a second `load()` rather than for a category writer.)
-- `moveCategory`'s catch keeps its ticket and reverts only while it holds it.
-  `previous` is captured before the splice, so the revert is as stale a writer
-  as any reply — two presses overlapping with the EARLIER one failing last put
-  an order two presses old back in the store.
-- **The queued DELETE's optimistic removal bumps too**, and it is the half a
-  reader looking only at the reorder feature would not think to check. It is
-  `moveCategory`'s splice in every structural respect — an optimistic write of
-  the field with no read of its own — and the read it loses to is the same
-  `openDialog` refetch. What is different is the harm, which is not a display
-  one: the removal exists precisely so `saveHabit` cannot submit an id the
-  replay is about to destroy (`resolveCategoryId` answers 400 on replay, and
-  `PUT /habits/:id` REPLACES, so the WHOLE habit edit is dropped as
-  permanently inapplicable behind a toast naming neither the habit nor the
-  field). A stale answer landing behind it puts the category back in the
-  picker and re-arms exactly that. It needs no prior outage: `api()` queues a
-  `replayable()` write on any network error, the 10s timeout included, while a
-  GET is never pre-empted.
+**`load()` emits `'categories'` where it assigns, and `habit-dialog.js`
+answers it with `repaintCategoriesKeepingPlace`.** The ticket stops a stale
+writer winning; this is the other half — telling a modal that the newest
+writer landed, since `paint()` does not repaint `#category-manage`. Three
+things are load bearing: it is emitted inside the assignment's own guard, so
+it means "this field just moved" rather than "a load finished"; it is **not**
+`'reload'`, which fires BEFORE anything is fetched; and the listener declines
+while the dialog is CLOSED, or `restoreArrowFocus` moves focus into a panel
+the user is not in.
 
-  **The picker's own clear is `clearCategoryIfChosen`, and it is EXPLICIT
-  (issue #323).** `renderCategorySelect` no longer falls a non-empty unknown
-  `select.value` to "(none)" for any caller — it PRESERVES it behind
-  `(current category)` on every path, because a list that has not caught up
-  and an authoritative read from a device where the category was genuinely
-  deleted are indistinguishable to it, and only the second may ever clear the
-  habit's category. That leaves exactly two reasons a picker can be pointed at
-  an id `state.categories` no longer has, and only one deliberate clear
-  answers both: stale-or-not-caught-up must PRESERVE (the placeholder is the
-  whole of what protects it), and deliberately-removed must CLEAR — and the
-  only signal that tells them apart is "this handler just deleted this
-  category itself", which is not something a repaint can know on its own.
-  `clearCategoryIfChosen` is that signal, called by the ✕ delete handler in
-  both of its branches, before either one's repaint. There is exactly one
-  `DELETE /categories/:id` call site in the whole web UI
-  (`ui/habit-dialog.js`), so one call is all the WRITE needs.
+**The picker's clear is `clearCategoryIfChosen`, and it is EXPLICIT (#323).**
+`renderCategorySelect` PRESERVES a non-empty unknown `select.value` behind
+`(current category)` on every path, because a list that has not caught up and
+an authoritative read from a device where the category was genuinely deleted
+are indistinguishable to it — and only the second may clear the habit's
+category. The only signal that tells them apart is "this handler just deleted
+this category itself", which no repaint can know; `clearCategoryIfChosen` is
+that signal, called by the ✕ handler in both branches before either repaint.
+Two orderings still reach `saveHabit` with a doomed id and are an accepted
+cost rather than an oversight — do not add a pre-queue guard in `saveHabit`
+without deciding that separately, since `resolveCategoryId` is the authority.
 
-  **But one call site is not one path, and what the clear covers is the
-  CONTROL AS IT STANDS when that DELETE settles — not every dialog that will
-  later be opened.** Two orderings still reach `saveHabit` with a doomed id,
-  and both are worth knowing before adding a second clear that would answer
-  neither.
+**A reorder arrow may not be restored with `restoreFocus`,** whose fallback is
+the first still-operable `[data-focus-key]` in the same parent — right for
+`Today`, wrong in a manage row where ↑ and ↓ are each other's undo.
+`restoreArrowFocus` parks focus on the list itself at a boundary. **And the
+scroll is a separate question**: both `.focus()` calls pass `preventScroll` and
+`revealArrow` owns visibility, because `.focus()` is not a scroll mechanism.
 
-  The first is PRE-EXISTING and #323 did not move it: offline, press ✕ on a
-  category, cancel, then open a DIFFERENT habit that was also in it. The
-  queued branch calls `categoryHint` rather than `announce()`, so no reload
-  has run and `state.habits` still carries the old `category_id` — so
-  `openDialog` renders it PINNED, which preserved an unknown id before #323
-  exactly as it does now, and the habit's own edit is dropped on replay. The
-  clear cannot help: it ran, correctly, against a control that was showing
-  something else at the time.
-
-  The second is #323's own accepted cost, and it is the deleted-ELSEWHERE half
-  of the same failure. An authoritative read lands (another device deleted the
-  category; `load()` installs the list without it), the picker PRESERVES it —
-  which is the whole point — and then this device's next write goes to the
-  outbox, needing no prior outage. That queued `PUT /habits/:id` carries the
-  doomed id, answers 400 on replay, and the whole edit is dropped behind the
-  same toast naming neither the habit nor the field. Before #323 that ordering
-  queued `category_id: null` and replayed 200, losing only a category the
-  server had already cleared. So the trade is stated plainly: a silent
-  uncategorisation on every Save became a loud refusal ONLINE and a lost edit
-  OFFLINE, and the online path is the ordinary one. It is a chosen cost, not
-  an oversight — `resolveCategoryId` is the authority on whether an id
-  resolves, and a pre-queue guard in `saveHabit` would be a second answer to
-  that question, in the browser, where the cold-deep-link case
-  (`state.categories === []`) has to stay allowed. Do not add one without
-  deciding that separately.
-
-**And the ticket is only half of what `load()` owed this field: the OTHER half
-is telling the dialog when its assignment DID land.** The five above are about
-a stale writer losing; this is about the newest writer being invisible to a
-view of the same field that is not on the page it repaints. `paint()` is the
-dashboard's, and `#category-manage` is a modal's — so a background reload
-(an outbox flush's `syncNow()`, a reconnect, a save made elsewhere; anything
-reaching `emit('reload')`) left the list showing the pre-reload order over a
-store holding the post-reload one. That is not cosmetic, because `moveCategory`
-decides from the STORE while the user pressed a row in the LIST: at the
-disagreement a press either returns at `to < 0` having moved nothing,
-repainted nothing and fetched nothing — the silent no-op the arrow-disable
-rules above exist to avoid — or moves the right category from a slot the user
-was not looking at.
-
-`load()` therefore emits **`'categories'`** where it assigns, and
-`habit-dialog.js`'s `init()` answers it with `repaintCategoriesKeepingPlace`.
-Three things about that event are load bearing. It is emitted inside the
-assignment's own guard, so it means "this field just moved" rather than "a load
-finished". It is **not** `'reload'`, which fires BEFORE anything has been
-fetched — a repaint there redraws the stale order it exists to replace and
-looks like a fix. And the listener declines while the dialog is CLOSED, because
-`restoreArrowFocus` focuses the list itself for a key it cannot find, so a
-repaint from the dashboard would move focus into a panel the user is not in;
-nothing is lost by declining, since `openDialog` repaints on the way in. Block
-`o` in `categorycheck.mjs` pins both halves — the list agreeing with the store,
-and a press aimed at what is on screen doing what the screen promised — and
-each fails with either the emit or the listener removed.
-
-A superseded read still repaints (from current state, which can only
-re-confirm what is there); the ASSIGNMENT is the half that can be stale.
-`persistOrder` needs none of this because it never refetches after its own
-write and so cannot race a second call's read — do not read its shape as the
-precedent here. Blocks `j`, `k`, `l`, `m` and `n` in `categorycheck.mjs` pin
-one half each, and each one passes with any of the other four deleted.
-
-The rule for anything added next is the shape rather than the list: **a writer
-of `state.categories` that is not itself the newest read must take a ticket** —
-an optimistic write bumps, a read installs only while it holds one. Two of the
-five were found by review after the counter shipped, both by asking that
-question of a writer nobody had enumerated.
-
-**And a reorder arrow may not be restored with `restoreFocus`.** Its fallback
-for a control that has stopped being operable is the first still-operable
-`[data-focus-key]` in the same parent, which is right for `Today` and wrong in
-a manage row, where ↑ and ↓ are the only two focus keys and each is the
-other's undo: the press that lands a category at row 0 disables its ↑ and
-handed the keyboard its ↓, so the next Enter walked it back down and a held
-Enter ping-ponged it between the ends with a write per step.
-`restoreArrowFocus` (`ui/habit-dialog.js`) parks focus on the list itself at a
-boundary instead — the gesture stops where the boundary says it stops, and
-focus stays inside the dialog rather than dropping to `<body>`, which is the
-whole reason a restore runs there. Block `2b` pins both halves.
-
-**And that made the scroll a separate question, which it always should have
-been.** `.focus()` scrolls its target into view as a side effect, so while the
-keyboard followed the row up the list the VIEW came along for free — a boundary
-parks focus on the list with `preventScroll`, and the last press of a walk was
-then the only one that did not follow, dropping the row above the fold from a
-list scrolled a single row down. `revealArrow` (`ui/habit-dialog.js`) owns
-visibility now and `restoreArrowFocus` owns only the keyboard: both `.focus()`
-calls pass `preventScroll`, and each of `moveCategory`'s two repaints reveals
-the moved row after putting `scrollTop` back, whether or not focus moved. This
-is the same "`.focus()` is not a scroll mechanism" that `moveCategory`'s own
-scroll save/restore records having been bitten by in Safari, met a second time
-one call further out.
+`docs/decisions/categories.md` phases 4 and 5 have all of this in full — each
+writer's own failure, the two accepted `saveHabit` orderings, the disable
+rules, and why `moveCategory` keeps the optimistic order on `err.queued` where
+`persistOrder` does not.
 
 ## The detail view
 
@@ -349,111 +214,57 @@ the notes card, below); the ids come from `DETAIL_CARDS` (`shared/src/validate.j
 and not titles, because a card has no id and the titles are English prose #144
 will translate.
 
-**A note's DOT is a mark, never a hue (#297).** The calendar could have painted a
-note-bearing day a different colour and did not: the four day states already own
-the colour meaning on that grid — done/skip/no/unknown, plus the at-most ramp and
-the ghost-tick shapes above — and a note is orthogonal to all of them, on any day
-state at once. Recolouring the cell would either invent a fifth meaning for a hue
-or silently steal one of the four existing ones. A small corner dot instead reuses
-exactly the idiom the `?` glyph and the run stroke already established: something
-drawn ON TOP of whatever the cell already means, `pointer-events: none` so it
-never steals the click, and read only for truthiness — never for its own colour —
-because `themecheck.mjs` exists precisely because a colour resolved with
-`getComputedStyle` at draw time freezes into the SVG and the detail view redraws
-by REFETCHING, so a frozen palette survives a theme switch. `charts.js`'s dot
-therefore reads `themed(...)`/`shade(...)` exactly as every other mark on this
-grid does, never a resolved literal.
+**A note's DOT is a mark, never a hue (#297).** The four day states already own
+the colour meaning on that grid, plus the at-most ramp and the ghost-tick
+shapes above, and a note is orthogonal to all of them — recolouring the cell
+would invent a fifth meaning for a hue or steal one of the four. A corner dot
+reuses the idiom the `?` glyph and the run stroke already established: drawn ON
+TOP of whatever the cell means, `pointer-events: none` so it never steals the
+click, and read only for truthiness — never for its own colour, so `charts.js`
+reads `themed(...)`/`shade(...)` like every other mark rather than a literal
+resolved at draw time (`themecheck.mjs`).
 
-**A note gained three new ways into the day editor, and every one of them was
-SECONDARY — none could steal the plain tap (#297).** `dayCells`
-(`ui/day-strip.js`) wires `contextmenu` (right-click / long-press) and
-Shift+Enter, on both grids that share that file, to `host.editDay?.(...)` — a
-method the plain click handler did not touch. The third is the notes card
-itself: each row is a real `<button>` calling `detailHost.editDay`, which is
-keyboard-reachable by construction rather than by a shortcut nobody discovers
-on their own. All three routes converge on the same rule the day editor has
-always had: `saveDay` states the note on every save, so a way in that cannot
-seed the box with the TRUE text would silently destroy whatever was there
-(#224).
+**A note gained four ways into the day editor, and the plain tap is the only
+one that is the account's choice.** Three are SECONDARY and none could steal
+the tap: `contextmenu` and Shift+Enter on both grids (`dayCells`), and the
+notes card's own rows, which are real `<button>`s. The fourth is `dayTap` —
+`'cycle'` by default, `'editor'` hands the cell to `host.editDay`. The setting
+is asked FIRST, before the habit type, because it is a fact about the TAP and
+the branches below it are facts about the HABIT; it is read through
+`settings.get` at TAP time, never held; and `host.editDay` stays optional, so a
+preference cannot turn a grid off. All four converge on the rule the day editor
+has always had: `saveDay` states the note on every save, so a way in that
+cannot seed the box with the TRUE text destroys whatever was there (#224).
 
-**The plain tap is now a FOURTH way in, and it is the account's own choice —
-`dayTap`.** `'cycle'` is the default and is what a tap has always done; under
-`'editor'` `onCheckClick` hands the cell straight to `host.editDay` instead, on
-both grids and for both habit types. Three things about it. The setting is
-asked FIRST, before the habit type is looked at — it is a fact about the TAP
-and the branches below it are facts about the HABIT, so asking it on the
-boolean arm alone would give a measurable habit the amount dialog with no note
-box, under a setting whose whole point is that the note is reachable. It is
-read through `settings.get` at TAP time, never held, because the cells are
-already built when the settings dialog changes it. And `host.editDay` is still
-optional, so a host without one keeps the cycle: a preference may not be able
-to turn a grid off.
+**`StripHost.editDay` is optional, and the two hosts differ in what they must
+do to SEED it, not in where they open it.** `detail.js` holds the whole
+unwindowed history and seeds directly; `dashboard.js` holds only the fortnight
+and, by design, never the note TEXT — only which DATES hold one (`/overview`'s
+per-habit `notes`) — so `editDayOverList` fetches `/habits/:id/entries` and
+opens in place. Two rules keep it honest. It fetches **unconditionally** and
+does not shortcut on `hasNote`, because a missing `h.notes` reads as empty and
+that is exactly what a service-worker-cached `/overview` predating the field
+sends. And a fetch that FAILS still opens the dialog with the note declared
+**unknown** — `openDayDialog`'s fifth argument takes `null` as a third answer
+beside a string and `''`, hiding the box and leaving `notes` out of the body,
+which `PUT /entries/:date`'s preserve-on-omit makes safe.
 
-**`StripHost.editDay` is optional, and the two hosts still answer it
-differently — but in what they must do to seed it, no longer in WHERE they open
-it (#297, revised).** `detail.js`'s `detailHost.editDay` opens the dialog
-directly: this page holds the whole unwindowed history, note text included, so
-it can seed truthfully with no second fetch. `dashboard.js`'s `listHost.editDay`
-cannot — the dashboard holds only the fortnight it asked for and, by design,
-never the note TEXT, only which DATES hold one (`/overview`'s per-habit `notes`
-array, dates only — a note is up to 500 characters and the payload is already
-size-managed) — so `editDayOverList` FETCHES `/habits/:id/entries` for the text
-and then opens in place.
-
-It used to route through `openHabit(habit.id, {editDay: date})` instead, and
-that was never the feature: it was the only way to seed the box honestly, since
-an empty box over a day that has a note is the #224 landmine self-inflicted by
-the grid that cannot see what it would need to seed with. The fetch is
-**strictly less work than the navigation it replaces** — that fetched this same
-request AND `/habits/:id/stats`, then rebuilt up to ten cards of SVG, to land on
-the same dialog over a page nobody asked to be on.
-
-Two rules keep it honest, and both are about what happens when it does not
-work. It fetches **unconditionally** and does not shortcut on `hasNote`:
-`noteDatesByHabit` reads a missing `h.notes` as empty, which is exactly what a
-service-worker-cached `/overview` predating that field sends, so the one boot
-after an upgrade would seed `''` over every real note — a belief that can be
-silently empty is not a safe thing to decide a destructive write on. And a
-fetch that FAILS still opens the dialog, with the note declared **unknown**:
-`openDayDialog`'s fifth argument takes `null` as a third answer beside a string
-and `''`, which hides the box and leaves `notes` out of the body entirely.
-`PUT /habits/:id/entries/:date` PRESERVES a note it was not asked to change, so
-the day stays fully editable and the note is untouched — which is why refusing
-to open would be the worse answer offline, the one place this is reachable and
-the one place a tap is the whole point of the grid.
-
-**The value and the skip still come from the HOST, and only the note from the
-reply.** They are the optimistic model — a queued tap has already moved them
-and the server has not heard — so reading them off the fetch would open the
-dialog on a day the grid behind it is painting differently. Read AFTER the
-await, beside the habit and for the same reason: a `load()` landing during the
-fetch would otherwise seed the editor with a value the grid has stopped drawing.
+**The value and the skip come from the HOST, only the note from the reply** —
+they are the optimistic model, so reading them off the fetch opens the dialog
+on a day the grid is painting differently. Both are read AFTER the await.
 
 **And `saveDay` must tell the host on the SUCCESS path, not only the queued
-one — announcing is not enough for a view that answers by RECOMPUTING.**
-`emit('change')` means "the visible view's data moved", and the two views
-answer it differently on purpose: the detail page refetches, the dashboard
-repaints from `state`. That split is sound because every write the LIST makes
-for itself moves `state` optimistically before the request goes out. The day
-editor is the one writer that did not — so with the editor opening over the
-list, an ordinary ONLINE save landed on the server and `paint()` faithfully
-redrew the pre-edit day: the square stayed empty, no tick and no note dot, with
-the dialog closed and nothing said, until a `load()` a dashboard left open
-never gets. It could not happen while that host NAVIGATED, because the page it
-landed on is the one that refetches — so this is a cost the in-place open
-brings with it, not a pre-existing hole. The fix is the `edit` + `repaint` pair
-the queued branch already does, and it is free for the detail view, whose
-refetch lands on an optimistic edit that agrees with it.
+one.** The day editor is the one writer that does not move `state` before the
+request, so with the editor opening over the list an ordinary ONLINE save
+redrew the pre-edit day and said nothing. The fix is the `edit` + `repaint`
+pair the queued branch already does. Pinning it needs a day the save can
+CHANGE, which is why `gridcheck.mjs` DELETES a day in its seed and asserts the
+blank start first — the fixtures lay down 60 days of entries, so the first
+version of that check compared a cell to a state it was already in and was
+green against the unrepainted build.
 
-**Pinning that needs a day the save can CHANGE, and the first version of the
-check did not have one.** It asserted the tick and the dot on the day the
-fixture had already given a value and a note, so both were true BEFORE the save
-and the check compared the cell to a state it was already in — green against
-the unrepainted build, measured. That is the root `CLAUDE.md`'s
-fixture-equals-itself trap landing inside the very check written to catch a
-repaint bug, and it is why `gridcheck.mjs` DELETES a day in its seed (the
-fixtures lay down 60 days of entries, so "a day nobody wrote to" is not one
-that exists by default) and asserts the blank start before pressing anything.
+`docs/decisions/dashboard-and-detail.md`'s `dayTap` section has the rest,
+including the mutation table behind each of these.
 
 **"Recent days" is the one card you ACT on, and it is first for that reason.**
 It is the dashboard's tappable day strip for one habit — `ui/day-strip.js`,
@@ -510,341 +321,209 @@ exists to protect the dashboard's habit-name column, which this card does not
 have.
 
 **Offline, the strip, the calendar card and the notes card agree about a day
-(#230, extended by #297).** They draw one pair of maps — three, with the notes
-— and a tap moves them before it writes, so `detailHost.repaint` redraws the
-calendar beside the cells rather than waiting on the refetch `writeDay` ends
-in, which offline never runs. All of them are nulled by `render()` before a
-rebuild, or a tap redraws a card that has been detached.
-
-**The notes card is the third redraw, and it was missed on the first pass of
-#297 — both reviewers found it independently, which is worth knowing because
-the reasoning that omitted it is easy to repeat.** The card is drawn from
-`notesByDate`, the very live map this section argues for passing to the
-calendar, and it was built once by `render()` and never rebuilt — so offline a
-cleared note left a GHOST ROW with the old text after the dot and the strip
-mark had both already gone, and a first note on a previously-noteless day lit
-both marks with no row to show for it. `notesRedraw` is its `calRedraw`, with
-the same lifecycle. Note this is squarely INSIDE the redraw rule and not an
-instance of the accepted staleness two paragraphs down: that paragraph excuses
-figures the SERVER computed, which nothing local could move, and a note is
-local data the edit itself moved.
+(#230, extended by #297).** They draw one set of maps and a tap moves them
+before it writes, so `detailHost.repaint` redraws all three beside the cells
+rather than waiting on the refetch `writeDay` ends in, which offline never
+runs. All are nulled by `render()` before a rebuild, or a tap redraws a card
+that has been detached. **The notes card is the third redraw and was missed on
+the first pass** — `notesRedraw` is its `calRedraw`, with the same lifecycle —
+because offline a cleared note otherwise left a GHOST ROW after the dot and
+the strip mark had gone. That is squarely INSIDE the redraw rule, not an
+instance of the accepted staleness below: that excuses figures the SERVER
+computed, and a note is local data the edit itself moved.
 
 **One case a repaint deliberately cannot cover: a habit's FIRST note written
-offline gets no card at all until the next full render.** `buildNotesCard`
-returns `null` for a habit with no notes, so there is no card in the page to
-redraw, and inserting one is `render()`'s job — it owns card ORDER, from the
-stored `detailCards` list, which a repaint has no business deciding. That
-habit's dot and strip mark still light immediately; only the card lags. The
-mirror case IS covered, because there the card exists: clearing a habit's last
-remaining note offline hides the card rather than leaving an empty list, which
-is the same "a card with nothing in it is hidden" promise the settings help
-text makes.
+offline gets no card until the next full render.** `buildNotesCard` returns
+`null` for a habit with no notes, so there is no card to redraw, and inserting
+one is `render()`'s job — it owns card ORDER, from the stored `detailCards`
+list, which a repaint has no business deciding. The dot and strip mark still
+light immediately. The mirror case IS covered, because there the card exists.
 
 **A QUEUED write from the day editor closes the dialog and repaints too.**
-`saveDay` (`ui/day-dialog.js`) awaits `api()` and offline `api()` stages the
-write and THROWS, so with the close and the `emit('change')` both after the
-await, a toast said *Saved offline* while the dialog stayed open on the old
-value and both grids painted the pre-edit day — three contradictions of a write
-that was correct and durable. It takes the opening page's host, exactly as
-`openCountDialog` does, and does `edit` + `repaint`; it reaches no
-`emit('change')`, because that is a refetch offline cannot answer and could
-repaint the queued write straight back out. **`edit` therefore takes a NOTE:**
-absent means the write says nothing about it — every tap from a strip, matching
-`PUT /entries/:date` preserving a note it was not asked to change — a string is
-a stated note, `''` a stated clear, and a `'clear'` takes the note with the
-row. A genuine failure (anything ANSWERED; only an unsent request carries
-`queued`) still leaves the dialog open and says so.
+`saveDay` awaits `api()`, and offline `api()` stages the write and THROWS — so
+with the close and the `emit('change')` both after the await, a toast said
+*Saved offline* while the dialog stayed open on the old value and both grids
+painted the pre-edit day. It takes the opening page's host and does `edit` +
+`repaint`, and reaches no `emit('change')`, which is a refetch offline cannot
+answer and could repaint the queued write straight back out. **`edit`
+therefore takes a NOTE:** absent means the write says nothing about it —
+matching `PUT /entries/:date` preserving one it was not asked to change — a
+string is a stated note, `''` a stated clear, and a `'clear'` takes the note
+with the row. A genuine failure (anything ANSWERED; only an unsent request
+carries `queued`) still leaves the dialog open and says so.
 
-**The redraw draws the STORED position, and re-resolves today when there is
-none** — not "the window on screen", which is the same sentence only while a
-position exists. `draw` reads `state.calEnd` and never writes it, so #274
-cannot repeat; but with `calEnd` null, which is the default, `draw` and
-`calendarChart` both resolve today afresh. That used to mean a page left open
-across local midnight had its calendar jump a day on the next tap while the
-strip kept its pre-midnight columns — cured now by the day watch below, which
-is the whole view rather than this card.
+**The calendar redraw draws the STORED position, and re-resolves today when
+there is none.** `draw` reads `state.calEnd` and never writes it, so #274
+cannot repeat; with `calEnd` null — the default — `draw` and `calendarChart`
+both resolve today afresh.
 
 **The page is drawn for ONE local day, and it asks again when that day ends.**
 `render()` records `todayISO()` and `refreshIfDayChanged` refetches when the
-browser's own calendar day has moved past it — the whole view, because the
-strip's columns, both draws' `todayISO()`, `calendarChart`'s `realToday` and
-every window on the page are frozen at render time the same way, and fixing one
-card moves the page from "one card is stale" to "one card jumps differently".
-The browser's own date, never a named zone: this is the question `callerDay`
-answers, not the one `resolveTimeZone` does
-(`docs/decisions/timezones.md`). **Two triggers, and neither is enough alone** —
-one timer armed for the next local midnight (`setHours(24, 0, 0, 0)`, so a DST
+browser's own day has moved past it — the WHOLE view, because every window on
+the page is frozen at render time the same way, and fixing one card moves the
+page from "one card is stale" to "one card jumps differently". The browser's
+own date, never a named zone: `callerDay`'s question, not `resolveTimeZone`'s
+(`docs/decisions/timezones.md`). **Two triggers, and neither is enough alone**
+— a timer armed for the next local midnight (`setHours(24, 0, 0, 0)`, so a DST
 day gets the right instant) and re-armed per fire, plus `visibilitychange`,
-because a suspended device runs no timer and the staleness costs nothing until
-somebody looks. Both ask the same date comparison, so a timer that fires early
-or a tab switch on the same day does nothing, and a zone CHANGE is covered by
-the same rule. A refetch and not a local redraw: every figure on the page is
-computed as of a date the SERVER anchors, so redrawing locally would move the
-columns and leave the numbers answering yesterday.
+since a suspended device runs no timer. Both ask the same date comparison, so
+an early fire or a same-day tab switch does nothing, and a zone CHANGE is
+covered by the same rule. A refetch and not a local redraw: every figure is
+computed as of a date the SERVER anchors.
 
 **A memoised `Intl` formatter is only valid while the device's clock stays
 put, and `ui/dates.js` drops its own when the UTC offset moves.** A formatter
 resolves its zone at CONSTRUCTION, so one built at page load goes on rendering
-for the zone a device has left — a laptop carried across the date line, an OS
-clock corrected — and every caption, readout and popover is an offset out while
-the cells beside them are right. The check is at the USE (`clockNow` /
+for a zone the device has left. The check is at the USE (`clockNow` /
 `perClock`), not in a reset a caller has to remember: **every** path that
-redraws after a zone change reaches this — paging, a tap, a save, the midnight
-rebuild — so an invalidator wired to one of them fixes that one and leaves the
-rest silently stale. `getTimezoneOffset()` and never
-`resolvedOptions().timeZone`, which constructs the very thing being memoised on
-a per-cell path; it over-fires on a DST transition and under-fires between two
-zones sharing an offset, and **both are harmless and neither is a reason to
-tighten it**. Three memos hang off the one question, and the REFERENCE WEEK is
-the one to know about: those seven sample dates are local midnights, so
-rebuilding the formatters while freezing the sample renders each as the
-previous day and rotates every weekday caption in the app by one — the defect
-`weekcheck.mjs` exists for, introduced by fixing half of this.
+redraws after a zone change reaches this, so an invalidator wired to one of
+them fixes that one and leaves the rest silently stale. `getTimezoneOffset()`
+and never `resolvedOptions().timeZone`, which constructs the very thing being
+memoised on a per-cell path; it over-fires on a DST transition and under-fires
+between two zones sharing an offset, and **both are harmless**. Three memos
+hang off the one question, and the REFERENCE WEEK is the one to know about:
+those seven sample dates are local midnights, so rebuilding the formatters
+while freezing the sample rotates every weekday caption in the app by one —
+the defect `weekcheck.mjs` exists for, introduced by fixing half of this.
 
 **A calendar rebuild keeps the roving tab stop.** `calendarChart` takes a
-`tabStop` date and `draw` reads it off the outgoing grid before removing it, so
-paging, Today and #230's repaint no longer send a keyboard user back to the most
-recent day. A DATE and not an index — the cell array is only the editable
-cells, so the same index in a window with fewer future days is a different day —
-and a date the new window does not draw falls back to the last cell, which is
-what paging gets. No cell-level repaint was added: see the #230 argument above.
+`tabStop` DATE — not an index, since the cell array is only the editable cells
+— and `draw` reads it off the outgoing grid before removing it; a date the new
+window does not draw falls back to the last cell.
 
 **What the repaint cannot reach stays stale, and THAT is accepted rather than
-missed**: strength, streaks, resilience, history, awards, the weekday
-breakdowns and times-per-week are all figures the server computed, so nothing
-local could move them. The run BANDS are the non-obvious one, and the one to
-know before reading a screenshot — a calendar cell is redrawn from the maps and
-is right, while the band around it comes from `stats.streaks` on the payload the
-page was built with. So an offline tap closing a gap in a run paints the day and
-not the run it extended; and one ERASING a day leaves the connectors and the
-stroke drawn through a cell that is now blank, which also ticks `data-run-marks`
-up and can raise an "In a run" legend swatch. The same staleness the dashboard
-row already has offline, now narrowed to what genuinely needs the server.
+missed**: strength, streaks, resilience, history, awards and the weekday
+breakdowns are figures the server computed. The run BANDS are the non-obvious
+one, and the one to know before reading a screenshot — a calendar cell is
+redrawn from the maps and is right, while the band around it comes from
+`stats.streaks` on the payload the page was built with. So an offline tap
+closing a gap paints the day and not the run it extended, and one ERASING a
+day leaves the stroke drawn through a blank cell, which also ticks
+`data-run-marks` up and can raise an "In a run" swatch.
 
 **The stored shape is `{id, on}[]`, not a bare list of the ids that are on**
-(#163). Membership and order are two different decisions — hiding a card and
-moving it are not the same press — and a bare array of ids can only ever record
-one of them: normalising `['history','calendar']` down to canonical order to
-give the SERVER an opinion about ordering would throw the order away the moment
-anyone reordered anything. An object per id, always all of them, says which of the
-two questions each entry is answering, so an ELEVENTH card cannot later make "a
-bare id" ambiguous between "legacy, absent means hidden" and "new shape, absent means
-new and visible" — a marked string (`'!history'`) still faces exactly that
-question with a longer list of ids. `[]` is read as the LEGACY shape and means
-nothing visible; reading it as the new shape (nothing named, so nothing to
-hide) would invert unticking everything to everything shown, which is the one
-case `parseCardList`'s tests treat as the whole point of the change.
+(#163). Membership and order are two different decisions, and a bare array can
+record only one of them. `[]` is read as the LEGACY shape and means nothing
+visible — reading it as the new shape would invert unticking everything to
+everything shown.
 
 **A legacy account is read tolerantly, and migrated only by a deliberate
-Done.** Nothing writes the new shape on its behalf: not a boot, not a `GET`,
-nothing scheduled. An account that saved `['history','calendar']` before this
-shipped keeps meaning exactly that for as long as it never opens the settings
-dialog.
+Done.** Nothing writes the new shape on its behalf. `LEGACY_ERA_CARDS`
+(`shared/src/validate.js`) freezes `DETAIL_CARDS` as #174 left it, so an absent
+id of that era was unticked and stays off while an absent id outside it did not
+exist to tick and arrives **on** — otherwise every card added after an
+account's last save is invisible to it, with no surface at all, which is how
+`recentDays` shipped (#297). **That list is frozen in time**: appending a new
+card's id to it reintroduces exactly that bug. A legacy list also carries no
+ORDER to honour and is read in `DETAIL_CARDS` order, since every value that can
+be in storage is already a canonical-order subset.
 
-**But "exactly that" is not "and nothing added since is visible", and for one
-release it was** (#297). A bare id list cannot say why an id is missing, and
-there are two reasons: somebody unticked it, or it had not shipped yet.
-Reading both as *hidden* made every card added after an account's last save
-invisible to it — with no surface at all, because a hidden card and a card
-that does not exist look identical. `recentDays` shipped that way and nobody
-noticed; the notes card would have shipped that way too, and it is the card
-whose entire purpose is that a note could not be read back. A fix that stays
-unreachable for the accounts that once cared enough to configure the page is
-not a fix.
+**Pressing Done rewrites it, even with nothing else changed**, and that took a
+deliberate mechanism — `storedShapeIsStale` (`ui/settings.js`), answered from
+`ApplyMeta.stored` and never from `load()`, generic over `def.normalise` rather
+than a `detailCards` special case. Without it the documented recovery is a
+no-op.
 
-So `LEGACY_ERA_CARDS` (`shared/src/validate.js`) freezes `DETAIL_CARDS` as
-#174 left it — the ids a bare list could ever have named. An absent id of that
-era was unticked and stays off; an absent id outside it did not exist to tick
-and arrives **on**, which is the answer the object branch already gives the
-same question. Two reasons, told apart by the only evidence there is, instead
-of collapsed into the pessimistic one. `[]` is untouched and still means
-nothing visible: it is the one legacy value whose silence about a card is a
-statement rather than an accident, which is why the guard is `raw.length > 0`
-and not a bare default.
+Two things it deliberately does not do: it does not hide the four stat tiles,
+so unticking everything leaves a page rather than a blank one; and it does not
+reach `/habits/:id/stats`, because a `?cards=` parameter would be one
+service-worker data-cache entry per combination.
 
-That list is **frozen in time** — appending a new card's id to it would claim
-a value written before the object shape could have named it, turning that card
-off for every legacy account and reintroducing exactly this bug.
+**A card that is not being DRAWN holds no position, and one table says both
+what to build and what to forget.** `CARDS` in `ui/detail.js` is a `Map` keyed
+by id — `build` plus an optional `forget` — replacing two separate lists of the
+same nine ids. The view keeps a position in **two** places, `state.chartOffsets`
+and `state.calEnd`, and `forget` attaches that knowledge to the id it belongs
+to. Both wrong versions shipped in one review round: clearing only
+`chartOffsets` left the calendar at its old date, and clearing both from
+`applyDraft` gated on "`detailCards` changed at all" sent a still-ticked History
+card back to today.
 
-Pressing **Done** rewrites it, *even with nothing else changed*, and that took a
-deliberate mechanism: `applyDraft` sends the keys whose draft differs from
-`load()`, and for `detailCards` those are two clones of the same NORMALISED
-array — `sanitise` ran the normaliser over the server's reply — so they never
-differ unless a tick or a position was touched. Without the extra pass the
-documented recovery was a no-op, which is the review finding this paragraph
-exists because of. `storedShapeIsStale` (`ui/settings.js`) answers it from
-`ApplyMeta.stored`, the server's OWN reply, never from `load()`, since the cache
-is already normalised and would report staleness that is not there; an absent
-key answers false, or every fresh account would write its defaults on its first
-Done. It is generic over `def.normalise` rather than a `detailCards` special
-case, because the second normaliser should not have to find this.
+`docs/decisions/dashboard-and-detail.md` has the whole argument — why a marked
+string faces the same ambiguity, what `parseCardList` does with a new-shape
+absence, and why the two tables were merged rather than kept in step.
 
-**A legacy list carries no order to honour, and is read in `DETAIL_CARDS`
-order rather than the order it happens to list ids in.** Master's own
-`parseCardList` was `DETAIL_CARDS.filter((id) => raw.includes(id))`, so every
-legacy value that can be in storage is already a canonical-order subset —
-there is no ordering decision recorded in it to lose. Reading `['history',
-'calendar']` as "history then calendar" read information into a value that
-never carried any: re-tick `strength` on such an account and the page would
-silently rearrange from what master drew (Habit strength, Calendar, History)
-to Calendar, History, Habit strength. `parseCardList` and `normaliseDetailCards`
-both return all nine in `DETAIL_CARDS` order, `on` set by membership, for a
-legacy input — which is exactly the page master drew, unchanged by a later
-re-tick.
-
-**A card absent from a *new-shape* list is one that shipped after the account
-last saved the setting**, and `parseCardList` reads that absence as "on,
-canonical position" rather than "off": inserted immediately after the nearest
-`DETAIL_CARDS` predecessor still present in the list. That is what lets a
-tenth card show up for an account that has an opinion about the other nine,
-with no migration and no write anyone had to schedule.
-
-Two things it deliberately does not do: it does not hide the four stat tiles, so
-unticking everything leaves a page rather than a blank one; and it does not reach
-`/habits/:id/stats`, because only three of the nine cards map to a field nothing
-else reads, and a `?cards=` parameter would be one service-worker data-cache
-entry per combination.
-
-**A card that is not being DRAWN holds no position, and the same table now says
-both what to build and what to forget.** `CARDS` in `ui/detail.js` is one `Map`
-keyed by id — `build` and an optional `forget` — replacing what used to be two
-separate lists of the same nine ids answering two different questions: the nine
-`if (shows(id))` gates in source order, and `forgetHiddenPositions`'s own table
-of which ids own a paging position. Merging them is the point, not a side
-effect: two tables naming one set of ids is exactly the "two rules for one
-question" shape this file's other traps warn about, and only `ui/detail.js`
-knows the position mapping in the first place — the view keeps a position in
-**two** places, `state.chartOffsets` (keyed per card by `windowedChart`, two of
-whose four keys are built from the CURRENT granularity, session override
-included) and `state.calEnd`, and `forget` is that same knowledge attached to
-the id it belongs to instead of restated beside it. Both wrong versions shipped
-in one review round before this: clearing only `chartOffsets` left the calendar
-at its old date, and clearing both from `applyDraft` gated on "`detailCards`
-changed at all" sent a still-ticked History card back to today.
-
-`windowedChart` gives its range readout the same `.cal-range` class the calendar
-uses, and its nav the same `.cal-nav`, so a test looking either one up must
-scope to a card by title. Recent days is FIRST on the page, so an unscoped query
-finds the strip's and not the calendar's — which `calcheck.mjs`'s paging check
-did, greenly, for as long as pressing the strip's ‹ Earlier happened to rebuild
-the page.
+`windowedChart` gives its range readout the same `.cal-range` class the
+calendar uses, and its nav the same `.cal-nav`, so a test looking either one up
+must scope to a card by title. Recent days is FIRST on the page, so an unscoped
+query finds the strip's and not the calendar's — which `calcheck.mjs`'s paging
+check did, greenly, for as long as pressing the strip's ‹ Earlier happened to
+rebuild the page.
 
 ## A day nobody answered, drawn as kept
 
 **The dashboard grid and the Calendar card get different treatments on
 purpose, because they are different mediums.** `ui/day-strip.js`'s cells are
-checkboxes — a glyph medium, one character per day — so a habit whose unlogged
-days already count as kept (`habit.unlogged_is_success`, resolved server-side
-by `unansweredCounts`) draws a ghost `✓` there, at 0.45 opacity in the habit's
-own colour. `charts.js`'s calendar is a heatmap — a block medium — so the same
-fact is a faint FILL, `shade(color, 0.07)`, not a glyph on top of a block. One
-idea, expressed once in each grid's own vocabulary; drawing a tick over the
-calendar block or a tinted square in the checkbox strip would be the same idea
-said twice, in a grid that has no use for the other's vocabulary.
+checkboxes — a glyph medium — so a habit whose unlogged days already count as
+kept (`habit.unlogged_is_success`, resolved server-side by `unansweredCounts`)
+draws a ghost `✓` at 0.45 opacity in the habit's own colour. `charts.js`'s
+calendar is a heatmap — a block medium — so the same fact is a faint FILL,
+`shade(color, 0.07)`. One idea in each grid's own vocabulary; drawing a tick
+over a calendar block, or a tinted square in the strip, is the same idea said
+twice in a grid that has no use for the other's.
 
 **The faint mark replaces the `?`, it does not sit beside it.** Both slots hold
-one glyph (the checkbox) or one fill (the calendar cell), so `questionMarks`'s
-`?` is suppressed on exactly the days the ghost tick or the faint fill already
-claims — see the gate at `charts.js`'s `unknownMark` block and the branch order
-inside `paintCheckbox`'s `value == null` case. The two facts this collapses —
-"nobody answered" and "counted as kept anyway" — do not disappear, they move to
-the one place both can still be read apart: the calendar cell's `<title>` (a
-screen reader gets only that, not the fill) says
-`` `${date}: counted as kept — no entry` ``, and the day-strip comment at the
-same branch says why a checkbox can carry only one glyph at a time.
+one glyph or one fill, so `questionMarks`'s `?` is suppressed on exactly the
+days the ghost tick or faint fill already claims. The two facts this collapses
+— "nobody answered" and "counted as kept anyway" — move to the calendar cell's
+`<title>`, which is all a screen reader gets.
 
 **0.07 is chosen against the ramp's floor, not from it.** The at-most ramp's
-`Math.max(0.15, …)` floor on an overage means "a number was recorded"; 0.07 is
-under half of that, specifically so a faint kept-unlogged cell can never be
-misread as a logged amount, however faint. It is not a fifth step on the
-Less→More legend — the ramp still means exactly what it means today — it is a
-new, separately-labelled swatch ("Kept, unlogged") in front of it, in both of
-`ui/detail.js`'s legend branches (the ramp, and `isAvoided`'s Clean/Slipped
-pair), because a fill the legend does not explain is the defect the `isAvoided`
-branch beside it already exists to avoid.
+`Math.max(0.15, …)` floor means "a number was recorded"; 0.07 is under half of
+it, so a kept-unlogged cell can never be misread as a logged amount. It is not
+a fifth step on the Less→More legend but a separately-labelled swatch ("Kept,
+unlogged") in front of it, in **both** of `ui/detail.js`'s legend branches — a
+fill the legend does not explain is the defect the `isAvoided` branch beside it
+already exists to avoid.
 
-**The gate makes the boolean branch unreachable, and that is not an oversight.**
-`unansweredCounts` returns `false` unless the habit is non-boolean AND
-`target_type === 'at_most'`, so only `isAvoided` habits and plain at-most
-numerical ones can ever carry `unlogged_is_success: true`. Do not add a
-matching arm to a boolean day's paint branch — there is no day shape that would
-ever reach it.
-
-**The flag is a payload field, not a sixth mirror.** See `shared/CLAUDE.md`'s
-"Day states and habit shape" for why: `shared/src` is not served here, so no
-module in this directory could call `unansweredCounts` itself even by mistake.
+**The gate makes the boolean branch unreachable, and that is not an
+oversight.** `unansweredCounts` returns `false` unless the habit is non-boolean
+AND `target_type === 'at_most'`. Do not add a matching arm to a boolean day's
+paint branch — no day shape reaches it. **The flag is a payload field, not a
+sixth mirror**: `shared/src` is not served here, so no module in this directory
+could call `unansweredCounts` even by mistake.
 
 **Issue #176 extends the same medium split to a run, not to a fill.** The rule
 is "where the cell would otherwise draw nothing at all", not "where the day is
-not a completion" — on the calendar that predicate is literally
-`fill === empty`, read against the same binding the branches above assign and
-never a string literal, so it inherits every exclusion those branches already
-encode without a separate case for any of them: a partial at-least fill, an
-over-limit number, a skip and a red slip already read as something and stay
-unmarked, and a future day needs no extra guard because the `isFuture` branch
-above always sets `fill = 'transparent'`. On the strip the same rule reads "no
-glyph and no background".
+not a completion" — on the calendar that predicate is literally `fill ===
+empty`, read against the same binding the branches above assign and never a
+string literal, so it inherits every exclusion they already encode. On the
+strip it reads "no glyph and no background".
 
 **The calendar's run mark is a STROKE, never a fill, because 0.07 is already
-spoken for.** "Kept, unlogged" above sits at `shade(color, 0.07)`, under half
-of the at-most ramp's `Math.max(0.15, …)` floor and the at-least ramp's
-`Math.max(0.2, …)` one; a fill squeezed between 0.07 and 0.15 was on the table
-and rejected, because it would sit on the same ramp those floors describe and
-inherit a floor argument that has nothing to do with it. A stroke sits on no
-fill ramp at all, so it can collide with none of this —
-`shade(color, 0.55)`, chosen against the connectors' own `shade(color, 1)` so
-the run's own line stays the dominant mark and the stroke reads as its
-continuation.
+spoken for** — a fill squeezed between 0.07 and 0.15 would sit on the ramp
+those floors describe and inherit an argument that has nothing to do with it.
+`shade(color, 0.55)`, against the connectors' own `shade(color, 1)`. That is
+also why **the `?` survives the run mark on the calendar and not on the
+strip**: the stroke leaves the cell's fill and glyph slots free, where a
+checkbox has only the one glyph.
 
-**That is also why the `?` survives the run mark on the calendar and not on
-the strip.** The stroke leaves the calendar cell's one fill still `empty` and
-its glyph slot still free, so `unknownMark`'s `?` keeps drawing underneath it
-— an in-run unlogged cell carries both. That is unlike the kept-unlogged fill
-above, which claims the calendar's one fill slot and does suppress the `?`. A
-checkbox has only the one glyph, full stop, so on the strip the in-run tick
-takes that slot exactly as the ghost tick above does, and the `?` loses to it
-the same way the ghost tick already wins there.
-
-**The "In a run" swatch asks the GRID what it drew, and that is the one thing
-about it that is not obvious.** `calendarChart` counts the cells it actually
-stroked and reports the number on the `<svg>` as `data-run-marks`; the legend
-gates on that rather than on `inRun.size`. The two differ, and reachably: the
-run set covers a habit's whole history while the card draws one window, so a
-habit whose only qualifying run is months back showed the swatch over a grid
-carrying nothing — reproduced by zooming in twice on an 11-day run from the
-previous December. Recomputing the window in `ui/detail.js` instead would be a
-second derivation of "which cells got the mark" and wrong a second way, since
-a run made entirely of logged days puts every date in `inRun` and leaves no
-cell blank to stroke. The count is set even when it is **zero**, so an absent
-attribute means an old `charts.js` rather than a quiet window — and the gate
-reads it through `Number(...)`, because `"0"` is a truthy string and that is
-precisely the shape a careless version of this ships.
+**The "In a run" swatch asks the GRID what it drew.** `calendarChart` counts
+the cells it actually stroked and reports `data-run-marks` on the `<svg>`; the
+legend gates on that rather than on `inRun.size`, because the run set covers a
+habit's whole history while the card draws one window — a habit whose only
+qualifying run is months back showed the swatch over a grid carrying nothing.
+Recomputing the window in `ui/detail.js` would be a second derivation and wrong
+a second way. The count is set even when **zero**, so an absent attribute means
+an old `charts.js`, and the gate reads it through `Number(...)` because `"0"`
+is truthy.
 
 **The strip's in-run tick reuses the ghost tick's `✓` at 0.45, and the two are
-disjoint by construction, not by a check that enforces it.**
-`unansweredCounts` is `true` only for a non-boolean at-most habit, and there
-every unlogged day already IS a completion — the ghost tick — and every day
-holding a row renders its own number, so its glyph slot is never free for the
-run tick either. No cell can ever be a candidate for both, so no second
-opacity distinguishes them. This is the same shape of argument this section
-already makes for the boolean day-state branch above being unreachable: state
+disjoint by construction** rather than by a check: `unansweredCounts` is true
+only for a non-boolean at-most habit, where every unlogged day already IS a
+completion and every logged day renders its number, so no cell is ever a
+candidate for both. Same shape as the unreachable boolean branch above — state
 it, do not add an arm for a case that cannot arise.
 
 **A day before the habit existed was considered and declined, not lost.**
-`style.css` once carried `.check.today`'s neighbour, `.check.before-start {
-opacity: 0.35 }`, meant to dim a day that predates a habit's creation — but
-nothing ever set the class, on either surface that draws a `.check` cell (the
-dashboard grid and the detail page's "Recent days" strip, both `ui/day-strip.js`).
-"Before the habit existed" is not a supported cell state: the states are the
-four in the root `CLAUDE.md` plus the treatments this section describes, and
-there is no fifth — `.check.today`, the one `.check` modifier still in the
-stylesheet, is a column HIGHLIGHT marking which day is today, not a day state,
-and claims nothing about what happened on it. The rule was deleted rather than
-wired up (#231), so it must not be "restored" later by someone assuming it
-regressed. Dimming pre-start days is still a legitimate future FEATURE
-decision, but it starts by setting the class somewhere, not by re-adding a
-rule nothing sets — and `shared/test/css-dead-rules.test.js` is what makes
-doing that a deliberate act rather than a silent one.
+`.check.before-start { opacity: 0.35 }` was in the stylesheet and nothing ever
+set the class. "Before the habit existed" is not a supported cell state — the
+states are the four in the root `CLAUDE.md` plus the treatments above, and
+`.check.today` is a column HIGHLIGHT rather than a day state. The rule was
+deleted rather than wired up (#231), so it must not be "restored" by someone
+assuming it regressed; dimming pre-start days is a legitimate future feature,
+but it starts by setting the class. `shared/test/css-dead-rules.test.js` makes
+re-adding one a deliberate act.
 
 **Still open, on purpose.** Streak connectors drawn over an empty cell was
 issue #176, addressed above — a different route (`inStreak`) from anything
@@ -992,39 +671,29 @@ still one answer to the decimal-point question rather than a second guess at
 it. `readTarget` (`ui/habit-dialog.js`) is the reader, and two decisions about
 it are not obvious from the code alone.
 
-**And a target is an AMOUNT wherever it is WRITTEN DOWN too, which
-`targetLabel` was left out of.** It spells the number through the caller's
-`showAmount` — `formatAmount` bound to `convention()`, declared as one line in
-`ui/detail.js` and in `ui/dashboard.js` — so the detail head and the dashboard
-row read `≥ 8,5 pages` on the same account whose Edit box holds `8,5`, instead
-of `≥ 8.5` three lines away from it. Passed IN rather than looked up because
-`ui/dates.js` has NO imports (`label-widths.mjs` evaluates its source in a
-page; `dates.test.js` imports it under Node), and DEFAULTED to `String`
-because `shellFirst` can serve one boot this module over a cached older caller
-and that boot must be an old-looking label rather than a TypeError in
-`render()`. Every live caller passes one, and `countcheck.mjs` pins the two
-visible surfaces on a comma account, because a default nobody notices is how a
-call site comes to rely on it.
+**A target is an AMOUNT wherever it is WRITTEN DOWN, and that rule reached
+four surfaces one at a time.** `targetLabel` spells the number through the
+caller's `showAmount` — `formatAmount` bound to `convention()` — so the detail
+head and the dashboard row read `≥ 8,5 pages` on the same account whose Edit
+box holds `8,5`. It is passed IN rather than looked up, because `ui/dates.js`
+has NO imports, and DEFAULTED to `String`, because `shellFirst` can serve one
+boot this module over a cached older caller and that boot must show an
+old-looking label rather than throw in `render()`.
 
-**The FOURTH surface is not a `targetLabel` caller and needed the same rule
-separately.** The day editor's subtitle (`openDayDialog`, `ui/day-dialog.js`)
-says the direction in words — `target at most 8,5 cigs`, not `≤ 8,5 cigs` —
-because it is a sentence about the day being edited rather than a label, so it
-had its own template literal and read `at most 8.5` four lines above the amount
-box `dayCountField.set` had just filled with `8,5`. It declares the same
-`formatAmount(n, convention())` one-liner, now written in three modules for the
-reason it was written in two: a helper either could import would be a new export
-under `shared/public/`, and that is a `CACHE_VERSION` bump.
+**The FOURTH surface is not a `targetLabel` caller and needed the rule
+separately**: the day editor's subtitle says the direction in words (`target
+at most 8,5 cigs`), so it had its own template literal and read `at most 8.5`
+four lines above a box holding `8,5`. That makes the same
+`formatAmount(n, convention())` one-liner declared in three modules, for the
+reason it was already in two — a helper either could import would be a new
+export under `shared/public/`, and that is a `CACHE_VERSION` bump.
 
 **Two suites pin it and they pin different halves.** `daydialog.mjs` hands the
-formatter into the sliced-out function with every other free identifier and
-reads one FRACTIONAL target under both conventions, which pins the
-PASS-THROUGH — the fixture's `8` and `0` targets are spelled the same either
-way, so they could never have failed on this. It cannot see which formatter the
-module ASKS for: `convention()` replaced by a literal `'point'` passes every
-case in it with `typecheck` clean, measured. The WIRING is `countcheck.mjs`'s
-comma section, which opens the day editor from the calendar on an account
-already set to `comma` with a fractional target and requires `#day-sub` to end
+formatter in with every other free identifier, so it pins the PASS-THROUGH and
+cannot see which formatter the module ASKS for — `convention()` replaced by a
+literal `'point'` passes every case in it, typecheck clean, measured. The
+WIRING is `countcheck.mjs`'s comma section, which opens the day editor on a
+`comma` account with a fractional target and requires `#day-sub` to end
 `at least 9,5 pages` and hold no `9.5`.
 
 **The target box submits what was typed; an untouched box submits what was
@@ -1419,119 +1088,42 @@ unguarded code. `categorycheck.mjs` drives CDP `Input.dispatchKeyEvent`.
 
 **The emoji picker is an ADDITION to the icon field, never a replacement, and
 `icon-field.js` is the sole owner of every `#icon-*` id.** The field stays a
-real, editable `<input name="icon">` because the OS picker (Win+. /
-Ctrl+Cmd+Space) lands its choice THERE, a paste from elsewhere is how an emoji
-not in any curated list arrives, and `parseIcon` deliberately accepts any
-grapheme — 運, ✓, a bare letter — that a ~200-entry list will never hold. A
-cell's click writes THE TEXT OF THE FIELD and nothing else: no hidden input, no
-module-level "selected" glyph that `iconField.value()` reads instead, because a
-preset arriving with #66 tier 2 has to be a *different field*, not a magic
-string smuggled through this one.
+real, editable `<input name="icon">` because the OS picker lands its choice
+there, a paste is how an uncurated emoji arrives, and `parseIcon` accepts any
+grapheme a ~200-entry list will never hold. A cell's click writes THE TEXT OF
+THE FIELD and nothing else — no hidden input, no module-level "selected" glyph
+— because a preset arriving with #66 tier 2 has to be a *different field*.
+`previewIcon` is a SECOND DECLARATION of `parseIcon`'s derivation (`shared/src`
+is not served here), pinned behaviourally by `test/icon-field.test.js`, and it
+decides what is DISPLAYED and nothing about what is STORED.
 
-`previewIcon` is a SECOND DECLARATION of `parseIcon`'s derivation — same strip
-set, same grapheme segmenter, same drop past `LIMITS.icon` — because
-`shared/src` is not served to the browser, exactly the `ui/values.js` ↔
-`src/constants.js` arrangement one level up. `test/icon-field.test.js` pins the
-two against each other behaviourally, over a shared example table, so they
-cannot quietly diverge. It decides what is DISPLAYED and nothing about what is
-STORED: the payload still sends the field's raw text, and `parseIcon` on the
-server is still the only authority on what a habit's icon becomes.
+Five rules about the panel, each of which shipped wrong once. The search box is
+inside `#habit-form`, so it is the same Enter trap as the category boxes above
+— Enter picks the first matching cell and calls `preventDefault()`. **Escape
+closes the PANEL, and `preventDefault` is the load-bearing half, not
+`stopPropagation`**: a `<dialog>`'s Escape-close is the keydown's own default
+action rather than a bubbling listener. **That handler is bound to the DIALOG,
+guarded on the panel being open** — bound to the panel it never runs for a
+mouse-opened picker, where focus is still on the toggle. **It may not restore
+focus unconditionally**: it asks `els.panel.contains(activeElement) ||
+activeElement === els.toggle`, and asks BEFORE `closePanel()`, since hiding a
+subtree blurs what is in it. **A press outside dismisses, and the TOGGLE is
+excluded** — unexcluded, one press is two state changes and the toggle can
+never close. And **the grid is built on the first picker open, keyed on
+`gridQuery`** — the QUERY, not "has this been built", or a session closed
+mid-search reopens filtered.
 
-The picker's search box is a text box inside `#habit-form` too, so it is the
-same Enter trap as the category boxes above, over a control this module owns
-instead — Enter there picks the FIRST matching cell rather than merely
-swallowing the key (a box where Enter does nothing is its own bug report) and
-calls `preventDefault()`. And while the panel is open, Escape closes the
-PANEL, not the `<dialog>` — `preventDefault` is what is load-bearing there,
-not `stopPropagation`: a `<dialog>`'s Escape-close is not a bubbling listener
-a `stopPropagation` could intercept, it is the keydown's own default action,
-so without `preventDefault` the first Escape a user presses to dismiss the
-picker closes the whole habit dialog too, losing everything typed into it.
-
-**That handler is bound to the DIALOG, guarded on the panel being open — not
-to the panel, which is where it obviously belongs and where it only half
-works.** `#icon-picker-toggle` sits beside the input and `#icon-picker` is a
-sibling AFTER it, so opening the picker with the mouse leaves focus on the
-TOGGLE, outside the panel: a keydown listener on the panel never runs, and
-Escape takes the whole dialog. The keyboard path — Tab into the panel, or the
-search box — is inside it and worked, which is exactly why the first version
-shipped and why the check that covered it (`feat4.mjs` (g)) could not see the
-hole: it focused `#icon-search` before pressing the key. Focusing the search
-box on open does not fix this either, since Shift+Tab puts the user back on
-the toggle with the panel still open. Case `g2` presses Escape from the
-toggle, and it needs a REAL CDP mouse press to get there — a synthetic
-`.click()` does not move focus, so a test built on one passes against the
-unfixed code.
-
-**Bound to the dialog, it runs for a press made ANYWHERE in the dialog — so
-what it may not do is restore focus unconditionally.** The guard is the PANEL
-being open, which says nothing about where the caret is: with the picker open,
-click into Description, type, press Escape, and an unconditional
-`els.toggle.focus()` yanks the caret off the box being typed in and onto a
-button, so the next keystrokes go nowhere and Escape-to-cancel needs two
-presses. The restore is therefore asked of `els.panel.contains(activeElement)
-|| activeElement === els.toggle` — the two places a picker-opened focus can
-be — and it is asked BEFORE `closePanel()`, because hiding an element that
-contains the focused node blurs it and by then the answer is always `<body>`.
-Cases `g` and `g2` cannot see this: both press Escape from inside the picker,
-which is exactly where restoring focus is right. `g3` is the case for it.
-
-**A press outside the panel dismisses it, and the TOGGLE is excluded from
-that.** Clicking into Name or Description used to leave 182 cells open over the
-form until Escape or a second press on the toggle. The exclusion is not
-defensive tidiness: the toggle has a click handler of its own, so a press on it
-runs both, and unexcluded one press is two state changes — on `pointerdown`
-this listener runs first, closes the panel, and the toggle's own handler then
-finds it hidden and reopens it, giving a toggle that opens and can never close.
-Bound on `click` the order inverts and the OPENING press cancels itself
-instead; there is no ordering that works without the exclusion, which is why
-`g5` presses the toggle three times rather than once. `contains` rather than
-`===`, because the press lands on the `<span>` holding the glyph.
-`pointerdown` rather than `click` so a press that ends as a drag still
-dismisses and so one event covers mouse and touch — the cost is in the tests,
-where a scripted `.click()` dispatches no `pointerdown` at all and a case built
-on one passes against a build with no dismissal in it, so `g4`/`g5` drive real
-CDP mouse presses exactly as `g2` does. It restores focus to nothing, which is
-the rule above met from the other side.
-
-**The grid is built on the FIRST picker open and not rebuilt after it.**
-`reset()` used to build all 182 cells on every habit-dialog open and
-`openPanel()` built all 182 again — measured by stamping the nodes, 0 of the
-first generation survived the panel opening, so a session that opened the
-picker paid for 364 `<button>`s and one that never opened it paid for 182.
-Measured after: 0 at page load, **0 after a habit-dialog open**, 182 on the
-first picker open, and all 182 still the same nodes after a second dialog open
-and a second picker open. `gridQuery` is the key and it is the QUERY, not "has
-this ever been built" — a session closed mid-search leaves a filtered grid
-behind, so the next open has to rebuild; keyed on merely being populated, the
-picker reopens showing the one cell that matched `hydrate`. Nothing about a
-cell depends on the habit or the current icon value (`renderGrid` reads the
-frozen dataset alone, and `.icon-cell` has no selected style for a value to
-light up), which is what makes the skip safe rather than only cheap — give a
-cell a per-habit appearance later and this cache is what has to learn about
-it. The one thing the old rebuild really did was park the roving tab stop back
-on cell 0, so `openPanel` now does that explicitly whether or not it rebuilt;
-without it, Tab into a reopened picker lands wherever the arrow keys left it
-last session.
-
-**And the field's hint is `aria-describedby`, not a wrapping label.** The hint
-had to leave the `<label>` when the input did (the label names ONLY the input,
-so the live-region caption and the toggle stay out of the accessible name),
-and a hint that is nobody's child reaches no assistive technology at all —
-measured through CDP's accessibility tree, the input's description was `null`.
-It carries an id and the input describes itself by it, which is a DESCRIPTION
-and not a name: measured again, name `"Icon"`, description the hint's own
-sentence. Do not fix a future version of this by putting the hint back inside
-the label; that is the accessible-name mutation this arrangement exists to
-avoid.
+Two things about pinning any of it: the dismissal and the focus cases need REAL
+CDP mouse presses (a scripted `.click()` dispatches no `pointerdown` and does
+not move focus), and the field's hint is `aria-describedby` rather than a
+wrapping label — a hint that is nobody's child reaches no assistive technology
+at all. `docs/decisions/icons.md` has all five in full, with the measured node
+counts and the accessibility-tree readings.
 
 `#icon-picker`'s `hidden` state and `#icon-search`'s value are static markup,
-wired once by `initIconField()` — nothing about closing and reopening the
-dialog touches either on its own, so a panel left open (and a query left
-typed) in one session was still open and still filtering the grid the next
-time the dialog opened, for a *different* habit. `iconField.set()` — called
-from `habit-dialog.js`'s `openDialog`, for every session — resets both, which
-is the one seam every dialog open already passes through.
+wired once by `initIconField()`, so `iconField.set()` resets both on every
+dialog open — otherwise a panel left open and filtered in one session is still
+open and still filtering for a *different* habit the next time.
 
 **A localised name is never indexed by a Gregorian field.** `getMonth()`,
 `getDate()` and `getFullYear()` are fields of the *Gregorian* calendar, so
@@ -1571,18 +1163,16 @@ month captions in 11 of 14 non-English locales with room to spare. Over-
 reserving costs pixels; over-degrading costs the label. Both call sites now name
 which they are doing.
 
-**#132: `estimateTextWidth` no longer bills a combining mark twice.** `solid`
-(the code points that are not marks) already chose between the `LONE` and
-`JOINED` rate tables; the sum still walked every code point, so a mark was
-billed its own rate on top of the base glyph it rides on. The sum now walks
-`solid` too — one filter, used once — so a mark costs nothing beyond its
-cluster, which is what the function's doc comment always claimed. This makes
-some estimates SMALLER, the dangerous direction, so `WIDTH_SAFETY` was
-re-measured rather than carried over (`shared/test/label-widths.mjs`) and is
-safe only because #131 had already raised `LONE.indic` from a rate near 1.0 to
-1.7 — the mark-billing this removes was covering for that OLD, lower rate, not
-for a property of marks. `docs/decisions/dashboard-and-detail.md` has the
-numbers and why the two changes are coupled.
+**#132: `estimateTextWidth` no longer bills a combining mark twice.** The sum
+walks `solid` (the non-mark code points) as the rate-table choice already did,
+so a mark costs nothing beyond its cluster — what the doc comment always
+claimed. This makes some estimates SMALLER, the dangerous direction, so
+`WIDTH_SAFETY` was re-measured rather than carried over
+(`shared/test/label-widths.mjs`) and is safe only because #131 had already
+raised `LONE.indic` from ~1.0 to 1.7 — the mark-billing this removes was
+covering for that OLD rate, not for a property of marks.
+`docs/decisions/dashboard-and-detail.md` has the numbers and why the two
+changes are coupled.
 
 **A caption that is thinned away must not be the newest one.** The drop is a
 left-to-right walk, and at the right-hand edge the collision is always with the
@@ -1597,32 +1187,24 @@ somewhere else.** Every defect above passes the whole unit suite in the locale
 CI runs in — a `getMonth()`-indexed table is 12 for 12 in English. The sweep is
 `LC_ALL` and a subprocess, so there is no test-only hook in the module under
 test, and it runs `dates.test.js`, `calendar.test.js`, `window.test.js` and
-`weekcheck.mjs` in ten locales chosen for a PROPERTY each (a non-Gregorian
-calendar, non-ASCII digits, a different era, long weekday names) rather than for
-coverage. It asserts the locale actually took, because ICU falls back silently
-for a name it does not know and ten runs of en-US report ten passes.
-`weekcheck` is in there because a LAYOUT is locale-shaped too: the row gutter's
-ceiling binds in ten locales at 328px and in none in English, so running it only
-in the runner's locale pinned the one case where the bound never applies.
+`weekcheck.mjs` in ten locales chosen for a PROPERTY each rather than for
+coverage. **It asserts the locale actually took**, because ICU falls back
+silently and ten runs of en-US report ten passes. `weekcheck` is in there
+because a LAYOUT is locale-shaped too: the row gutter's ceiling binds in ten
+locales at 328px and in none in English.
 
 **A chart's labels and its data have to be asserted TOGETHER.** `weekcheck.mjs`
-exists because a review broke the week-start plumbing four ways at once — bars
-read positionally while captions rotated, the calendar's row labels left
-unrotated, Home/End back on `getDay()`, the month grid reading rows by index —
-and the whole unit suite and every browser suite still passed. The arithmetic
-was covered; nothing looked at a rendered chart. The failure that matters is not
+exists because a review broke the week-start plumbing four ways at once and the
+whole unit suite and every browser suite still passed — the arithmetic was
+covered and nothing looked at a rendered chart. The failure that matters is not
 "the wrong day is first", it is a caption and a datum moving independently,
-which reads as deliberate.
-
-Note where each half is pinned, because the split is forced rather than chosen.
-`weekcheck.mjs` is OFFLINE and covers the labels and the pairing. **Home/End is
-in `feat4.mjs`, in a real browser**, because the handler is reached through a
-`keydown` listener that only exists when the calendar is interactive and it
-reads `dataset`, which the offline fake DOM does not have — a first version of
-`weekcheck` claimed to cover it and did not, and the `getDay()` mutation passed
-every suite in the repo. The month chart needs BOTH its tooltip and its drawn
-caption asserted: they are built from different arrays, so checking one leaves
-the other free to move.
+which reads as deliberate. Note where each half is pinned, because the split is
+forced rather than chosen: `weekcheck.mjs` is OFFLINE and covers the labels and
+the pairing, while **Home/End is in `feat4.mjs`, in a real browser**, because
+that handler needs a `keydown` listener and `dataset` the fake DOM does not
+have — a first version of `weekcheck` claimed to cover it and did not. The
+month chart needs BOTH its tooltip and its drawn caption asserted: they are
+built from different arrays.
 
 **Charts with a time axis page rather than shrink.** `slot = width / count`
 silently squeezes bars to hairlines once a habit has a year of daily data.
@@ -1635,102 +1217,63 @@ screens — `test/window.test.js` asserts no column is ever strandable.
 **`columnsForWidth`'s `reserved` is the CALLER's own non-plot width, and a
 chart whose gutter is MEASURED must pass its own (#285).** The `46` default is
 not a general-purpose figure — it is `scoreChart`'s and `historyChart`'s own
-literal `pad.left + pad.right`, which is why those two callers pass nothing.
-`weekdayMonthChart` measures its `pad.left` from the account's localised short
-weekday names instead of using a fixed one, so it is the one caller that
-passes its own figure — `weekdayMonthReserve(width)` (`charts.js`), read by
-both the chart's own `pad` and by `ui/detail.js` — rather than the shared
-default. Handing `columnsForWidth` a reserve narrower than the chart's real
-gutter computes a column count for a plot area wider than that chart actually
-has, and the per-column width it ends up with falls below `MIN_SLOT` — the
-very floor the function exists to enforce. `frequencyChart` is the trap this
-generalises to: it calls `gutterFor` too and still takes the shared default,
-because its `windowedChart` capacity (`density: 60`) is a vertical ROW count,
-and a horizontal gutter cannot constrain how many rows fit — a chart calling
-`gutterFor` is not by itself a reason to pass `reserved`. Do not widen the
-shared default for one caller's sake instead of giving that caller its own
-figure: a reverted `Math.max(46, …)` version of this did, and it cost `score`
-and `history` about 30% of their columns at every width, at every locale, to
-fix a defect neither chart had. See `docs/decisions/dashboard-and-detail.md`
-(#285) for the measured figures.
+`pad.left + pad.right`, which is why those two pass nothing.
+`weekdayMonthChart` measures its `pad.left` from the account's localised
+weekday names, so it is the one caller that passes its own
+(`weekdayMonthReserve(width)`). Handing `columnsForWidth` a reserve narrower
+than the real gutter computes a column count for a plot area wider than the
+chart has, and the per-column width falls below `MIN_SLOT` — the floor the
+function exists to enforce. **`frequencyChart` is the trap this generalises
+to**: it calls `gutterFor` too and still takes the default, because its
+capacity (`density: 60`) is a vertical ROW count and a horizontal gutter
+cannot constrain rows — calling `gutterFor` is not by itself a reason to pass
+`reserved`. Do not widen the shared default for one caller instead: a reverted
+`Math.max(46, …)` version cost `score` and `history` ~30% of their columns at
+every width and locale, to fix a defect neither had.
+`docs/decisions/dashboard-and-detail.md` (#285) has the figures.
 
 **Connectivity needs more than the `online` event.** That event tracks the
 network interface, not the server, so a restarted server left the app stuck
-offline until a manual reload. `watchConnectivity` also re-probes on
-`visibilitychange` and polls with a backoff *while offline only* — it makes no
-requests at all once the server answers. It reports transitions, not polls, or
-reconnecting would re-render the dashboard every few seconds.
+offline until a manual reload. `watchConnectivity` re-probes on
+`visibilitychange` and polls with a backoff *while offline only*, and it
+reports transitions rather than polls, or reconnecting would re-render the
+dashboard every few seconds. That leaves it blind to the outage it is most
+likely to meet, so it takes an input too: `reportOffline`, called by
+`ui/api.js` when a write has to be queued. It must come in through there rather
+than as a `setOffline` from outside, or the watcher's `last` stays `true` and
+it neither polls nor reports the transition. See
+`docs/decisions/connectivity.md`.
 
-Which leaves it blind to the outage it is most likely to meet, so the watcher
-takes an input as well: `reportOffline`, called by `ui/api.js` when a write has
-to be queued. A failed request of our own is better evidence than a probe — it
-is the actual traffic — and it must come in through there rather than as a
-`setOffline` from outside, or the watcher's `last` stays `true` and it neither
-polls nor reports the transition. See `docs/decisions/connectivity.md`.
+Once it HAS said so, `api()` stops asking: a write finds `state.offline` true
+and goes to the outbox without opening a socket, so the first tap pays the 10s
+bound and every tap after costs ~100ms. A GET still goes to the network, since
+the worker may hold a cached copy and stale beats blank.
 
-And once it HAS said so, `api()` stops asking: a write finds `state.offline`
-already true and goes to the outbox without opening a socket. Tap one is what
-discovers an outage and there is no cheaper way to learn it — probing `/healthz`
-per write is what that endpoint's four callers make expensive — so the first tap
-pays the 10s bound and every tap after it costs ~100ms. Note this branch was
-unreachable before the watcher grew that input: nothing set the state on the
-write path, so "when the app already believes it is offline" described no state
-the app could be in, and the obvious-looking fix would have done nothing.
+**The write is staged BEFORE the attempt.** `enqueue` returns its `seq`,
+`api()` holds it for the length of the fetch and `unstage`s it the moment any
+answer arrives — on ANY response, not just a good one, since leaving it staged
+on a 5xx turns every failed write into a silent retry. That closes the window
+the bound only shortened: a check-off used to exist solely in a promise between
+the tap and the fetch settling, and closing the tab lost it from the outbox and
+the server alike.
 
-And the write is staged BEFORE the attempt, not after it. `enqueue` returns its
-`seq`, `api()` holds it for the length of the fetch and `unstage`s it the moment
-any answer arrives. That closes the window the bound only shortened: the queue
-used to hold writes that had already failed, so between the tap and the fetch
-settling a check-off existed solely in a promise and closing the tab lost it
-from the outbox and the server alike.
+**The predicate is `replayable()`, and it names one question — is this write
+safe to arrive twice?** Three rules turn on it (what may be staged, what may be
+pre-empted, what may be queued on failure), all three end in a replay, so all
+three read one function. `POST /habits` is the only write that answers no, and
+it is **bounded but never queued**: aborting a create the server has begun and
+replaying it is two habits, but not bounding it only made the dialog spin while
+the create may or may not have landed. Abandoned and reported as *indeterminate*
+is the honest shape. It is excluded by the same `bounded()` predicate as the
+timeout, not a second opinion about the same call.
 
-It is removed on ANY response, not just a good one. Leaving it staged on a 5xx
-would turn every failed write into a silent retry, which is a bigger change than
-this and not obviously wanted — the caller is told and the caller decides. What
-the staging covers is precisely the in-flight window, which is precisely what
-was lossy.
-
-Staging is limited to calls safe to arrive twice, because a concurrent `flush()`
-can send a staged write while the live attempt is still out: two identical
-upserts keyed on habit and date, and the second changes nothing.
-
-The predicate is `replayable()`, and it names one question — is this write safe
-to arrive twice? — because three rules turn on it: what may be staged, what may
-be pre-empted, and what may be queued on failure. All three end in a replay from
-the outbox, so all three need the same answer, and having them read one function
-is what stops the next change moving one and missing the others.
-
-`POST /habits` is the only write that answers no. It is **bounded but never
-queued**, which is not the obvious pairing and is the point: it used to be left
-unbounded on the reasoning that aborting a create the server had begun and then
-replaying it is two habits. The first half is true and is why it is not
-replayable — but not bounding it did not avoid the duplicate, it only made the
-dialog spin until the OS gave up while the create may or may not have landed.
-Abandoned, not replayed, and reported as *indeterminate* is the honest shape; the
-dialog closes and reloads the list on that error, so "check whether it was
-created" is something the user can see rather than a thing they are told to do.
-
-**`POST /categories` is replayable, and it ALSO yields a second row on a
-literal reading of "arrives twice safely" — the reasoning above is not "any
-create is fine to replay", or `POST /habits` would not need its own
-exception.** What makes this one different is that a second attempt cannot
-succeed *silently*: the account's own name is unique (`categoryNameTaken`,
-backed by the DB constraint `isCategoryNameConflict` maps to 409 rather than
-letting surface as a 500), so a staged write that lands twice gets the second
-attempt refused as a duplicate of the first, and the outbox drops every 4xx as
-a permanent failure rather than retrying it — never a second category with the
-same name. `POST /habits` has no name uniqueness to fall back on; two habits
-named the same thing are simply two habits. Do not relax the duplicate-name
-check on this route without re-reading this paragraph — it is not merely a
-validation nicety, it is what keeps this write safe to stage and replay at all.
-
-A GET still goes to the network, because
-the service worker may hold a cached copy and skipping the request throws that
-away — stale beats blank. And `POST /habits` is excluded **by the same
-`bounded()` predicate as the timeout**, not by a second opinion about the same
-call: pre-empting it would in fact be safe, since nothing is sent and nothing
-can arrive twice, but two rules disagreeing about which call is special is how
-the next person changes one and not the other.
+**`POST /categories` is replayable even though it also yields a second row on a
+literal reading** — the rule is not "any create is fine to replay". A second
+attempt cannot succeed *silently*: the account's own name is unique, so a
+staged write landing twice is refused as a duplicate and the outbox drops every
+4xx as permanent. `POST /habits` has no name uniqueness to fall back on. Do not
+relax the duplicate-name check on that route without re-reading this — it is
+what keeps the write safe to stage and replay at all.
 
 **The calendar is anchored on its END, not its start.** Going back
 `weeks*7` days and *then* snapping back to the week's first day shifts the whole
@@ -1785,28 +1328,23 @@ raises stops being clickable at all.** It moves the hovered cell to the end of
 its parent and then its MARKS after it — the `?` glyph, #297's note dot — so
 the obvious early return, `parent.lastElementChild === cell`, is one a cell
 carrying a mark can never satisfy: `raise` itself put the mark last. Every
-event therefore re-appended the group, and a re-append blurs the cell, and
-`raise` restores the focus it took, and the restore fires `focusin`, which
-raises again. Measured against the unfixed build with a real CDP mouse press on
-a noted day: **2,066 `focusin`s and 66 `pointerover`s for one press, and no
-`click` at all** — the mousedown target was being detached and reattached under
-the pointer for the whole gesture, so the day editor could not be opened from
-any day carrying a note, or, with `questionMarks` on, from any unanswered day.
-`alreadyRaised` walks the exact end state `raise` builds — the cell, then its
-marks, then nothing — rather than counting them or testing `lastElementChild`,
-either of which is satisfiable by an arrangement `raise` would not have
-produced.
+event therefore re-appended the group, a re-append blurs the cell, `raise`
+restores the focus it took, and the restore fires `focusin`, which raises
+again. Measured on the unfixed build with a real CDP press on a noted day:
+**2,066 `focusin`s and 66 `pointerover`s for one press, and no `click` at all**
+— so the day editor could not be opened from any day carrying a note, or, with
+`questionMarks` on, from any unanswered day. `alreadyRaised` walks the exact
+end state `raise` builds — the cell, then its marks, then nothing — rather than
+counting them or testing `lastElementChild`, either of which is satisfiable by
+an arrangement `raise` would not have produced.
 
-Two things about pinning it. The check has to be a **real CDP mouse press**: the
-loop is driven by `pointerover` and `focusin`, neither of which a scripted
-`.click()` dispatches, so a case built on one passes against the unfixed code.
-And it needs the **negative half beside it** — the same press on a day with no
-mark — or a press that opened nothing for an unrelated reason (a mis-hit, a cell
-scrolled out of view) reads as this defect and a build with no fix in it looks
-fixed. `calcheck.mjs`'s note-mark block has both. This is also the shape the
-root `CLAUDE.md` warns about directly: drawing the dot and counting it on
-`data-note-marks` was pinned, and said nothing whatever about whether the day
-underneath could still be opened.
+Pinning it needs a **real CDP mouse press** (the loop is driven by
+`pointerover` and `focusin`, which a scripted `.click()` dispatches neither)
+and the **negative half beside it** — the same press on a day with no mark — or
+a press that opened nothing for an unrelated reason reads as this defect.
+`calcheck.mjs`'s note-mark block has both. This is the root `CLAUDE.md`'s
+own warning met exactly: drawing the dot and counting it on `data-note-marks`
+was pinned, and said nothing about whether the day underneath could be opened.
 
 **The search box is OUTSIDE `#grid`, and that is the whole design.**
 `paint()` runs on every keystroke and rebuilds that subtree with
@@ -1816,55 +1354,37 @@ that need not be is to not rebuild it — and `searchcheck.mjs` asserts a whole
 word arrives with focus still in the box, because moving it inside `#grid` does
 not fail a check, it makes the element unreadable.
 
-Three rules travel with it. **The drag handle goes while a filter is on**: a drop
-against a subset computes a `position` from neighbours that are not the habit's.
-Note what is NOT the reason — `persistOrder` sends `state.habits.map(h => h.id)`,
-the FULL list, so nothing is dropped from the write; what a drop against a subset
-gets wrong is where in that list the habit lands. **The threshold reads the
-unfiltered count** (and the box also stays while it has focus), or it vanishes
-under the cursor at the moment a query narrows the list past it. And **the
-MUTATORS clear the query**, not the `'reload'` listener. Doing it in the listener
-looks equivalent and is not: `'reload'` has ten emitters and only half replace
-anything, so it also wiped the box on **Back from a habit** — the feature's main
-workflow — and on a background reconnect, mid-word.
+Three rules travel with it. **The drag handle goes while a filter is on**: a
+drop against a subset computes a `position` from neighbours that are not the
+habit's. Note what is NOT the reason — `persistOrder` sends the FULL list, so
+nothing is dropped from the write; what a drop against a subset gets wrong is
+where in that list the habit lands. **The threshold reads the unfiltered
+count** (and the box stays while it has focus), or it vanishes under the cursor
+as a query narrows the list past it. And **the MUTATORS clear the query**, not
+the `'reload'` listener — `'reload'` has ten emitters and only half replace
+anything, so doing it there also wiped the box on Back from a habit and on a
+background reconnect, mid-word.
 
-**But a mutator clears it only when what it wrote would be OFF THE LIST**, which
-is one question and not a list of mutators. Clearing on every save was the same
-defect one road over: filter to a habit, open it, Edit, change only the COLOUR,
-Save, Back — and the box is empty with all eight rows showing, a filter wiped by
-something that replaced nothing. So `habit-dialog` asks `staysOnList` and clears
-only on a no.
+**But a mutator clears it only when what it wrote would be OFF THE LIST, and
+the question is `staysOnList` rather than `matchesQuery`.** Clearing on every
+save wipes a filter that nothing replaced (edit only the colour, Save, Back).
+A create need not match and a rename may stop matching — but **archiving**
+touches neither matched field and removes the row anyway, because `load()`
+fetches the active habits or the archived ones and never both, so the filter
+alone left "No habits match that." over an archive that had just succeeded.
+`staysOnList` is `archived` and the match together. `deleteHabit`'s
+unconditional clear is that rule resolved in advance rather than a second rule;
+`restoreHabit` asks it properly; `data-dialog` is the one real exception, since
+a restore replaces the whole account.
 
-**The question is `staysOnList` and not `matchesQuery`, and the gap between them
-is a whole route.** A create need not match the query and a rename may stop
-matching — that second one is the same disappearance from the other side, and the
-reason "this was a create" is the tempting simpler rule and the wrong one. But
-**archiving** touches neither matched field and removes the row anyway, because
-`load()` fetches the active habits or the archived ones and never both. Asking
-the filter alone left "No habits match that." over an archive that had just
-succeeded — the very sentence the rename case exists to prevent, arriving by the
-one route that predicate cannot see. `staysOnList` is `archived` and the match
-together, and it is what `deleteHabit`'s unconditional clear already IS: for a
-habit that no longer exists the answer is no however the account is set up, so
-the constant there is this rule resolved in advance rather than a second rule.
-`restoreHabit` asks it properly, since an undo is a create with the habit in
-hand. `data-dialog` is the one real exception — a restore replaces the whole
-account, and there is no one habit to ask about.
-
-Two things about the shape of it. It re-tests the MATCH rather than comparing the
-name, because the filter reads the **description** too: a habit found by its
-second field is one a name comparison is blind to, and the match also makes an
-edit that still matches a no-op rather than a harmless pointless clear. And it is
-asked of the **reply**, not of the request — `parseHabit` clamps `description` to
-`LIMITS.description`, so a mention of the query past the cut is in what was sent
-and not in what was stored, and the box then survives over a list the habit has
-just left. Both routes return the stored habit in both editions.
-
-The predicate lives in `ui/store.js` beside `query` — a file that touches no DOM
-and imports nothing — because `dashboard` imports `habit-dialog` already, so a
-second copy of the rule was the alternative to a cycle. All four clears are
-pinned in `searchcheck.mjs` now; three were deletable in silence, and the restore
-is the one whose removal left the entire browser suite green.
+Two things about its shape. It re-tests the MATCH rather than comparing the
+name, because the filter reads the **description** too. And it is asked of the
+**reply**, not the request — `parseHabit` clamps `description`, so a mention of
+the query past the cut is in what was sent and not in what was stored. It lives
+in `ui/store.js` beside `query`, because `dashboard` imports `habit-dialog`
+already and a second copy of the rule was the alternative to a cycle. All four
+clears are pinned in `searchcheck.mjs`; three were deletable in silence, and
+the restore is the one whose removal left the entire browser suite green.
 
 **A rebuilt control keeps focus via `data-focus-key`, not its position.**
 `dashboard.paint()` rebuilds the grid with `replaceChildren()`, and a single
@@ -1905,28 +1425,22 @@ server to use the settings it *holds*, so it is disabled while the draft is
 dirty rather than quietly testing the old value.
 
 **A section can also SAY something, and that arrives late.**
-`SECTION_NOTICES` mirrors `SECTION_ACTIONS` — keyed by section, given the draft,
-returning prose — and the one entry is "your last reminder was not delivered",
-from `GET /api/notify/status`. Three things about how it is rendered. It is
-*not* awaited by `openSettings`: waiting on a request before showing the
-settings would make every open feel slow to spare the one that has something to
-report, and offline the dialog would never open at all. What lands when the
-answer does is **`paintNotices`, which repaints the prose and touches no
-control**, and that is the whole of why a late answer is safe. It used to be
-`renderSettingsBody`, hedged twice — only on a clean draft, and only when the
-set of notices had changed — because a rebuild tears every control out and takes
-a text field's focus and CONTENT with it: `change` never fires on a removed
-input, so a half-typed webhook URL was simply gone. Both guards are now
-unnecessary rather than merely absent, and removing them was the point: a clean
-draft is exactly the state nobody is in when they most need the sentence, so the
-old rule withheld it from the person mid-edit trying to work out why their
-reminders had stopped. Do not put the rebuild back; `test/browser/nudgecheck.mjs`
-holds `/api/notify/status` open, types into the webhook field and releases it, so
-it fails if you do. The notices read the **draft**, so switching a destination
-off makes its warning disappear immediately rather than after a save and a
-refetch. Pressing "send a test notification" re-asks, because a test is a real
-delivery attempt and is what clears the notice once a replacement webhook
-works.
+`SECTION_NOTICES` mirrors `SECTION_ACTIONS` — keyed by section, given the
+draft, returning prose — and the one entry is "your last reminder was not
+delivered", from `GET /api/notify/status`. It is *not* awaited by
+`openSettings`: waiting would make every open feel slow to spare the one with
+something to report, and offline the dialog would never open. What lands when
+the answer does is **`paintNotices`, which repaints the prose and touches no
+control**, and that is the whole of why a late answer is safe — a rebuild
+tears every control out and takes a text field's focus and CONTENT with it,
+since `change` never fires on a removed input. **Do not put the rebuild
+back**; `test/browser/nudgecheck.mjs` holds `/api/notify/status` open, types
+into the webhook field and releases it, so it fails if you do. It is
+deliberately unhedged: an earlier version repainted only on a clean draft,
+which is exactly the state nobody is in when they most need the sentence. The
+notices read the **draft**, so switching a destination off clears its warning
+immediately; pressing "send a test notification" re-asks, because a test is a
+real delivery attempt.
 
 **A setting the server normalises cannot be judged here.** Whether a webhook
 URL is acceptable depends on a host allowlist that lives with the fetch, so the
@@ -1949,23 +1463,20 @@ nothing once a toggle has been touched. Read through the accessor, never
 **Saving a habit returns you to where the edit started**, and so does adding a
 category from the same dialog. `habit-dialog`'s `announce()` emits `'reload'`
 only when `dashboardShowing()`, `'change'` otherwise — see "A dialog does not
-know which view it was opened over" under Routing for the whole rule. So
-editing from a habit's own page reloads that page and creating from the
-dashboard reloads the list. It cannot simply call the detail view — that is the
-import cycle the store exists to break — and it cannot always emit `'change'`,
-because on the dashboard that is a repaint from stale state and a newly created
-habit would not appear. Deleting still goes home: the page you were on is gone.
+know which view it was opened over" under Routing. It cannot simply call the
+detail view (the import cycle the store exists to break) and it cannot always
+emit `'change'`, because on the dashboard that is a repaint from stale state
+and a newly created habit would not appear. Deleting still goes home.
 
-**...and the page it returns you to is SEEDED from the save, not left to the
-refetch.** `announce(saved)` passes the reply on, and `ui/detail.js` redraws
-from it synchronously before starting its `/stats` + `/entries` round trips —
-because the head's Edit button captures the habit it was drawn from, so in that
-gap pressing Edit reopened the dialog on the pre-save habit and Save from there
-wrote the edit back out. The seed is the SERVER's answer (`parseHabit`
-normalises as well as validates) merged OVER the habit the page holds, never
-assigned wholesale: `unlogged_is_success` rides on the `/stats` payload and not
-on a habit write, so assigning would drop it and a limit would lose its ghost
-ticks until the refetch landed.
+**...and the page it returns to is SEEDED from the save, not left to the
+refetch.** `announce(saved)` passes the reply on and `ui/detail.js` redraws
+from it synchronously, because the head's Edit button captures the habit it
+was drawn from — so in that gap pressing Edit reopened the dialog on the
+pre-save habit and Save from there wrote the edit back out. The seed is the
+SERVER's answer merged OVER the habit the page holds, **never assigned
+wholesale**: `unlogged_is_success` rides on the `/stats` payload and not on a
+habit write, so assigning would drop it and a limit would lose its ghost ticks
+until the refetch landed.
 
 **The time picker's parser is mirrored in Kotlin.** `public/ui/time.js` and
 `android-native/.../ReminderTime.kt` accept the same inputs and produce the same
@@ -1977,18 +1488,14 @@ unparseable text is an error to report — the caller does different things with
 them, so they are `''` and `null` rather than both falsy.
 
 **A habit shown as something to avoid keeps the cycle and changes the
-encoding.** `show_as: 'avoid'` on an at-most habit walks the same four states —
-a clean day is `done`, a slip is `no` — so `nextDayState` is untouched and its
-Kotlin mirror did not have to learn anything. `valueForState` is what differs:
-`done` writes 0 and `no` writes `target + 1`, where an ordinary habit writes
-`YES` and `UNSET`. It is mirrored in `Grid.valueForState` for the reason the
-cycle is — a tap happens with no network — and `isAvoided` asks all THREE
-questions: avoid, at-most, and MEASURABLE. `show_as` is kept when a habit's type
-or goal is switched, so that switching back does not lose it, which means the
-predicate carries the whole rule. Asking two of the three put a habit somewhere
-it could not leave — boolean + at_most + avoid is reachable from the form in one
-sitting, and a tap meaning done then encoded as 0, which `isCompleted` reads as
-NOT done for a yes/no habit.
+encoding** — see `shared/CLAUDE.md`'s "Day states and habit shape" for the
+storage argument. What matters here: `valueForState` is the only thing that
+differs (`done` writes 0, `no` writes `target + 1`), it is mirrored in
+`Grid.valueForState` because a tap happens with no network, and `isAvoided`
+asks all THREE questions — avoid, at-most, and MEASURABLE. Asking two of the
+three put a habit somewhere it could not leave: boolean + at_most + avoid is
+reachable from the form in one sitting, and a tap meaning done was then encoded
+as 0, which `isCompleted` reads as NOT done for a yes/no habit.
 
 `valueForState` **throws** for a skip rather than answering. A skip is the
 status column, and returning Loop's SKIP sentinel as a value stored three of the

@@ -1375,3 +1375,56 @@ argues is now `shared/`'s to hold. `shared/test/summary-cache.test.js` pins it
 directly: a phantom `2026-05-99` beside a live five-day run, asserting 5, which
 the lexical anchor answers 0 for because `boundedRange` normalises May 99 to
 August 7 and opens an empty window past `summaryEnd`.
+
+## PgBouncer: what a transaction-mode pooler does to the pool's two timeouts (#201)
+
+**Those two are the exception to the pooler compatibility claimed above, and
+behind a transaction-mode pooler they are LOST — measured, not reasoned.** The
+scoping in "The security model" is transaction-local on purpose, so a pooler
+that hands each transaction a different backend loses nothing by it. These two
+are different: they are session-level, and not as a `SET` a transaction could
+scope — `pg` puts them in the STARTUP PACKET, which is why `SHOW` against a real
+session is the only thing that can confirm them. Against PgBouncer **1.25.2**,
+`pool_mode = transaction`, with the same startup parameters `db/pool.js` sends:
+
+| in front of the app | result |
+|---|---|
+| nothing (direct) | connected, `statement_timeout=15s`, `idle_in_tx=30s` |
+| PgBouncer, default config | **refused**: `unsupported startup parameter: statement_timeout` |
+| PgBouncer, `track_extra_parameters` for both | connected, **both `0`** |
+| PgBouncer, `ignore_startup_parameters` for both | connected, **both `0`** |
+
+Checked on the first query, on a second, and inside a `BEGIN`. **Both settings
+accept the connection and both zero the values** — `ignore_startup_parameters`
+by discarding them, and `track_extra_parameters` because PgBouncer can only
+track a parameter Postgres REPORTS to the client and Postgres reports neither
+(`TimeZone` and `DateStyle` each produce a `ParameterStatus` message; both
+timeouts produce none). So there is no PgBouncer setting that carries these
+values through, and reaching for the second one because the first looked lossy
+buys nothing. The mechanism may change — PgBouncer has an unreleased path for a
+non-reported parameter named in the startup packet — so re-measure rather than
+trusting the table if the version moved.
+
+**The remedy is to put the values where the pooler is not in the path**, on the
+role or the database, which every backend it opens then inherits — verified
+through the same three PgBouncer configs, where it restores `15s`/`30s` on both
+of the connecting ones:
+
+```sql
+ALTER ROLE habiterall_app IN DATABASE habiterall SET statement_timeout = '15s';
+ALTER ROLE habiterall_app IN DATABASE habiterall
+  SET idle_in_transaction_session_timeout = '30s';
+```
+
+It applies to server connections opened AFTER the change, so an already-warm
+pooler has to be recycled before the check reads true.
+
+**And the failure is worse than silent: the app states the opposite.**
+`poolTimeouts()` is spread into the startup runtime line, so a misconfigured
+deployment logs `pg_statement_timeout_ms: 15000` on every boot while `SHOW`
+answers `0` — the one surface an operator would check to find this out is the
+surface that tells them the wrong thing. `noteTimeout`'s `pool_limit_ms` carries
+the same number into events that can then never fire. Nothing exercises any of
+this — neither edition ships a pooler and CI runs none — so this paragraph is
+the whole of the guard (#201).
+

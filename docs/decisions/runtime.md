@@ -176,3 +176,88 @@ Recorded so the decision can be re-opened on evidence rather than instinct:
 
 Nothing else does. In particular, a benchmark of the arithmetic alone does not,
 for the reason two sections up.
+
+## Why `dateRange` walks a `Date`, and the two faster rewrites that are wrong
+
+`boundedRange` is the hot path under every aggregation in `stats.js`, so the
+walk that builds its list has been optimised twice and refused two further
+"obvious" rewrites. Both refusals are about the same thing: a calendar is not
+arithmetic, and a zone does not live every day the calendar has.
+
+**It used to re-derive every day from a string** — two `fromISO` calls and a
+`toISO` per element — measured at **92% of `computeScores`' total time**.
+Advancing a single `Date` with `setDate` instead is ~8x cheaper on every
+aggregation in the file.
+
+**Refused rewrite 1: `t += 86400000`.** An epoch walk repeats `2026-11-01`
+under `America/New_York`'s fall-back transition, because that calendar day is
+25 hours long and an epoch step cannot see the extra hour.
+
+**Refused rewrite 2: stepping the calendar arithmetically** — increment the
+day, roll over on a days-in-month table — needs no `Date` at all and is faster
+again. It knows the calendar but not which of its days a zone actually LIVED.
+Under `Pacific/Apia`, which deleted 2011-12-30 outright, it emits a day no
+entry can be keyed by and then ends the range a day SHORT of `end`.
+
+The literals in `test/stats.test.js` hold in this repo's own zone under *either*
+wrong walk, which is exactly why `test/timezones.test.js` exists: it re-runs
+`stats.test.js` and `streaks.test.js` under fixed `TZ`s in a child process,
+because `TZ` is read once at process start and nothing short of a fresh process
+observes a changed one. It pins Apia's deleted day and `Pacific/Kwajalein`'s
+repeated one, which is what makes this checkable rather than a story.
+
+**What is left to save is the STRINGS, and that is where the walk spends its
+remaining effort.** The `'YYYY-MM-'` prefix is rebuilt on a rollover rather
+than per day, and the two digit fields are a lookup rather than a `String()`
+plus a `padStart`. Measured at **1.28x on `boundedRange`** and ~8% of a whole
+`/overview` per-habit cost. That makes `dateRange` the one place in `stats.js`
+that spells a date without calling `toISO`, so a test compares every element
+against `toISO` directly — every other assertion in that suite is a literal and
+would pin the wrong half.
+
+**And `n` counts elapsed 24-hour spans while the loop takes calendar steps.**
+They agree everywhere except a zone that moved the date line WESTWARD and so
+lived one local calendar day twice — `Pacific/Kwajalein` in 1969. There the
+loop takes a step the elapsed count never saw and ends a day past `end`, so the
+walk trims anything beyond it. A DELETED day needs no counterpart: the elapsed
+count shrinks along with the calendar, which is why Apia round-trips untouched.
+
+### One walk, not eight (#219)
+
+One `computeStats` call used to call `boundedRange` on the identical window
+eight times — once each in `computeScores`, `computeHistory`, `computeWeekdays`,
+`computeWeekdayByMonth`, `computeFrequency` and `computeCoverage`, and once per
+`onPaceSeries`, which `computeStreaks` and `computeMissRuns` each built
+separately — and built `onPaceSeries` itself twice for that reason.
+`summaryStats` walked twice for the same reason.
+
+The shape is module-private `*Over(dates)` cores behind exported wrappers whose
+signatures did **not** change. This was chosen over a memo or a cache:
+`dateRange` trims its own array during the past-end walk, so a memo handing one
+retained array to many callers across calls is a hazard, and a cache is #191's
+eviction question. **The reason the cores are private is the one a future
+reader most needs**: not being exported, and taking no optional `dates`
+parameter, means nothing outside `stats.js` can hand a pass an unclamped range
+— the `boundedRange` clamp stays reachable only through the wrappers and the
+three entry points, which makes it structurally inescapable rather than merely
+followed by convention.
+
+Measured on the same 1,464-row fixture, before -> after: `computeStats`
+(`coverage: true`) 1.77 -> 1.20 ms/habit (−32%); `computeStats`
+(`coverage: false`) 1.65 -> 1.16 ms/habit (−30%); `summaryStats` 0.30 -> 0.22
+ms/habit (−27%); `boundedRange` walks per `computeStats(coverage: true)` call,
+8 -> 1; `onPaceSeries` builds per `computeStats` call, 2 -> 1.
+
+`computeCategoryStats` now shares its own bucket-axis walk with the
+`computeMissRuns` call it runs per member — its per-member `computeScores` call
+keeps its own walk on purpose, because that one runs over a different,
+per-member warm-up window and sharing it would change scores.
+
+**One thing changed meaning with that rewrite, deliberately: the FIRST
+element.** The old walk pushed the string it was handed before normalising
+anything, so element 0 was the raw `start` and every later element was
+`toISO`'d. The two differ exactly when `toISO(fromISO(start)) !== start`, which
+is a date that is not a real day — `dateRange('2026-02-30', …)` opened on
+2026-02-30 and then skipped 2026-03-02, the real day the rollover lands on.
+Building the `Date` up front means every element is normalised, so the list is
+a contiguous run of days that happened, spelled one way.
