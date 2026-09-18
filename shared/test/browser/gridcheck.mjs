@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil } from './chrome.mjs';
+import { LOCAL_ISO_SRC } from './fixtures.mjs';
 const APP=process.env.BASE??'http://localhost:3000', PORT = devtoolsPort(9290);
 const profile=mkdtempSync(join(tmpdir(),'habgrid-'));
 const chrome=launchChrome(PORT, profile);
@@ -680,8 +681,7 @@ try{
   const notesSeed = await ev(`(async () => {
     const habits = await (await fetch('/api/habits')).json();
     const h = habits.find(x => !x.archived);
-    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
-      return d.toISOString().slice(0, 10); };
+    ${LOCAL_ISO_SRC}
     const noted = iso(1), plain = iso(2), blank = iso(3);
     const noteText = 'grid probe note, kept honest';
     await fetch('/api/habits/' + h.id + '/entries/' + noted, {

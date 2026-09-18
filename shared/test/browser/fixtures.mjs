@@ -75,6 +75,38 @@ const daysAgo = (n) => {
 };
 
 /**
+ * `daysAgo` again, as PAGE-SIDE SOURCE, for the suites that name a day the
+ * fixtures above seeded.
+ *
+ * A suite runs its date arithmetic inside `Runtime.evaluate`, so it cannot
+ * call the function above — and six of them had each written their own copy
+ * as `d.setDate(d.getDate() - n)` followed by `d.toISOString().slice(0, 10)`.
+ * That mixes a LOCAL-time `Date` with a UTC read, so the answer is the local
+ * date only while the two zones agree about which day it is. They disagree for
+ * part of every day — west of UTC through the local evening, east of UTC
+ * through the local morning — and then every date the suite computes is one
+ * day off the days `daysAgo` wrote, while the app, which is on the local
+ * calendar throughout (`iso()` in `ui/dates.js`, `todayISO()`), draws the
+ * local ones.
+ *
+ * `habiterall-personal/test/overview.integration.mjs` had already written this
+ * rule down for its own `daysAgo`, which is worth knowing: the rule existed and
+ * the browser suites had not been held to it. **CI runs UTC, so none of this
+ * can fail there** — it only ever breaks on somebody's laptop, which is why it
+ * survived in six suites at once, and why the guard in
+ * `shared/test/browser-runner.test.js` reads the source rather than waiting for
+ * a red run.
+ *
+ * Interpolated into a template literal, so it contains no backticks (see the
+ * root `CLAUDE.md` on a suite's page-side source) and quotes with `"`.
+ */
+export const LOCAL_ISO_SRC =
+  'const iso = (n) => { const d = new Date(); d.setHours(12, 0, 0, 0);'
+  + ' d.setDate(d.getDate() - n);'
+  + ' const p = (x) => String(x).padStart(2, "0");'
+  + ' return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()); };';
+
+/**
  * Wipe and recreate the fixture set, with ~60 days of history so the charts
  * and streak views have something real to render.
  *

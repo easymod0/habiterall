@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import {
   closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
 } from './chrome.mjs';
+import { LOCAL_ISO_SRC } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9294);
 const profile = mkdtempSync(join(tmpdir(), 'habcal-'));
@@ -986,10 +987,21 @@ try {
   // A day this window certainly draws and certainly has no note: the fixtures
   // seed none, and `day.date` is the only date this suite has written one to.
   const plainDate = await ev(`(() => {
+    ${LOCAL_ISO_SRC}
     const svg = ${calCardSel}?.querySelector('[aria-label="Completion calendar"]');
     const dates = [...(svg?.querySelectorAll('.cal-cell[data-date]') ?? [])]
       .map(c => c.getAttribute('data-date'))
-      .filter(d => d !== ${JSON.stringify(day.date)} && d <= new Date().toISOString().slice(0,10));
+      // iso(0), never toISOString: the ceiling is "not in the FUTURE", and the
+      // future is the app's own -- a future calendar day is drawn transparent
+      // and refuses the press, on the LOCAL calendar. Read in UTC this
+      // admitted tomorrow's local date for the whole local evening west of
+      // UTC, and the press below then opened nothing. See LOCAL_ISO_SRC.
+      //
+      // No backticks in this comment, deliberately: it is page-side source
+      // inside a template literal, where one ends the string early. That is
+      // the root CLAUDE.md's own warning, and the first draft of this comment
+      // tripped it.
+      .filter(d => d !== ${JSON.stringify(day.date)} && d <= iso(0));
     return dates.at(-1) ?? null;})()`);
 
   const plainPress = await pressCell(plainDate);

@@ -44,6 +44,7 @@ import { join } from 'node:path';
 import {
   closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
 } from './chrome.mjs';
+import { LOCAL_ISO_SRC } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000', PORT = devtoolsPort(9321);
 const profile = mkdtempSync(join(tmpdir(), 'habstrip-'));
@@ -113,8 +114,7 @@ try {
         target_type: 'at_most', target_value: 2, show_as: 'avoid', unit: 'coffees',
         color: '#ef4444', freq_numerator: 1, freq_denominator: 1 }),
     })).json();
-    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
-      return d.toISOString().slice(0, 10); };
+    ${LOCAL_ISO_SRC}
     const day1 = iso(1), day2 = iso(2), day3 = iso(3);
     for (const h of [yesno, num, avoid].filter(Boolean)) {
       for (const date of [day1, day2, day3]) {
@@ -539,8 +539,7 @@ try {
   // changes, and the block clears every note it added before it ends, so the
   // habit leaves this block exactly as it arrived.
   const notesSeed = await ev(`(async () => {
-    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
-      return d.toISOString().slice(0, 10); };
+    ${LOCAL_ISO_SRC}
     const kept = iso(10), toClear = iso(11), toAdd = iso(12);
     const rows = await (await fetch('/api/habits/${seeded.habit}/entries')).json();
     const at = (date) => rows.find(e => e.date === date) ?? null;
@@ -1292,8 +1291,7 @@ try {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ name: 'Strip notes probe', type: 'boolean', color: '#22c55e' }),
     })).json();
-    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
-      return d.toISOString().slice(0, 10); };
+    ${LOCAL_ISO_SRC}
     const noted = iso(1), plain = iso(2);
     const noteText = 'left half a glass, felt fine';
     await fetch('/api/habits/' + h.id + '/entries/' + noted, {

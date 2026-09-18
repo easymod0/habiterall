@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import {
   closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
 } from './chrome.mjs';
-import { seedCategorySpread } from './fixtures.mjs';
+import { LOCAL_ISO_SRC, seedCategorySpread } from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9303);
@@ -697,8 +697,7 @@ try {
   const notesGeomSeed = await ev(`(async () => {
     const habits = await (await fetch('/api/habits')).json();
     const h = habits.find(x => !x.archived);
-    const iso = n => { const d = new Date(); d.setDate(d.getDate() - n);
-      return d.toISOString().slice(0, 10); };
+    ${LOCAL_ISO_SRC}
     const noted = iso(1), plain = iso(2);
     await fetch('/api/habits/' + h.id + '/entries/' + noted, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },

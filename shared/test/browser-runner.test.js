@@ -746,3 +746,86 @@ test('the runner tells each suite where to record its browser', () => {
   assert.match(src, /await reaping/,
     'the reap is started and not awaited, so the next suite can race the orphan');
 });
+
+/**
+ * Every date a suite computes is on ONE calendar, and it is the LOCAL one.
+ *
+ * Six suites had each written the same wrong helper: `new Date()`, then
+ * `d.setDate(d.getDate() - n)` — local-time arithmetic — read back through
+ * `d.toISOString().slice(0, 10)`, which is UTC. That answers the local date
+ * only while the two zones agree about which day it is, and they disagree for
+ * part of every day: west of UTC through the local evening, east of UTC through
+ * the local morning. In that window every date the suite names is one day off
+ * the days `fixtures.reset()` seeded, while the app draws the local ones
+ * (`iso()` / `todayISO()` in `ui/dates.js`). Measured at 22:00 EDT, with UTC
+ * already on the next date: `calcheck` pressed a calendar cell for tomorrow,
+ * which the app draws as a future day and refuses, and `stripcheck` looked for
+ * notes on days the fixture had never written to — five failures between them,
+ * on an unchanged tree.
+ *
+ * **CI runs UTC, so none of it can fail there.** That is the whole reason this
+ * is a source guard and not a red run: the defect is invisible to the one
+ * environment that checks every pull request, so it can only be caught by
+ * reading, and it survived in six suites at once.
+ *
+ * `LOCAL_ISO_SRC` (`browser/fixtures.mjs`) is the one page-side spelling, kept
+ * beside the `daysAgo` it has to agree with.
+ *
+ * The exemptions are the two shapes that are RIGHT, and both are right for the
+ * same reason — they never mix the two zones. A `Date.UTC(...)` built from
+ * local calendar FIELDS and then read with `getUTC*`/`toISOString` is
+ * internally consistent; so is reading the browser's UTC clock in order to
+ * compare it against a UTC value the test itself shimmed.
+ */
+const UTC_DATE_READS = {
+  'calcheck.mjs': {
+    count: 1,
+    why: 'the control in the DST/clock-shim block, compared against the UTC `nowISO` the shim itself installed — a LOCAL read there would not answer the question being asked',
+  },
+  'resiliencecheck.mjs': {
+    count: 2,
+    why: 'both anchor on `Date.UTC(n.getFullYear(), n.getMonth(), n.getDate())` — the LOCAL calendar date re-based at UTC midnight — and then walk and read entirely in UTC (`getUTCDay`), so the two zones are never mixed',
+  },
+};
+
+test('a suite dates its days on the local calendar, the one the fixtures seeded', () => {
+  const suites = readdirSync(browserDir)
+    .filter((f) => f.endsWith('.mjs') && f !== 'fixtures.mjs');
+
+  /** @type {Record<string, number>} */
+  const found = {};
+  for (const file of suites) {
+    const src = readFileSync(join(browserDir, file), 'utf8');
+    const hits = src.split('\n').filter((l) => /toISOString\s*\(/.test(l)).length;
+    if (hits) found[file] = hits;
+  }
+
+  // The INVENTORY is part of the assertion: an empty offender list means
+  // nothing until the denominator is known (root `CLAUDE.md`). Printed even
+  // when it matches, so a reader can see the guard reached real files.
+  console.log(`scanned ${suites.length} suites for a UTC date read`);
+  for (const [file, n] of Object.entries(found)) {
+    const why = UTC_DATE_READS[file]?.why;
+    console.log(`  ${file}: ${n} — ${why ? 'exempt: ' + why.slice(0, 60) + '…' : 'NOT EXEMPT'}`);
+  }
+  assert.ok(suites.length >= 30,
+    `only ${suites.length} suites scanned — this guard has stopped seeing the directory`);
+
+  assert.deepEqual(
+    found,
+    Object.fromEntries(Object.entries(UTC_DATE_READS).map(([f, e]) => [f, e.count])),
+    'a suite reads a date in UTC and is not registered in UTC_DATE_READS — use '
+    + '`LOCAL_ISO_SRC` (browser/fixtures.mjs), or register it with the reason its '
+    + 'two zones are never mixed');
+
+  for (const [file, { why }] of Object.entries(UTC_DATE_READS)) {
+    assert.ok(why && why.length > 20, `UTC_DATE_READS['${file}'] carries no usable reason`);
+  }
+
+  // The rule is only worth having if the shared spelling is what it points at.
+  const fixtures = readFileSync(join(browserDir, 'fixtures.mjs'), 'utf8');
+  assert.match(fixtures, /export const LOCAL_ISO_SRC/,
+    'LOCAL_ISO_SRC has gone, so the message above names a helper that does not exist');
+  assert.ok(!/toISOString/.test(fixtures.split('export const LOCAL_ISO_SRC')[1] ?? ''),
+    'LOCAL_ISO_SRC itself reads a date in UTC, which is the defect it exists to remove');
+});
