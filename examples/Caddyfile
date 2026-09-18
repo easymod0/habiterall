@@ -1,4 +1,12 @@
 habits.example.com {
 	# Caddy gets and renews the certificate itself. Nothing else to configure.
 	reverse_proxy localhost:3000
+
+	# habiterall compresses nothing itself, so this is where the dashboard JSON
+	# and the whole unbundled shell stop going out as plain text. `zstd gzip`
+	# is what a bare `encode` already means, and Caddy's default content types
+	# already cover the JSON, the modules and the stylesheet — the nginx example
+	# next door has to name them, because its list replaces rather than
+	# extends. The app icons are PNG and neither example touches them, rightly.
+	encode zstd gzip
 }

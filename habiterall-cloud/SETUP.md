@@ -184,11 +184,16 @@ With Caddy:
 ```
 habits.example.com {
   reverse_proxy 127.0.0.1:3100
+  encode zstd gzip
 }
 auth.example.com {
   reverse_proxy 127.0.0.1:9000
 }
 ```
+
+The `encode` line is why the dashboard is not sent as plain JSON — see
+[Compression is the proxy's job](../README.md#compression-is-the-proxys-job).
+Authentik's own traffic is not this project's to tune, so it is left alone.
 
 Then set `PUBLIC_URL=https://habits.example.com`,
 `OIDC_ISSUER=https://auth.example.com/application/o/habiterall/` and

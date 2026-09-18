@@ -44,6 +44,21 @@ for the one published port.
 `db` / `migrate` / `app`, because downloading ONE file and running it is the whole
 point of this directory.
 
+**The Caddyfile compresses, and that is the whole of habiterall's compression
+story.** Neither edition has a `compression` dependency and neither is getting
+one: the proxy already terminates TLS in front of every documented
+deployment, it is the only thing that can compress the static shell as well
+as the API, and Nginx Proxy Manager strips `Accept-Encoding` on the way
+upstream — so an app-side implementation would be dead code behind it.
+`examples.test.js` pins the directive in all three proxy examples that ARE
+config — this Caddyfile, the README's nginx block, and the hand-written one in
+`habiterall-cloud/SETUP.md`, which is the one that hides — because it is one
+line and one line is what an edit drops; only the Nginx Proxy Manager row is
+unpinned, and it describes a web form with nothing to assert against. There is
+deliberately no startup warning for an operator running with nothing in
+front, and that is not an oversight — `docs/decisions/compose-and-env.md` has
+the four reasons.
+
 **A line in a `.env` template is inert unless the compose file NAMES the
 variable.** `.env` is read for `${NAME}` substitution and nothing else — no
 service uses `env_file:`, deliberately, since that would put

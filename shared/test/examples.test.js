@@ -136,13 +136,94 @@ test('the cloud example runs migrations as a separate credential', () => {
   assert.match(appBlock, /habiterall_app:/, 'the app must connect as the restricted role');
 });
 
+/**
+ * One fenced block out of the README, by its language tag.
+ *
+ * The slice used to run to end of file, which is a guard that can be satisfied
+ * by text in a different section — the thing `serviceBlock` above already
+ * exists to stop one level down. Bounded at the closing fence, a match is
+ * about the block it claims to be about.
+ *
+ * It returns the FIRST block carrying that tag, which is only safe because
+ * `nginx` appears in the README exactly once. `bash`, `yaml` and `ini` each
+ * appear several times, so a second caller wanting one of those needs a way to
+ * say WHICH — do not assume this picks the one you meant.
+ *
+ * @param {string} lang @returns {string}
+ */
+function fencedBlock(lang) {
+  const open = README.indexOf('```' + lang + '\n');
+  assert.ok(open >= 0, `the README has no \`\`\`${lang} block`);
+  const body = README.slice(open + lang.length + 4);
+  const close = body.indexOf('\n```');
+  assert.ok(close >= 0, `the \`\`\`${lang} block is never closed`);
+  return body.slice(0, close);
+}
+
 test('the proxy example forwards what the app needs', () => {
   // X-Forwarded-Proto is what makes the session cookie Secure, and
   // X-Forwarded-For is what the rate limiter keys on. Caddy sends both by
   // default; nginx does not, so the nginx example must say so explicitly.
-  const nginx = README.slice(README.indexOf('```nginx'));
+  const nginx = fencedBlock('nginx');
   assert.match(nginx, /X-Forwarded-Proto/);
   assert.match(nginx, /X-Forwarded-For/);
+});
+
+test('every proxy example the README ships enables compression', () => {
+  // #189. Neither edition has a `compression` dependency and neither will —
+  // the reverse proxy is where it belongs, which makes the shipped proxy
+  // configs the ENTIRETY of habiterall's compression story. Each is one line,
+  // and one line is what an edit drops.
+  //
+  // A source-text guard with no behavioural partner, which the root CLAUDE.md
+  // normally asks for. There is nothing to run: CI has no Caddy and no nginx,
+  // and the `compose` job resolves `extends` rather than serving a request.
+  // What this does catch is the failure with a precedent — a directive quietly
+  // lost while the prose beside it still promises it.
+
+  // Read from the FILE, not from the README's copy: the generator test above
+  // already holds those two together, and the file is what an operator runs.
+  const caddyfile = readFileSync(join(root, 'examples', 'Caddyfile'), 'utf8');
+  assert.match(caddyfile, /^\s*encode\b/m,
+    'examples/Caddyfile has no `encode` directive, so the documented '
+    + 'deployment ships no compression at all');
+
+  // The THIRD config-shaped example, and it is easy to forget precisely
+  // because it is not in `examples/`: cloud's walkthrough hand-writes its own
+  // Caddy block, so `docs:compose` never touches it and the generator test
+  // above cannot see it. An empty offender list means nothing until the
+  // denominator is known — there are three configs and one web form here, not
+  // two and one.
+  const setup = readFileSync(join(root, 'habiterall-cloud', 'SETUP.md'), 'utf8');
+  assert.match(setup, /^\s*encode\b/m,
+    'habiterall-cloud/SETUP.md\'s Caddy block has no `encode` directive, so '
+    + 'the cloud walkthrough ships no compression while the prose under it '
+    + 'says it does');
+
+  // nginx exists only in the README, and its `gzip_types` REPLACES the list
+  // rather than adding to it — `text/html` is the only implicit, unremovable
+  // entry — so `gzip on` by itself compresses the one thing this app barely
+  // serves. Everything after the first assertion is the point of this test.
+  const nginx = fencedBlock('nginx');
+  assert.match(nginx, /^\s*gzip on;/m, 'the nginx example never turns gzip on');
+  const types = nginx.match(/^\s*gzip_types ([^;]*);/m)?.[1];
+  assert.ok(types,
+    'the nginx example turns gzip on but sets no gzip_types, so it compresses '
+    + 'text/html and nothing else this app sends');
+
+  // Named one at a time rather than as one regex over the whole line, so a
+  // failure says WHICH type went missing. The first version of this change
+  // asserted `application/json` alone and would have gone on passing over the
+  // shell — 34 ES modules, the stylesheet and the icons, which are the larger
+  // half. `text/javascript` is not interchangeable with
+  // `application/javascript`: the former is what `mime-types` answers for a
+  // `.js`, and it is `express.static` that serves them.
+  for (const type of ['application/json', 'text/css', 'text/javascript', 'image/svg+xml']) {
+    assert.ok(types.split(/\s+/).includes(type),
+      `the nginx example's gzip_types does not name ${type}, so nginx sends `
+      + `it plain. The list replaces rather than extends, so every type this `
+      + `app serves has to be in it. Got: ${types}`);
+  }
 });
 
 test('the reverse-proxy guidance covers TRUST_PROXY once, outside the folds', () => {
