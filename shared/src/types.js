@@ -192,6 +192,20 @@
  */
 
 /**
+ * One member of a category, as `CategorySection.roster` lists it — the same
+ * reading `best`, `worst` and `mean` were taken from, never a second
+ * derivation. Separate from `CategoryMember` because the score is NULLABLE
+ * here and is not there: `best`/`worst` are only ever chosen from members that
+ * have landed, and widening that type would cost every reader of theirs.
+ * @typedef {object} CategoryRosterMember
+ * @property {number} id
+ * @property {string} name
+ * @property {number|null} score       that member's strength at `end`, 0..1 —
+ *   `null` when it has NEVER been logged, which is no strength rather than a
+ *   strength of zero, the same claim `unloggedExcluded` makes about it
+ */
+
+/**
  * The mean, spread and n over one set of category members, at a single
  * reading — what `summariseMembers` returns. The same shape `CategorySection`
  * carries for its own aggregate figures, factored out so a second caller can
@@ -252,6 +266,13 @@
  *   the members that have landed; null when none have, never 0
  * @property {CategoryMember|null} best
  * @property {CategoryMember|null} worst
+ * @property {CategoryRosterMember[]} roster the ACTIVE members, each with the
+ *   strength that fed `mean` and the spread above — so `roster.length ===
+ *   members`, archived members are in neither, and a `score` of `null` is a
+ *   member never logged rather than one at zero. In the order the caller
+ *   handed its members; sorting is the view's decision. Unconditional, unlike
+ *   `coverage`: it is bytes and no extra pass, and one payload shape beats an
+ *   opt-out whose cost nobody can see
  * @property {CategorySeriesPoint[]} series always ends at `mean`
  * @property {number|null} recoveryRate mean of the members whose rate is a
  *   number; null when no member has one

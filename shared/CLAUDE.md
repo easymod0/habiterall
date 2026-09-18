@@ -508,6 +508,23 @@ earliest row that STATES a value, which is where silence starts counting as
 success (#223). It moves no member's window and so no member's landing; without
 it a skip-anchored limit read 1.00 here against 0.051922 on its own page.
 
+**`roster` is that same reading LISTED rather than summarised — one arithmetic
+with `mean` and the spread, never a second derivation.** `section()` already
+scored every active member to get `mean`, `best` and `worst`; the roster is the
+array those three were taken from, returned instead of thrown away, one
+`{id, name, score}` per member. So `roster.length === members` by construction —
+archived members are in neither, and are counted in `archivedExcluded` — and a
+member's strength drawn on a category's own page is the number that fed the
+mean printed above it, rather than a second figure over a second window that
+disagrees with it. `score` is `null` for a member that has never landed and is
+never `0`: that is the paragraph above restated on the one field a renderer
+reads, and a page drawing `null` as 0% would claim the opposite of what
+`unloggedExcluded` says beside it. Unordered on purpose — the rows arrive in
+the caller's own order and presentation is the view's decision, not this
+function's. Unconditional, unlike `coverage`: it is bytes off a pass that has
+already run rather than a pass of its own, so there is nothing for a caller to
+decline, and one payload shape beats an opt-out whose cost nobody can see.
+
 **`MAX_COMPARE_DAYS` is 1830 and is deliberately not `MAX_RANGE_DAYS`.** That
 ceiling bounds a route walking ONE habit; a comparison walks every habit the
 account has, so the same span costs the habit count times as much — at 50

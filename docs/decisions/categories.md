@@ -1300,3 +1300,200 @@ each carrying the full order as of when it fired, so the order the server ends
 up with is whichever POST commits last rather than whichever press was made
 last. That is a write-ordering question, it predates this work in the habit
 list, and closing it means sequencing the writes rather than the reads.
+
+## Phase 6 — a category's own page (#259)
+
+Phase 4 put a mean and a spread on the grouped dashboard's section headers, and
+phase 5 made the manage list orderable. What neither did was give the header
+anywhere to go: it carries a category's name, its count and its figures, it is
+the widest control-looking thing on the dashboard, and pressing it did nothing.
+`#/category/<id>` is that destination — one category's figures at full width,
+its strength chart, and a list of its members with their own strengths.
+
+**Two alternatives were weighed and refused before the route was written.**
+
+*Accept it, and leave the header inert.* The header is a `role="heading"` div
+with a left border in the category's colour, spanning the grid — it reads as a
+way in, and phase 4 shipped it that way because there was nothing behind it
+yet. The cost of leaving it is not aesthetic: the one thing a user wants after
+reading "Health · 62% · 4 habits" is which four, and the answer is available
+nowhere except by scrolling the section they are already looking at and doing
+the arithmetic themselves. The comparison answers it for `best` and `worst`
+only, and only two habits deep.
+
+*Point the header at `#/categories`.* One line, no new route, no new view —
+and it is a control that ignores which one you pressed. Every section header
+would open the same page, including Uncategorised's, and that page is already
+one tap away behind the top-bar **▤** button, so the header would be a second
+control for a view the user has. It also answers the wrong question: the
+comparison exists to rank categories against each other, where the press being
+made here is about one of them.
+
+**The member roster rides on `/categories/stats`' existing payload, and the
+reason is that the alternatives are each a SECOND WINDOW.** `section()` already
+scores every active member — that is where `best`, `worst` and `mean` come from,
+through `summariseMembers` — and then throws the list away. `roster` is that
+same array returned: `{id, name, score}` per active member, `roster.length ===
+members` by construction, `score: null` for a member that has never landed. Both
+editions do `res.json(computeCategoryStats(...))` as a pure pass-through, so the
+field costs zero lines in either edition's routes.
+
+A route of its own would recompute — and recomputing is the only way it could
+disagree. Joining the member list client-side out of `/overview`'s per-habit
+`score` looks cheaper still and is the worse of the two: `/categories/stats`
+runs over 365 days (`COMPARE_WINDOW_DAYS`) with a 400-day warm-up in front of
+it, while `/overview` anchors its own 400-day `SUMMARY_WINDOW_DAYS` on today.
+Two windows on one page, and the visible symptom is not an abstraction leak —
+the member strengths printed under a mean would not average to it. Phase 3
+already paid for the lesson in the opposite direction (the warm-up exists
+because a comparison and a habit's own page disagreeing about one habit is
+indistinguishable from one of them being broken), and phase 4 refused the same
+shape by name, citing `foldCategoryName`: two implementations of one decision,
+agreeing today and free to drift. One
+fetch, one window, one arithmetic — `openCategory` requests the same URL the
+comparison does and picks one section out of the answer.
+
+**What that argument does NOT buy, and the claim to strike before it is
+repeated: this page's mean is not the number the dashboard's own grouped
+section header prints for the same category.** One fetch keeps the mean, the
+spread and the roster on ONE page consistent with each other; it says nothing
+about the other surface, and the header is exactly the second window the
+paragraph above refuses. `summariseByCategory` aggregates `/overview`'s
+per-habit `score`, which `summaryStats` computes over a fixed
+`SUMMARY_WINDOW_DAYS` (400) anchored on today with **no forward clamp to the
+member's own first entry**; `computeCategoryStats` runs `COMPARE_WINDOW_DAYS`
+(365) plus `SCORE_WARMUP_DAYS` (400) and clamps forward per member. For a habit
+younger than 400 days the two coincide on an at-least member — the days before
+its birth credit 0 and leave the EWMA at 0 either way, which is the same
+accident `shared/CLAUDE.md` records as having hidden the missing clamp — and
+past that age they come apart, because the header's window opens mid-history at
+a score of 0 while the page's opens at the habit's first entry. Measured end to end
+through this repo's own functions — `computeCategoryStats` over the route's
+365+400-day slice for the page, `summaryStats` over the route's 400-day slice
+into `summariseByCategory` for the header — for a habit kept perfectly since
+day one with `freq_numerator: 1`, 700 days old, alone in its category:
+
+| `freq_denominator` | this page | dashboard header |
+|---|---|---|
+| 30 | 100% | 98% |
+| 60 | 99% | 94% |
+| 90 | 98% | 85% |
+| 365 | 86% | 61% |
+
+`LIMITS.freqDenominator` is 365, so every row there is an ordinary habit. The
+gap is also reachable the other way up, and larger, under
+`at_most_unlogged: 'success'`, where an unlogged day is full credit and the
+header's unclamped window credits 400 days the habit did not live — the
+mechanism phase 3 measured at 0.97 against 0.41.
+
+**This is a pre-existing limitation that #259 makes more VISIBLE, not one it
+introduces.** Both surfaces are on master: phase 4 put the mean on the section
+header and phase 3 put it on the comparison's card, and the two have disagreed
+for a slow habit since. What this phase adds is a second place to read the
+`/categories/stats` figure, now one press from the `/overview` one. Closing it
+means one of them changing window, which is a decision about what a category's
+strength is "as of" rather than a wiring fix, and it is not this issue's:
+`/overview` cannot afford `computeCategoryStats`' warm-up per habit per load,
+and moving this page onto `/overview`'s window is the client-side join refused
+above. So it is written down here instead, and **no test asserts the two
+surfaces are equal** — `comparecheck.mjs` says so at the point where such a
+check would sit, because the fixture's habits are daily and days old, exactly
+the shape where both windows collapse onto one range and an equality assertion
+would pin a coincidence.
+
+`roster` is returned unconditionally rather than behind an opt-out like
+`coverage`. `coverage` earns its flag by being its own pass (~10-11% of a call,
+measured); the roster is bytes off a pass that has already run, so there is
+nothing for a caller to decline and one payload shape beats a flag whose cost
+nobody can see.
+
+**Uncategorised gets no page, and its header is drawn so that it does not look
+like one.** `shared/CLAUDE.md`'s rule is the whole argument — uncategorised is a
+state a habit is in, never a category it belongs to — and the route makes it
+unrepresentable rather than guarded: `CATEGORY_RE` is `/^#?\/category\/(\d+)$/`,
+digits only and anchored at both ends, so `#/category/null` parses as the list
+and there is no id to spell. The dashboard's Uncategorised header stays the
+plain `<div>` it has always been, with no button, no chevron and no hover
+state. That is the same rule as the one on the member rows below: this issue
+opens by complaining that a header looks like a way in and is not, so shipping
+that defect one section down would be the one failure mode worth avoiding.
+
+**The header is the ARIA APG heading-wraps-button pattern, and the role was not
+dropped.** Phase 4's comment records why `role="heading"` is there at all: a
+bare `<div>` maps to `role="generic"`, which ARIA specifies as name-prohibited,
+so it is never reachable by a screen reader's "next heading" navigation and
+never reports a level, whatever its `aria-label` says — confirmed against this
+app's own tree through CDP `Accessibility.getPartialAXTree`. Making the header a
+`<button>` and leaving it at that would have taken the section headings back out
+of that navigation to buy a control, which is trading one affordance for
+another. An element cannot be both the heading and the control it contains, so
+the heading is a wrapper `<div role="heading" aria-level="2">` whose only child
+is the control. The wrapper is built **unconditionally and identically in both
+branches** — only the child differs, `<button>` for a real category and the
+existing `<div class="uncategorised">` otherwise — which is phase 4's own
+warning honoured: the markup must not change shape depending on whether a
+summary happens to be present, and now also not on whether the section has a
+page behind it. `.category-section-header` stays the class on the INNER element
+in both branches, so every layout rule, `responsive.mjs` selector and browser
+check keeps working; `.category-section-header:first-child` had to become
+`.category-section-heading:first-child .category-section-header`, because once
+the header is an only child that bare selector matches EVERY section instead of
+the first. The chevron is `aria-hidden` decoration — the button's role is what
+announces — and `data-focus-key="section:<id>"` is required rather than
+optional, since `paint()` rebuilds `#grid` with `replaceChildren()` on every
+keystroke and a rebuilt control keeps focus by what it IS, never by where it
+sat.
+
+**The back-stack tax is now paid in FOUR places, and that is the real cost of
+this phase.** `ui/routes.js` still tracks `ourEntry` as a single boolean and
+`go(LIST)` still unwinds with one `history.back()`, so the app is exactly one
+fragment entry deep — with a third fragment route rather than a second. Nothing
+in `routes.js` enforces that; four sites in the views do:
+
+1. the comparison names `best` and `worst` as text and links neither (phase 3);
+2. the top-bar button is hidden while a habit is open (phase 3);
+3. the top-bar button is hidden while a category's own page is open — new, and
+   it is the whole reason `dashboard → category → categories` is unreachable,
+   the same hole (2) closes from the habit's side;
+4. a category's own page names its entire roster and links none of it, and is
+   entered only from the dashboard's section header.
+
+(4) is the expensive one to live with and it was accepted with its cost stated:
+on the one page that lists a category's habits by name, a name is still
+something you then go and find on the dashboard. Making any of those a link
+needs `ourEntry` to become a real stack and `go(LIST)` to unwind more than one
+entry, which is **issue #348**, deliberately split out of this one. Making
+`go()` REPLACE instead is the fix that looks like it works and is refused in
+`go()`'s own doc comment for the reason phase 3 recorded: a same-document open
+still counts an entry in `WebBackStack.floorAfterShow`, so replacing leaves
+`currentIndex` AT the floor and the next system Back closes the screen. Because
+the rows are not links, nothing styles them as though they were — no hover
+highlight, no cursor, no chevron — for the same reason Uncategorised's header
+has none.
+
+**Both views live in `ui/categories.js`, which is a back-stack decision and not
+a filing one.** `syncEntry` and the module-level `hasCategories` are state both
+category views have to keep honest, and splitting the views across two files
+puts half of that invariant in each. It also keeps `sw.js`'s `SHELL` untouched.
+`CACHE_VERSION` still bumps `v32` → `v33`, because a new EXPORT under
+`shared/public/` is a bump whether or not a file was added: `shellFirst` is
+stale-while-revalidate, so a shell can hold the new `app.js` over a cached
+`ui/categories.js` that declares no `openCategory` — a module link error before
+`start()` runs, and so outside `#view-error`. The page reuses `#view-categories`
+through `views.showCategories()` rather than taking a container of its own, for
+the same reason: one owner, one id, and `views.js` goes on answering one
+question.
+
+**`state.openCategoryId` also has to be cleared by `detail.js`, and the reason
+is not the predicate.** `dashboardShowing()` gained its third clause and every
+one of its eight call sites was left alone, which is what that predicate exists
+for. The flag's other reader is the dispatcher, and it needs more: `app.js`'s
+dispatcher guards the category branch with `route.id !== state.openCategoryId`
+so a Forward onto the page already drawn does not refetch it — and arriving on
+`#/habit/42` from `#/category/3` left that id set, so a Back fired
+`onRoute({view: 'category', id: 3})`, the guard read false, nothing reopened the
+page, and the app sat with `#/category/3` in the address bar and the habit still
+rendered. `detail.js`'s `render` already cleared `openCategories` immediately
+above for exactly that failure, reached through `appLink`'s `#/habit/42` or a
+typed fragment; the category page's flag is the same hole with a second id in
+it, and the clear sits beside it rather than anywhere new.

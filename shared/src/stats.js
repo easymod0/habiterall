@@ -3253,12 +3253,13 @@ export function computeCategoryStats(categories, members,
     // The one aggregation rule, asked at `lastDay` — the same landing rule
     // `landedAt` applies below, restated per-row because `summariseMembers`
     // takes a plain array rather than closing over a day.
-    const summary = summariseMembers(rows.map((r) => ({
+    const atLast = rows.map((r) => ({
       id: r.id,
       name: r.name,
       score: r.scoreAt.get(lastDay),
       landed: r.landsOn !== null && r.landsOn <= lastDay,
-    })));
+    }));
+    const summary = summariseMembers(atLast);
     return {
       id,
       name,
@@ -3269,6 +3270,24 @@ export function computeCategoryStats(categories, members,
       mean: summary.mean,
       best: summary.best,
       worst: summary.worst,
+      // The whole active roster, off the SAME readings `best`, `worst` and
+      // `mean` were taken from — one arithmetic, not a second derivation, which
+      // is the property that keeps a member's strength equal to the spread the
+      // page prints above it. `roster.length === members` by construction
+      // (archived members are in neither, and are counted in
+      // `archivedExcluded`), and a member that has never landed carries
+      // `score: null` rather than `0`, the same refusal `mean` and
+      // `unloggedExcluded` already make: no strength is not a strength of zero.
+      // Unordered here on purpose — the rows arrive in the order the caller
+      // handed them and presentation is the view's decision, not this one's.
+      // Returned unconditionally rather than behind an opt-out like `coverage`:
+      // it is bytes and no extra pass at all, and one payload shape beats a
+      // flag whose cost nobody can see.
+      roster: atLast.map((r) => ({
+        id: r.id,
+        name: r.name,
+        score: r.landed ? r.score : null,
+      })),
       series: buckets.map((bucket) => {
         const day = refDay.get(bucket);
         const at = landedAt(rows, day);

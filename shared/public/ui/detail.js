@@ -786,6 +786,13 @@ function render(stats, entries) {
   // rendered. This does not make `ourEntry` a real stack and does not claim to;
   // it removes the user-visible half.
   state.openCategories = false;
+  // ...and the same for a category's own page, by the same route and against
+  // the same guard: arriving on `#/habit/42` from `#/category/3` left that id
+  // set, so Back fired `onRoute({view: 'category', id: 3})`, `app.js`'s
+  // `route.id !== state.openCategoryId` guard was false, nothing reopened the
+  // page — and the app sat with `#/category/3` in the address bar and the
+  // habit still rendered.
+  state.openCategoryId = null;
   // Set here rather than in `open()`, so the URL only names a habit that
   // actually rendered: `open()` is also the failure path, and a fragment
   // pointing at a habit the server refused would survive a reload as a link

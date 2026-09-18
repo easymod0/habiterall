@@ -878,21 +878,43 @@ The Android WebView and a browser then disagree on purpose; see
 `android-native/CLAUDE.md`, whose back-stack rules depend on exactly what
 `app.js` writes to history during boot.
 
-**`#/categories` is the second fragment route, and the app is exactly one
-fragment entry deep at all times.** `ui/routes.js` keeps `ourEntry` as a single
-boolean and `go(LIST)` unwinds with one `history.back()`, so neither can
-describe a stack two of ours deep. Nothing in `routes.js` enforces that; two
-rules in `ui/categories.js` do, and they are why the single boolean is still
-honest. **The comparison links to no habit** — `best` and `worst` are named as
-text and neither is an `<a>`, because dashboard → categories → habit would be
-two entries of ours and Back from that habit lands on `#/categories` with the
-dashboard painted underneath it. And **its top-bar button is hidden whenever a
-habit is open** (`syncEntry`, which reads `state.openHabitId`), which closes the
-same hole from the other side: no habit can sit UNDER the comparison either. One
-invariant, two constraints — weakening either means teaching `routes.js` a real
-stack first, and neither is a tidiness rule.
+**There are THREE fragment routes — `#/habit/<id>`, `#/categories` and
+`#/category/<id>` — and NAVIGATING into a stack two of ours deep is still
+unreachable.** `ui/routes.js` keeps `ourEntry` as a single boolean and
+`go(LIST)` unwinds with one `history.back()`, so neither can describe a stack
+two of ours deep. Nothing in `routes.js` enforces that; three rules in
+`ui/categories.js` do, and they are why the single boolean is still honest.
+**Neither category view links to a habit** — the comparison names `best` and
+`worst` as text and a category's own page names its whole roster the same way,
+and not one of them is
+an `<a>` or a `<button>`, because dashboard → categories → habit would be two
+entries of ours and Back from that habit lands on `#/categories` with the
+dashboard painted underneath it. **The top-bar button is hidden whenever a
+habit OR a category's own page is open** (`syncEntry`, which reads
+`state.openHabitId` and `state.openCategoryId`), which closes the same hole from
+the other two sides: no habit can sit UNDER the comparison, and
+dashboard → category → categories is unreachable. And **a category's own page is
+entered only from the dashboard's grouped section header**, never from the
+comparison, which offers no way into one. One invariant, three rules, paid at
+four sites — the spread, the roster, and each of `syncEntry`'s two view clauses.
+Weakening any of them means teaching `routes.js` a real stack first (issue
+**#348**), and none of them is a tidiness rule.
 
-**And `go()` must not be made to REPLACE for this route.** It looks like the
+**Be exact about what "unreachable" covers, because a RACE is not a
+navigation.** The three rules bound what a user can navigate into; they say
+nothing about a request that was already in flight when a second view opened.
+An older reply landing then renders over whatever is showing and writes its own
+URL through `go()`, which pushes — so open a category's section header, then a
+habit, and if the habit wins the race `#/category/3` is pushed on top of
+`#/habit/42`. Each view holds a ticket over its OWN requests (`openSeq` in
+`ui/categories.js`, which covers two section headers pressed inside one flight,
+and `ui/detail.js`'s, which covers that view's own callers of `open()`), and
+neither can see the other's, which is why the cross-view case is the one left.
+It is pre-existing rather than something the third route introduced, and it is
+**#348**'s to close with a counter above both views — do not read the paragraph
+above as a claim that it cannot happen.
+
+**And `go()` must not be made to REPLACE for any of them.** It looks like the
 one-line answer to the same problem and it is not: on Android a same-document
 open counts an entry in `WebBackStack.floorAfterShow`, so replacing leaves
 `currentIndex` AT the floor and the next system Back closes the screen out from
@@ -904,18 +926,29 @@ exactly one entry and Back returning to the dashboard, which is the browser half
 of it only.
 
 **"Is the dashboard what is showing?" is `dashboardShowing()` in
-`ui/store.js`, and it is never spelled out a second time.** Six guards ask it
-— `app.js` twice (which view a traversal lands on; whether the browser reminder
-may reload the list), `dashboard.js` twice (the `'change'` listener and the
-`matchMedia` reflow), `settings-dialog.js` once and `habit-dialog.js` through
-its own `announce()` — and until `#/categories` existed every one of them could
-write `state.openHabitId == null` and be right. A second full-page view made
-that spelling wrong at all six AT ONCE, and the two that were missed on the
-first pass are why this paragraph exists: the breakpoint reflow painted the
-dashboard over the comparison **on a phone rotation**, and the habit dialog's
-`'reload'` did the same on Save. Neither is a `routes.js` question — the URL is
-already correct in both — so do not go looking there. A THIRD view means
-editing that one function and nothing else.
+`ui/store.js`, and it is never spelled out a second time.** Eight guards in four
+modules ask it — `app.js` twice (which view a traversal lands on; whether the
+browser reminder may reload the list), `dashboard.js` four times (the
+`'change'` listener, the `matchMedia` reflow, the day-change refetch, and the
+guard on opening the day editor over the list), `settings-dialog.js` once and
+`habit-dialog.js` through its own `announce()` — and until `#/categories`
+existed every one of them could write `state.openHabitId == null` and be right.
+A second full-page view made that spelling wrong at all of them AT ONCE, and the
+two that were missed on the first pass are why this paragraph exists: the
+breakpoint reflow painted the dashboard over the comparison **on a phone
+rotation**, and the habit dialog's `'reload'` did the same on Save. Neither is a
+`routes.js` question — the URL is already correct in both — so do not go looking
+there.
+
+**The third view arrived (#259) and it is the one function that changed.**
+`#/category/<id>` is neither the comparison nor a habit, so it has no id of
+theirs to give it away: `state.openCategoryId` is its flag, mutually exclusive
+with `openCategories`, and the predicate gained one clause while every guard
+above was left alone. That is what the sentence this paragraph replaces promised
+and it held. A FOURTH view means the same edit and nothing else — and the same
+discipline on the way in: every view that paints sets all three flags
+explicitly (`paint()`, `detail.js`'s `render`, both of `ui/categories.js`'s),
+because a flag left set is the dashboard silently declining to repaint itself.
 
 **A dialog does not know which view it was opened over, so it announces rather
 than navigates.** `'reload'` means "go to the dashboard and fetch it"
