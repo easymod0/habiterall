@@ -5,15 +5,23 @@ import android.app.Application
 import android.content.Context
 import android.content.Intent
 import com.habiterall.app.data.Habit
+import com.habiterall.app.data.Settings
 import com.habiterall.app.notify.Notifications
 import com.habiterall.app.notify.ReminderReceiver
+import com.habiterall.app.notify.ReminderTime
 import com.habiterall.app.notify.Reminders
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import androidx.work.ListenableWorker
 import androidx.work.WorkManager
+import androidx.work.testing.TestListenableWorkerBuilder
 import androidx.work.testing.WorkManagerTestInitHelper
+import androidx.work.workDataOf
+import kotlinx.coroutines.runBlocking
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -171,6 +179,74 @@ class ReminderWiringTest {
         assertTrue(Reminders.alarmUri(43, snoozed = true) in uris())
     }
 
+    /* ---------- the weekday mask reaches AlarmManager, not just the walk ---------- */
+
+    /**
+     * `RemindersTest` pins [Reminders.nextAllowedOccurrence]; this pins that
+     * `schedule` is what calls it. The two are one line apart and that line is
+     * exactly where this package's bugs live — a correct pure function with a
+     * caller still asking the old one passes every assertion in the other file.
+     *
+     * The mask is built from the phone's OWN weekday rather than from a fixed
+     * date, because `schedule` reads `ZonedDateTime.now()` itself and takes no
+     * clock: whatever today is, the habit is told to remind three days from it
+     * and nothing else. A build that ignored the mask would arm today or
+     * tomorrow, and both fail.
+     */
+    @Test
+    fun `schedule arms on a weekday the mask names, not on the next day`() {
+        val now = ZonedDateTime.now()
+        val wanted = (ReminderTime.weekdayOf(now.toLocalDate().toString())!! + 3) % 7
+        val mask = 1 shl wanted
+
+        Reminders.schedule(app, habit().copy(reminderDays = mask), androidEnabled = true)
+
+        val firesOn = java.time.Instant.ofEpochMilli(alarms().single().triggerAtTime)
+            .atZone(now.zone).toLocalDate()
+        assertEquals(
+            "the alarm must land on the one weekday the mask names",
+            wanted,
+            ReminderTime.weekdayOf(firesOn.toString()),
+        )
+        assertTrue(
+            "a mask naming a day three off cannot be satisfied by today or tomorrow",
+            firesOn >= now.toLocalDate().plusDays(2),
+        )
+    }
+
+    @Test
+    fun `a mask of 0 arms no alarm at all, and drops one it already had`() {
+        // 0 is legal and means "no day". `schedule` runs on every fetch, so it
+        // is also the path by which a mask emptied in the browser has to take
+        // an armed alarm back off the phone.
+        Reminders.schedule(app, habit(), androidEnabled = true)
+        assertEquals(1, alarms().size)
+
+        Reminders.schedule(app, habit().copy(reminderDays = 0), androidEnabled = true)
+        assertEquals("a mask of 0 must arm nothing", 0, alarms().size)
+    }
+
+    @Test
+    fun `every day is still armed today or tomorrow`() {
+        // The control for the two above: the default mask must reach
+        // AlarmManager exactly as it always did, or this change moves every
+        // existing reminder rather than only the ones that asked. Asserted as
+        // the armed alarm's own wall clock and a two-day bound rather than
+        // against a second `nextOccurrence` call, which would disagree with
+        // the one inside `schedule` for the microsecond either side of 08:00.
+        val now = ZonedDateTime.now()
+        Reminders.schedule(app, habit(), androidEnabled = true)
+
+        val fires = java.time.Instant.ofEpochMilli(alarms().single().triggerAtTime)
+            .atZone(now.zone)
+        assertEquals(8, fires.hour)
+        assertEquals(0, fires.minute)
+        assertTrue(
+            "an unmasked reminder is today's or tomorrow's, never further out",
+            fires.toLocalDate() <= now.toLocalDate().plusDays(1),
+        )
+    }
+
     /* ---------- soft, not loud: an inexact arm still arms, and says so ---------- */
 
     /**
@@ -294,6 +370,126 @@ class ReminderWiringTest {
         assertTrue(work.getWorkInfosForUniqueWork("remind:42").get().isNotEmpty())
         // — and arranges nothing else.
         assertTrue(work.getWorkInfosForUniqueWork("schedule:42").get().isEmpty())
+    }
+
+    /* ---------- a drop names the verdict it was, and not the other one ---------- */
+
+    /**
+     * Habit **77**, not the 42 every other test here uses, and that is not
+     * cosmetic: `a snoozed delivery does not re-arm anything` above enqueues
+     * real work for `remind:42` into the test WorkManager, which runs the
+     * worker and writes a drop line of its own — into a `ShadowLog` these two
+     * tests can still see. Read as habit 42's, the log below holds two lines
+     * and the delivery under test is not identifiable in it.
+     */
+    private val delivered = 77L
+
+    /** The habits list and the entries list, in the order the worker asks. */
+    private fun serverWith(mask: Int, entries: String): MockWebServer {
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """[{"id":$delivered,"name":"Meditate","reminder_time":"08:00","reminder_days":$mask}]""",
+            ),
+        )
+        server.enqueue(MockResponse().setResponseCode(200).setBody(entries))
+        server.start()
+        return server
+    }
+
+    /** Deliver the habit's own daily alarm — no date extra, so it means today. */
+    private fun deliverDailyAlarm() = runBlocking {
+        val worker = TestListenableWorkerBuilder<ReminderReceiver.NotifyWorker>(
+            app,
+            inputData = workDataOf(Notifications.EXTRA_HABIT_ID to delivered),
+        ).build()
+        assertEquals(ListenableWorker.Result.success(), worker.doWork())
+    }
+
+    /** The one line this delivery wrote about the habit it was for. */
+    private fun dropLine(): String {
+        val drops = ShadowLog.getLogsForTag("habiterall.notify")
+            .map { it.msg }
+            .filter { it.startsWith("no reminder for habit $delivered:") }
+        assertEquals("expected exactly one drop line, got $drops", 1, drops.size)
+        return drops.single()
+    }
+
+    /**
+     * The verdicts the drop log used to merge into "already answered, or not a
+     * weekday it reminds on" — one line covering two things that happen for
+     * unrelated reasons and want unrelated fixes.
+     *
+     * The reachable case is an inexact alarm on API 31-32: armed for a
+     * Friday-only habit at 23:52 and delivered at 00:03 on the Saturday, where
+     * nothing was answered and the reminder really was lost. Told "already
+     * answered", the only place left to look is the server.
+     *
+     * Driven through `NotifyWorker` against a real server rather than through
+     * `needsReminder`, because `RemindersTest` already pins the predicate and a
+     * predicate has never been where this package's bugs are: a correct `false`
+     * says nothing about which of the two sentences the log then wrote.
+     *
+     * The mask is built from the phone's OWN weekday, the same way
+     * `schedule arms on a weekday the mask names` above is, because the worker
+     * reads `LocalDate.now()` and takes no clock.
+     */
+    @Test
+    fun `a day the mask does not name drops as a weekday and not as an answer`() {
+        val today = java.time.LocalDate.now().toString()
+        // Every day but this one, so the alarm is one that arrived on a day its
+        // habit does not remind on — with nothing recorded for it at all.
+        val everyDayButToday = 127 xor (1 shl ReminderTime.weekdayOf(today)!!)
+        val server = serverWith(everyDayButToday, entries = "[]")
+        try {
+            runBlocking { Settings(app).setServerUrl(server.url("/").toString()) }
+
+            deliverDailyAlarm()
+
+            val line = dropLine()
+            assertTrue(
+                "the drop must name the weekday: $line",
+                line.contains("not a weekday it reminds on"),
+            )
+            assertFalse(
+                "nothing was answered, and the log must not say it was: $line",
+                line.contains("answered"),
+            )
+            // And it is asked before the entries are fetched, the order
+            // `dueReminders` reports `not_this_weekday` ahead of `done_today`
+            // in: only the habits list was requested.
+            assertEquals(
+                "a day the habit does not remind on needs no entry fetched",
+                1,
+                server.requestCount,
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `an answered day drops as answered and says nothing about the weekday`() {
+        val today = java.time.LocalDate.now().toString()
+        // A mask naming exactly today and nothing else — non-default on
+        // purpose, so this is also the control for the gate above: a weekday
+        // the mask DOES name must fall through to the question about the day.
+        val todayOnly = 1 shl ReminderTime.weekdayOf(today)!!
+        val server = serverWith(todayOnly, entries = """[{"date":"$today","value":2.0}]""")
+        try {
+            runBlocking { Settings(app).setServerUrl(server.url("/").toString()) }
+
+            deliverDailyAlarm()
+
+            val line = dropLine()
+            assertTrue("the drop must name the answer: $line", line.contains("already answered"))
+            assertFalse(
+                "this day IS a weekday it reminds on, and the log must not say otherwise: $line",
+                line.contains("weekday"),
+            )
+        } finally {
+            server.shutdown()
+        }
     }
 
     /* ---------- the shade shows the buttons in the order the list gives ---------- */

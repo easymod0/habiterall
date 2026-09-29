@@ -375,6 +375,15 @@
         <span class="field-hint" id="reminder-hint">
           Optional. Type any time (8:30, 8:30 pm, 2030) or pick one.
         </span>
+        <!-- Which weekdays that time fires on. The seven boxes are built in
+             reminder-field.js rather than written out here: both their captions
+             (the account's own locale's weekday names) and their ORDER (the
+             account's `weekStart`, for display only) are decided when the
+             dialog opens, and a seven-item weekday list written down in this
+             tree is the defect `dates.test.js` refuses. -->
+        <div class="timefield-days" id="reminder-days" role="group"
+             aria-label="Days the reminder fires on"></div>
+        <span class="field-hint" id="reminder-days-hint"></span>
       </fieldset>
 
       <label id="reminder-message-wrap">What the reminder asks

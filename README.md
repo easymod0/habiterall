@@ -159,10 +159,10 @@ somewhere you never were. Uncategorised has no page of its own.
 
 **Undo** — deleting a habit offers an Undo that restores every entry and note.
 
-**Reminders, where you want them** — set a time on a habit, choose what it
-*asks* ("Did you exercise today?"), and pick where it goes: the Android app, a
-Discord channel, an ntfy topic, or any combination. In Discord you answer with a
-button without leaving the chat. See
+**Reminders, where you want them** — set a time on a habit and tick the days of
+the week it should fire on, choose what it *asks* ("Did you exercise today?"),
+and pick where it goes: the Android app, a Discord channel, an ntfy topic, or any
+combination. In Discord you answer with a button without leaving the chat. See
 [Reminders and notifications](#reminders-and-notifications).
 
 **Works offline** — check off habits with no signal and they queue on the device,
@@ -1710,6 +1710,14 @@ included:
 habits.example.com {
 	# Caddy gets and renews the certificate itself. Nothing else to configure.
 	reverse_proxy localhost:3000
+
+	# habiterall compresses nothing itself, so this is where the dashboard JSON
+	# and the whole unbundled shell stop going out as plain text. `zstd gzip`
+	# is what a bare `encode` already means, and Caddy's default content types
+	# already cover the JSON, the modules and the stylesheet — the nginx example
+	# next door has to name them, because its list replaces rather than
+	# extends. The app icons are PNG and neither example touches them, rightly.
+	encode zstd gzip
 }
 ```
 <!-- /generated -->
@@ -1729,6 +1737,28 @@ server {
 
     ssl_certificate     /etc/letsencrypt/live/habits.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/habits.example.com/privkey.pem;
+
+    # Nothing in the app compresses anything — that is this proxy's job.
+    # nginx's `gzip_types` REPLACES the list rather than adding to it, and
+    # `text/html` is the only entry that is implicit and unremovable, so
+    # `gzip on` by itself compresses the one thing this app barely serves.
+    #
+    # Every type below is one habiterall actually sends, so name them all: the
+    # dashboard JSON is the big single response, but there is no build step
+    # here, so a cold load also fetches three dozen separate ES modules and the
+    # stylesheet. `text/javascript` and not `application/javascript` — that is
+    # what a `.js` resolves to, and a list naming only the latter silently
+    # leaves the whole shell plain. The web manifest is `manifest.json` and so
+    # is covered by `application/json` already. `image/svg+xml` is here for the
+    # mask-icon Safari fetches, and for the icon sprite that is coming; the app
+    # icons themselves are PNG, and no list should name those.
+    #
+    # `gzip_proxied any;` is deliberately not here. It governs requests that
+    # arrive at nginx already carrying a `Via` header — a CDN in front of
+    # nginx — not nginx in front of an app, and it changes nothing in this
+    # shape.
+    gzip on;
+    gzip_types application/json text/css text/javascript image/svg+xml;
 
     location / {
         proxy_pass http://127.0.0.1:3000;
@@ -1764,6 +1794,7 @@ already sends the headers above. **Hosts → Proxy Hosts → Add Proxy Host:**
 | Block Common Exploits | on |
 | Websockets Support | not needed; harmless if on |
 | **SSL** tab | request a Let's Encrypt certificate, then **Force SSL** on |
+| **Advanced** tab | `gzip_types application/json text/css text/javascript image/svg+xml;` — NPM turns gzip on for `text/html` and nothing else, and it strips `Accept-Encoding` on the way upstream, so this is the only place compression can be switched on. `gzip_types` replaces the list rather than adding to it, which is why the shell's own types are named alongside the API's |
 
 The one that catches everybody: **`localhost` in *Forward Hostname* means NPM's
 own container**, not your server. It resolves, connects to nothing, and shows a
@@ -1808,6 +1839,41 @@ headers itself. Set `BIND_ADDR=127.0.0.1` to publish to loopback only, or, if th
 proxy is on a different host, leave `BIND_ADDR` empty and firewall to that host
 instead.
 
+### Compression is the proxy's job
+
+`/overview` is the largest response on the app's hot path — at fifty habits
+over a year's window it is thousands of date-keyed entries and every habit's
+row, in JSON that repeats itself heavily. Neither edition compresses it, and
+that is a decision rather than an omission:
+
+- **Only the proxy can do it for everything.** The app's own JSON is the big
+  single response, but there is no build step here, so a cold load also fetches
+  three dozen separate ES modules and the stylesheet through
+  `express.static` — together a good deal more. The proxy compresses all of it,
+  and the service worker then caches what it is given. That is why the nginx
+  list above names the shell's content types and not only the API's.
+- **A proxy is entitled to take the choice away.** Nginx Proxy Manager sends
+  `Accept-Encoding: ""` upstream by default, so an app behind one is asked for
+  a plain response no matter what it would otherwise have done. An
+  implementation inside habiterall would be dead code there.
+- **TLS termination is already in front.** Every deployment documented here
+  puts a proxy there for the certificate, so compression costs no extra moving
+  part — only the one line.
+
+Each of the three examples above now enables it, and that is the whole of the
+fix.
+
+**If you expose the app directly, with nothing in front, nothing compresses
+anything** — and nothing warns you about it. That is deliberate: the app never
+learns what became of a response after it left, so the only thing it could warn
+from is its own configuration, and every gate available there is either silent
+for the case that matters most — a proxy in front with no compression line,
+which looks identical from here to one that has it — or noisy for the LAN
+instance that is configured correctly and pays nothing.
+`docs/decisions/compose-and-env.md` has the four reasons in full. So this is
+one more cost of a direct port, alongside no certificate, no service worker and
+no *Add to Home Screen*.
+
 ### Turning the guards off
 
 The personal edition runs on a laptop, a NAS or a LAN as readily as on the
@@ -1839,10 +1905,24 @@ logged-in browser as a lever. Neither gets safer on a VPN.
 
 A reminder has two halves, set in two places:
 
-1. **When** — a time on the habit itself, on its edit screen. Pick it from the
-   hour and minute dropdowns, or type it: `8:30`, `8:30 pm`, `830` and `8` all
-   work, and become `08:30`. No time, no reminder. It is a wall-clock time —
-   08:00 means eight in the morning, and stays there across a DST change.
+1. **When** — a time on the habit itself, on its edit screen, and the days of the
+   week it fires on. Pick the time from the hour and minute dropdowns, or type
+   it: `8:30`, `8:30 pm`, `830` and `8` all work, and become `08:30`. No time, no
+   reminder — whatever the days say. It is a wall-clock time — 08:00 means eight
+   in the morning, and stays there across a DST change.
+
+   The seven day boxes start with all of them ticked, which is what every habit
+   has always done. Untick Saturday and Sunday and a 07:00 reminder is a
+   weekday-only one; the field tells you which days it will use as you change
+   them. The days are checked against **your** calendar day and never the
+   server's — a server-sent reminder uses your
+   [reminder timezone](#both-editions-the-reminder-scheduler), and the phone and
+   the browser use the device's own clock — so "Mondays" is Monday where you are,
+   not wherever the instance is hosted. Clearing
+   every box is allowed and means what it says: nothing is sent for that habit,
+   and the field says so rather than quietly putting the ticks back. The boxes
+   stay usable with no time set, because they are the second half of the answer
+   and the time is the half that decides whether there is a reminder at all.
 2. **Where** — under ⚙ → **Notifications**, as a list of destinations. They are
    not exclusive; pick as many as you like.
 
@@ -2008,7 +2088,7 @@ Two options, in increasing order of effort:
 | | What you get | Needs |
 |---|---|---|
 | **Add to Home Screen** | The full app, offline, no browser chrome | Nothing — HTTPS |
-| **[Native app](android-native/README.md)** | **Notification actions** — answer Yes / No / a count from the shade — plus reminders that fire offline, two home-screen widgets (a one-tap habit and a read-only score/streak/strip), and a plain-http LAN address | Download the APK from [Releases](../../releases) |
+| **[Native app](android-native/README.md)** | **Notification actions** — answer Yes / No / a count from the shade — plus reminders that fire offline, three home-screen widgets (a one-tap habit, a read-only score/streak/strip, and a read-only grid of every habit against the last few days, with a line saying how many did not fit), and a plain-http LAN address | Download the APK from [Releases](../../releases) |
 
 The native client works against **either edition**. It asks the server how it
 signs people in and shows whichever it reports: a username and password form for
@@ -2096,11 +2176,13 @@ told Loop you had missed, which stays distinct from a day you never answered.
 Skips are preserved, and backups predating Loop's `unit`, `target_type` or
 `notes` columns import fine.
 
-Reminders come across in both directions: Loop's question becomes *What the
-reminder asks*, in every format. The reminder **time** is `.db` only, since
-Loop's `Habits.csv` has no columns for it, and only for a reminder Loop had set
-on **all seven days** — there is no weekday mask here, and inventing a daily one
-would put a notification on your phone that Loop never had.
+Reminders come across in both directions, whole: Loop's question becomes *What
+the reminder asks*, in every format, and a reminder's **time and its days** both
+travel — a Monday-and-Thursday reminder in Loop is a Monday-and-Thursday reminder
+here, and goes back out as one. Those two are `.db` only, since Loop's
+`Habits.csv` has no columns for them, so a CSV round trip leaves every habit
+reminding on all seven days. Earlier versions took an all-days Loop reminder and
+dropped the rest, because there was no weekday mask on this side to put them in.
 
 Loop keeps its *preferences* in Android rather than in the backup, so nothing in
 the file can set yours: "Enable skip days" and "Show question marks" start off,
@@ -2589,11 +2671,12 @@ the destination could never have delivered, and `notify.too_late` if the
 reminder was there and its minute went by unserved.
 
 If neither appears, **set `LOG_LEVEL=debug` and wait a minute.** `notify.skip`
-names the gate that dropped it — `not_yet`, `done_today`, `already_sent`,
-`too_late`, `archived`, `no_reminder_time` — and prints the clock it compared
-against. Those are in the order they are asked, which is why `already_sent`
-rather than `too_late` is what a delivered reminder reports for the rest of the
-day. `too_late` with a `zone` you did not expect is the `TZ` problem above.
+names the gate that dropped it — `archived`, `no_reminder_time`,
+`not_this_weekday`, `not_yet`, `done_today`, `already_sent`, `too_late` — and
+prints the clock it compared against. Those are in the order they are asked,
+which is why `already_sent` rather than `too_late` is what a delivered reminder
+reports for the rest of the day, and why a weekday the habit does not remind on
+is `not_this_weekday` and never a `too_late` warning. `too_late` with a `zone` you did not expect is the `TZ` problem above.
 
 ### In-app settings
 

@@ -469,7 +469,7 @@ const HABITS_STRUCTURAL = [
 const HABITS_USER_FIELDS = [
   'name', 'description', 'type', 'unit', 'target_value', 'target_type',
   'freq_numerator', 'freq_denominator', 'color', 'reminder_time',
-  'reminder_message', 'at_most_unlogged', 'show_as', 'icon',
+  'reminder_days', 'reminder_message', 'at_most_unlogged', 'show_as', 'icon',
 ];
 
 const { rows: habitCols } = await admin.query(`

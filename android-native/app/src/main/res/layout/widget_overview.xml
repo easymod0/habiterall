@@ -1,0 +1,607 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Every habit down one side, the last few days across — the dashboard's grid at
+  widget size, read-only. Built from the same four colour roles
+  `widget_habit.xml` and `widget_stats.xml` use, so a cell here and a cell in
+  the app read as the same thing.
+
+  FIXED views, hidden beyond need, exactly as `widget_stats.xml` does with its
+  seven `stats_cell_*` cells. Not a `Bitmap`: one would have to be re-rendered
+  on every resize, theme change and density change, and it carries a marshalled
+  size limit — a grid of tinted `ImageView`s needs none of that. So the layout
+  holds `Widgets.MAX_OVERVIEW_ROWS` rows of `Widgets.MAX_STRIP_DAYS` cells and
+  `OverviewWidget.render` sets the surplus GONE, which is also what lets a
+  resize reveal them again without re-inflating.
+
+  MAX_OVERVIEW_ROWS is 7 and not 8 BECAUSE OF LINT. This is ~75 views (1 root +
+  1 note + 1 header + 1 spacer + 7 day labels + 7 row containers + 7 names + 49
+  cells + 1 footer); `TooManyViews` warns past 80, and an eighth row would be
+  ~85. Adding a row means re-deriving `Widgets.overviewRows`'s thresholds, not
+  raising a lint baseline.
+
+  This widget follows the LAUNCHER's light/dark configuration, never the
+  account's `theme` setting — `res/values-night/colors.xml` is the only
+  `values-night` in the app. Same decision as the other two widgets, written
+  down here rather than left as the default nobody chose.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/overview_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="8dp"
+    android:background="@drawable/widget_background">
+
+    <!--
+      The note line: the empty-account message, or "as of <date>" when the
+      records have not been refreshed today — in which case today's column has
+      no data and paints as UNKNOWN, which is indistinguishable from "answered
+      nothing today". Visible for those two cases only. It has to be a REAL
+      view and not a content description: the first version of the checkmark
+      widget's own gone note was spoken and nowhere else, and the cell was then
+      pixel-identical to a live one (docs/decisions/android.md).
+    -->
+    <TextView
+        android:id="@+id/overview_note"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textSize="10sp"
+        android:textColor="@color/widget_text"
+        android:paddingBottom="2dp"
+        android:visibility="gone" />
+
+    <!--
+      The day header. The first child is the name column's spacer — a bare
+      TextView rather than a `Space`, which is not one of the view classes
+      RemoteViews will inflate. The labels are narrow weekday initials written
+      at render time in the device's locale; duplicates (T/T, S/S) are accepted,
+      because every calendar has them and each cell's own content description
+      carries the real date.
+    -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="80dp"
+            android:layout_height="wrap_content" />
+        <TextView
+            android:id="@+id/overview_day_0"
+            android:layout_width="20dp"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:maxLines="1"
+            android:textSize="10sp"
+            android:textColor="@color/widget_text" />
+        <TextView
+            android:id="@+id/overview_day_1"
+            android:layout_width="20dp"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:maxLines="1"
+            android:textSize="10sp"
+            android:textColor="@color/widget_text" />
+        <TextView
+            android:id="@+id/overview_day_2"
+            android:layout_width="20dp"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:maxLines="1"
+            android:textSize="10sp"
+            android:textColor="@color/widget_text" />
+        <TextView
+            android:id="@+id/overview_day_3"
+            android:layout_width="20dp"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:maxLines="1"
+            android:textSize="10sp"
+            android:textColor="@color/widget_text" />
+        <TextView
+            android:id="@+id/overview_day_4"
+            android:layout_width="20dp"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:maxLines="1"
+            android:textSize="10sp"
+            android:textColor="@color/widget_text" />
+        <TextView
+            android:id="@+id/overview_day_5"
+            android:layout_width="20dp"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:maxLines="1"
+            android:textSize="10sp"
+            android:textColor="@color/widget_text" />
+        <TextView
+            android:id="@+id/overview_day_6"
+            android:layout_width="20dp"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:maxLines="1"
+            android:textSize="10sp"
+            android:textColor="@color/widget_text" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/overview_row_0"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/overview_name_0"
+            android:layout_width="80dp"
+            android:layout_height="wrap_content"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textSize="11sp"
+            android:textColor="@color/widget_text" />
+        <ImageView
+            android:id="@+id/overview_cell_0_0"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_0_1"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_0_2"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_0_3"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_0_4"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_0_5"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_0_6"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/overview_row_1"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/overview_name_1"
+            android:layout_width="80dp"
+            android:layout_height="wrap_content"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textSize="11sp"
+            android:textColor="@color/widget_text" />
+        <ImageView
+            android:id="@+id/overview_cell_1_0"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_1_1"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_1_2"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_1_3"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_1_4"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_1_5"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_1_6"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/overview_row_2"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/overview_name_2"
+            android:layout_width="80dp"
+            android:layout_height="wrap_content"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textSize="11sp"
+            android:textColor="@color/widget_text" />
+        <ImageView
+            android:id="@+id/overview_cell_2_0"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_2_1"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_2_2"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_2_3"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_2_4"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_2_5"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_2_6"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/overview_row_3"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/overview_name_3"
+            android:layout_width="80dp"
+            android:layout_height="wrap_content"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textSize="11sp"
+            android:textColor="@color/widget_text" />
+        <ImageView
+            android:id="@+id/overview_cell_3_0"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_3_1"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_3_2"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_3_3"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_3_4"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_3_5"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_3_6"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/overview_row_4"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/overview_name_4"
+            android:layout_width="80dp"
+            android:layout_height="wrap_content"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textSize="11sp"
+            android:textColor="@color/widget_text" />
+        <ImageView
+            android:id="@+id/overview_cell_4_0"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_4_1"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_4_2"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_4_3"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_4_4"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_4_5"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_4_6"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/overview_row_5"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/overview_name_5"
+            android:layout_width="80dp"
+            android:layout_height="wrap_content"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textSize="11sp"
+            android:textColor="@color/widget_text" />
+        <ImageView
+            android:id="@+id/overview_cell_5_0"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_5_1"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_5_2"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_5_3"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_5_4"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_5_5"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_5_6"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/overview_row_6"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/overview_name_6"
+            android:layout_width="80dp"
+            android:layout_height="wrap_content"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textSize="11sp"
+            android:textColor="@color/widget_text" />
+        <ImageView
+            android:id="@+id/overview_cell_6_0"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_6_1"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_6_2"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_6_3"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_6_4"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_6_5"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+        <ImageView
+            android:id="@+id/overview_cell_6_6"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_margin="1dp"
+            android:contentDescription="@null"
+            android:src="@drawable/widget_cell" />
+    </LinearLayout>
+
+    <!--
+      "N more" — visible only when the account holds more habits than this
+      widget has room for. The widget must not pretend it is showing all of
+      them, and this is the answer to "a home screen cannot show forty rows"
+      that needs no configuration screen and stays honest about the bound.
+    -->
+    <TextView
+        android:id="@+id/overview_more"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:textSize="10sp"
+        android:textColor="@color/widget_text"
+        android:paddingTop="2dp"
+        android:visibility="gone" />
+</LinearLayout>

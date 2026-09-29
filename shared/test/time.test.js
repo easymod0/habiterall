@@ -2,8 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 const {
-  COMMON_TIMES, MINUTE_STEP, describe, format, hourOptions, isCanonical,
-  minuteOptions, parseTimeInput, split,
+  COMMON_TIMES, MINUTE_STEP, describe, describeReminderDays, format,
+  hourOptions, isCanonical, minuteOptions, parseReminderDays, parseTimeInput,
+  remindsOn, split, weekdayOf,
 } = await import('../public/ui/time.js');
 
 const { TIME_RE } = await import('../src/constants.js');
@@ -161,4 +162,147 @@ test('describe reads a time back in both clocks', () => {
   assert.equal(describe('00:00'), '00:00 (12:00 am)');
   assert.equal(describe('12:00'), '12:00 (12:00 pm)');
   assert.equal(describe(''), '');
+});
+
+/* ---------- which weekdays a reminder fires on ---------- */
+
+/*
+ * `reminder_days` is a 7-bit mask, bit N = `getDay()` N: bit 0 Sunday … bit 6
+ * Saturday. Every fixture below is a LITERAL and every one of them is chosen
+ * to be neither 127 nor 0 wherever it can be, because those two are the fixed
+ * points of the rotation this convention exists to make explicit — a suite
+ * written entirely in 127s passes against a mask read backwards, which is
+ * precisely how Loop's Saturday-based bit order went unverified for so long.
+ *
+ *   Mon-Fri  = 62   (bits 1..5)
+ *   Sat only = 64   (bit 6)
+ *   Sun only = 1    (bit 0)
+ *
+ * The dates are a real, consecutive week: 2026-09-13 is a Sunday and
+ * 2026-09-19 is the Saturday after it.
+ */
+const SUNDAY = '2026-09-13';
+const MONDAY = '2026-09-14';
+const FRIDAY = '2026-09-18';
+const SATURDAY = '2026-09-19';
+
+test('the default is every day, written as the literal 127', () => {
+  // Asserted as a number and not against the exported constant: a test that
+  // imports the value it checks pins the name and nothing else, and this
+  // default is what every habit created before the field existed means.
+  assert.equal(parseReminderDays(undefined), 127);
+  assert.equal(parseReminderDays(null), 127);
+});
+
+test('a mask of 0 is legal and is never repaired to every day', () => {
+  // The bug #78 refused to ship: a Loop reminder mask of 0 became a daily
+  // reminder. 0 means the habit reminds on no day, and the schedulers simply
+  // never match one. A PICKER may snap an emptied set back to all days; the
+  // validator may not.
+  assert.equal(parseReminderDays(0), 0);
+  assert.equal(describeReminderDays(0), 'No days');
+  for (const date of [SUNDAY, MONDAY, FRIDAY, SATURDAY]) {
+    assert.equal(remindsOn(0, date), false, `0 must fire on no day, failed on ${date}`);
+  }
+});
+
+test('a real mask is kept exactly', () => {
+  assert.equal(parseReminderDays(62), 62);
+  assert.equal(parseReminderDays(64), 64);
+  assert.equal(parseReminderDays(1), 1);
+  assert.equal(parseReminderDays(127), 127);
+});
+
+test('anything that is not a mask lands on every day', () => {
+  // `typeof` first rather than `Number(raw)`: `Number([])` is 0 and
+  // `Number(true)` is 1, so coercion would turn several spellings of "not a
+  // mask" into "no day at all" or "Sundays only".
+  for (const junk of ['62', 62.5, -1, 128, NaN, Infinity, true, [], [62], {},
+    '__proto__', null, undefined]) {
+    assert.equal(parseReminderDays(junk), 127,
+      `failed on ${JSON.stringify(junk)} (${typeof junk})`);
+  }
+});
+
+test('bit 0 is Sunday and bit 6 is Saturday, both ends asserted', () => {
+  assert.equal(weekdayOf(SUNDAY), 0);
+  assert.equal(weekdayOf(MONDAY), 1);
+  assert.equal(weekdayOf(FRIDAY), 5);
+  assert.equal(weekdayOf(SATURDAY), 6);
+});
+
+test('weekdayOf reads the string and never a zone', () => {
+  // The caller has already decided whose day this is. Nothing here may consult
+  // the process clock, so the answer has to be the same under any TZ.
+  assert.equal(weekdayOf('2026-01-01'), 4);
+  assert.equal(weekdayOf('2026-12-31'), 4);
+  assert.equal(weekdayOf(''), null);
+  assert.equal(weekdayOf('2026-9-13'), null, 'the padding is not cosmetic');
+  assert.equal(weekdayOf(undefined), null);
+});
+
+test('a two-digit year is that year, not nineteen hundred and something', () => {
+  // `Date.UTC(99, 0, 1)` silently means 1999-01-01, which is a FRIDAY; the year
+  // 99 itself opens on a Thursday. An entry dated year 0099 is exactly the kind
+  // of row `boundedRange` exists for, so the two must not be confused here.
+  assert.equal(weekdayOf('0099-01-01'), 4);
+  assert.equal(weekdayOf('0001-03-04'), 0);
+});
+
+test('Mon-Fri is 62, and it is off at both weekend ends', () => {
+  assert.equal(remindsOn(62, MONDAY), true);
+  assert.equal(remindsOn(62, FRIDAY), true);
+  assert.equal(remindsOn(62, SUNDAY), false);
+  assert.equal(remindsOn(62, SATURDAY), false);
+});
+
+test('Saturday only is 64 and Sunday only is 1 — not the other way round', () => {
+  // The one pair that catches a mask read against Loop's own Saturday-based
+  // bit order, where these two numbers are 1 and 2 instead.
+  assert.equal(remindsOn(64, SATURDAY), true);
+  assert.equal(remindsOn(64, SUNDAY), false);
+  assert.equal(remindsOn(1, SUNDAY), true);
+  assert.equal(remindsOn(1, SATURDAY), false);
+});
+
+test('every day fires on every day of a real week', () => {
+  for (const date of [SUNDAY, MONDAY, '2026-09-15', '2026-09-16', '2026-09-17',
+    FRIDAY, SATURDAY]) {
+    assert.equal(remindsOn(127, date), true, `failed on ${date}`);
+  }
+});
+
+test('an unreadable date is on no mask', () => {
+  // It has no weekday, so no mask can name it. Both callers hand over a date
+  // the clock constructed, so this branch is a bug elsewhere.
+  assert.equal(remindsOn(127, 'not-a-date'), false);
+  assert.equal(remindsOn(127, ''), false);
+});
+
+test('describeReminderDays names the days, in bit order', () => {
+  // The names are supplied by the caller and indexed by `getDay()` — this
+  // module has no imports and no locale, and `dates.test.js`'s source guard
+  // refuses a hardcoded weekday array under `shared/public/` anyway. Two
+  // languages, because a version that ignored the argument and reached for a
+  // list of its own would pass with one. Spelled out here rather than taken
+  // from `weekdayNames()`, which resolves against whatever locale the runner
+  // is in — this suite is about the BITS, and it must read the same in all ten
+  // of them.
+  const en = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const fr = ['dim.', 'lun.', 'mar.', 'mer.', 'jeu.', 'ven.', 'sam.'];
+  assert.equal(describeReminderDays(62, en), 'Mon, Tue, Wed, Thu, Fri');
+  assert.equal(describeReminderDays(64, en), 'Sat');
+  assert.equal(describeReminderDays(1, en), 'Sun');
+  assert.equal(describeReminderDays(65, en), 'Sun, Sat');
+  assert.equal(describeReminderDays(62, fr), 'lun., mar., mer., jeu., ven.');
+  assert.equal(describeReminderDays(64, fr), 'sam.');
+});
+
+test('the two masks that need no names at all', () => {
+  // 'Every day' and 'No days' say more than seven names joined would, and they
+  // are the two answers a picker's own summary line spends most of its life on.
+  assert.equal(describeReminderDays(127, []), 'Every day');
+  assert.equal(describeReminderDays(0, []), 'No days');
+  // Junk reads back as what it WILL be stored as, not as a blank.
+  assert.equal(describeReminderDays('62', []), 'Every day');
 });

@@ -42,6 +42,10 @@ import { unzip } from './unzip.js';
 // habit could not.
 import { LIMITS, AT_MOST_UNLOGGED, SHOW_AS, parseIcon } from './validate.js';
 import { TIME_RE } from './constants.js';
+// One declaration of the weekday rule, reached the same way `validate.js`
+// reaches it — see the comment at its own import for why `shared/src` may read
+// a DOM-free module out of `shared/public`.
+import { ALL_DAYS, parseReminderDays } from '../public/ui/time.js';
 
 /**
  * Loop timestamps are UTC-midnight-aligned epoch millis. Read them back with
@@ -132,6 +136,55 @@ export function convertLoopValue(raw, isNumerical) {
 
 /** Loop's `reminder_days`: all seven bits of the weekday mask set. */
 export const LOOP_ALL_DAYS = 127;
+
+/**
+ * Loop's weekday mask is SATURDAY-BASED, and ours is not. These two functions
+ * are the whole of the difference, and they are a PAIR: the export half lives
+ * here rather than in export-loop.js so a reviewer reads one rotation against
+ * its own inverse instead of against a file it never sees open.
+ *
+ *   Loop bit  0=Sat 1=Sun 2=Mon 3=Tue 4=Wed 5=Thu 6=Fri
+ *   ours      0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat   (JS `getDay()`)
+ *
+ * so Loop's index for our weekday `w` is `(w + 1) % 7`.
+ *
+ * Verified from two independent places in uhabits' own source, because nothing
+ * about it is guessable and the obvious reading is wrong:
+ * `NotificationTray.shouldShowReminderToday` indexes the bit array with
+ * `(date.dayOfWeek.daysSinceSunday + 1) % 7`, and `WeekdayPickerDialog` labels
+ * that same raw array with `longWeekdayNames(SATURDAY)`, whose sequence is
+ * Sat, Sun, Mon, Tue, Wed, Thu, Fri. `WeekdayList(packed)` fills `weekdays[i]`
+ * from bit `i`, LSB first.
+ *
+ * **127 and 0 are FIXED POINTS of this rotation**, which is exactly why the
+ * mapping went unverified for as long as it did — the only two masks this
+ * repo could produce before per-weekday reminders existed are the two that
+ * cannot tell a rotation from the identity. Anything pinning these must use a
+ * mask that is neither: Mon–Fri is 62 here and 124 in Loop, and Saturday alone
+ * is 64 here and 1 there.
+ *
+ * A column that does not read as a mask at all — text, a value above 2^53, an
+ * absent column — lands on `ALL_DAYS` through `parseReminderDays`, which is
+ * the one value that changes nothing for a habit whose owner never chose.
+ */
+export function loopDaysToMask(loopDays) {
+  const loop = parseReminderDays(wholeNumber(loopDays));
+  let mask = 0;
+  for (let weekday = 0; weekday < 7; weekday++) {
+    if ((loop >> ((weekday + 1) % 7)) & 1) mask |= 1 << weekday;
+  }
+  return mask;
+}
+
+/** The inverse of `loopDaysToMask`, for `writeLoopDatabase`. */
+export function maskToLoopDays(mask) {
+  const ours = parseReminderDays(mask);
+  let loop = 0;
+  for (let weekday = 0; weekday < 7; weekday++) {
+    if ((ours >> weekday) & 1) loop |= 1 << ((weekday + 1) % 7);
+  }
+  return loop;
+}
 
 /**
  * A column that should hold a whole number, read strictly.
@@ -818,6 +871,7 @@ export async function parseLoopDatabase(path) {
     for (const r of rows) {
       const isNumerical = numerical.get(r.id);
       const entries = bucket.get(r.id);
+      const reminderTime = loopReminderToTime(r.reminder_hour, r.reminder_min);
 
       habits.push({
         name: String(r.name ?? '').trim(),
@@ -838,17 +892,19 @@ export async function parseLoopDatabase(path) {
         // `reminder_message` holds. `normaliseImportedHabit` flattens and clamps
         // it, so a Loop file cannot store a prompt the habit dialog could not.
         reminder_message: String(r.question ?? ''),
-        // Only an ALL-DAYS reminder comes across. `reminder_days` is a 7-bit
-        // weekday mask and habiterall has no concept of one, so a Monday-only
-        // reminder has no faithful form here: importing the time alone turns it
-        // into seven notifications a week, and re-exporting writes that widening
-        // back into the user's Loop app. A mask of 0 — a reminder that fires on
-        // no day at all — would become a daily one, which is exactly what
-        // `loopReminderToTime` refuses to do a line above. Missing is the
-        // honest answer until habiterall grows the concept.
-        reminder_time: wholeNumber(r.reminder_days) === LOOP_ALL_DAYS
-          ? loopReminderToTime(r.reminder_hour, r.reminder_min)
-          : '',
+        // Every reminder comes across now, weekdays and all. This used to
+        // accept an ALL-DAYS mask only and drop the time otherwise, because
+        // there was nowhere here to put a Monday-only one — taking the time
+        // alone would have turned it into seven notifications a week and
+        // written that widening back into the user's own Loop app.
+        reminder_time: reminderTime,
+        // Rotated out of Loop's Saturday-based spelling; see `loopDaysToMask`.
+        // A habit with NO reminder carries the default 127 rather than the 0
+        // Loop writes for one, because that 0 is "no reminder" and not "no
+        // day": exported again it is still 0, so the cycle is stable, and
+        // storing it would hand every reminderless imported habit a mask that
+        // silences the reminder its owner adds next.
+        reminder_days: reminderTime ? loopDaysToMask(r.reminder_days) : ALL_DAYS,
         archived: Number(r.archived) ? 1 : 0,
         entries,
       });
@@ -1431,6 +1487,12 @@ export function normaliseImportedHabit(h) {
     freq_denominator: den,
     color: normalizeColor(h.color),
     reminder_time: TIME_RE.test(h.reminder_time ?? '') ? h.reminder_time : '',
+    // The same rule `parseHabit` applies, so a file cannot store a mask the
+    // habit dialog could not. A parser that says nothing yields 127 — every
+    // day, the value that changes nothing — and a habit with NO reminder time
+    // carries 127 too rather than 0, so that exporting it as Loop's `0` (no
+    // reminder) and importing that back is a stable cycle.
+    reminder_days: parseReminderDays(h.reminder_days),
     // One line and capped, the same rule parseHabit applies: an imported prompt
     // ends up in the Android client's line-delimited reminder cache exactly like
     // one typed into the dialog, and a newline there corrupts the record it

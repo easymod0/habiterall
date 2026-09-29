@@ -11,6 +11,7 @@ const {
 } = await import('../src/export-loop.js');
 const {
   parseLoopDatabase, loopTimestampToISO, loopReminderToTime,
+  loopDaysToMask, maskToLoopDays,
 } = await import('../src/import.js');
 
 const YES = 2;
@@ -162,6 +163,10 @@ const HABITS = [
     unit: '', target_value: 0, target_type: 'at_least',
     freq_numerator: 1, freq_denominator: 1, color: '#8b5cf6', archived: 0,
     reminder_time: '07:05', reminder_message: 'Did you sit for ten minutes?',
+    // Mon–Fri, and deliberately not 127: that is both the default AND a fixed
+    // point of the rotation into Loop's Saturday-based mask, so a fixture made
+    // of it compares a default with itself and passes against the identity.
+    reminder_days: 62,
   },
   {
     id: 2, name: 'Water', description: '', type: 'numerical',
@@ -183,6 +188,9 @@ const HABITS = [
     unit: '', target_value: 0, target_type: 'at_least',
     freq_numerator: 3, freq_denominator: 7, color: '#f59e0b', archived: 1,
     reminder_time: '23:59', reminder_message: 'Gym today?',
+    // Saturday alone — our bit 6, Loop's bit 0, so this and Meditate's 62
+    // between them cannot be satisfied by one wrong constant.
+    reminder_days: 64,
   },
 ];
 
@@ -257,10 +265,20 @@ test('a full export re-imports with identical data', async () => {
   assert.equal(cigs.reminder_message, '');
   assert.equal(gym.reminder_time, '23:59');
 
-  // reminder_days is Loop's weekday mask, and is what the import gate reads.
-  // A habit with a reminder gets all seven bits; one without gets 0, which is
-  // what Loop's own writer stores. Read from the file, since nothing above
-  // surfaces it.
+  // The mask survives the trip, which is the assertion the literal 127 this
+  // used to write could not make: 127 is a fixed point of the rotation, so the
+  // round trip alone would agree with itself under the identity. 62 in, 62 out,
+  // with 124 in the file between them — asserted below, on the bytes.
+  assert.equal(med.reminder_days, 62, 'Mon–Fri comes back as Mon–Fri');
+  assert.equal(gym.reminder_days, 64, 'Saturday alone comes back as Saturday alone');
+  assert.equal(water.reminder_days, 127,
+    'a caller that sends no mask exports and re-imports as every day');
+  assert.equal(cigs.reminder_days, 127,
+    'no reminder is Loop\'s 0, which reads back as the default rather than no day');
+
+  // ...and the WIRE, which is the half a round trip cannot see. Loop's bit 0 is
+  // Saturday, so our 62 (Mon–Fri) is its 124 and our 64 (Sat) is its 1. Read
+  // from the file, since nothing above surfaces it.
   const { DatabaseSync } = await import('node:sqlite');
   const raw = new DatabaseSync(path, { readOnly: true });
   const days = Object.fromEntries(
@@ -268,10 +286,35 @@ test('a full export re-imports with identical data', async () => {
       .map((r) => [r.name, r.reminder_days])
   );
   raw.close();
-  assert.equal(days['Meditate'], 127, 'a reminder is an all-days one');
+  assert.equal(days['Meditate'], 124, 'our 62 is Loop\'s 124');
+  assert.equal(days['Gym'], 1, 'our 64 is Loop\'s 1 — bit 0 is Saturday');
+  assert.equal(days['Water'], 127, 'every day is a fixed point of the rotation');
   assert.equal(days['Cigarettes'], 0, 'no reminder, so no days — as Loop writes it');
 
   unlinkSync(path);
+});
+
+test('the weekday rotation is its own inverse in the other direction', () => {
+  // A pure pin on the pair, beside the file-level one above: the conversion
+  // table both clients are held to, written as literals rather than by calling
+  // one function to build the other's expectation. 127 and 0 are here to say
+  // they are fixed points, and are exactly why the rest of the table exists.
+  for (const [ours, loop] of [
+    [127, 127], [0, 0],
+    [62, 124],  // Mon–Fri
+    [64, 1],    // Saturday alone
+    [1, 2],     // Sunday alone
+  ]) {
+    assert.equal(maskToLoopDays(ours), loop, `${ours} -> ${loop}`);
+    assert.equal(loopDaysToMask(loop), ours, `${loop} -> ${ours}`);
+  }
+
+  // Anything that is not a mask is every day, the one value that changes
+  // nothing — including the TEXT a `.db`'s reminder columns are selected as.
+  assert.equal(loopDaysToMask('124'), 62, 'the column arrives as text');
+  assert.equal(loopDaysToMask('nonsense'), 127);
+  assert.equal(loopDaysToMask(9223372036854775807), 127);
+  assert.equal(maskToLoopDays(undefined), 127);
 });
 
 test('the exported file passes Loop\'s own validation query', async () => {

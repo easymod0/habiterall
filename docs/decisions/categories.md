@@ -1475,7 +1475,7 @@ has none.
 a filing one.** `syncEntry` and the module-level `hasCategories` are state both
 category views have to keep honest, and splitting the views across two files
 puts half of that invariant in each. It also keeps `sw.js`'s `SHELL` untouched.
-`CACHE_VERSION` still bumps `v32` → `v33`, because a new EXPORT under
+`CACHE_VERSION` still bumps `v33` → `v34`, because a new EXPORT under
 `shared/public/` is a bump whether or not a file was added: `shellFirst` is
 stale-while-revalidate, so a shell can hold the new `app.js` over a cached
 `ui/categories.js` that declares no `openCategory` — a module link error before

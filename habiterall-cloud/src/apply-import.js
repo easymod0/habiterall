@@ -358,9 +358,10 @@ export async function applyImport(userId, habits, mode = 'merge', categories = [
           `INSERT INTO habits (user_id, name, description, type, unit,
                                target_value, target_type, freq_numerator,
                                freq_denominator, color, reminder_time,
-                               reminder_message, at_most_unlogged, show_as,
-                               icon, position, archived, category_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                               reminder_days, reminder_message, at_most_unlogged,
+                               show_as, icon, position, archived, category_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+                   $18,$19)
            RETURNING id`,
           [
             userId,                                   // from the session, always
@@ -374,6 +375,7 @@ export async function applyImport(userId, habits, mode = 'merge', categories = [
             clean.freq_denominator,
             clean.color,
             clean.reminder_time,
+            clean.reminder_days,
             clean.reminder_message,
             clean.at_most_unlogged,
             clean.show_as,

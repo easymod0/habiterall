@@ -18,7 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { LOOP_ALL_DAYS } from './import.js';
+import { maskToLoopDays } from './import.js';
 import { DATE_RE } from './validate.js';
 
 const MILLIS_PER_DAY = 86_400_000;
@@ -309,14 +309,15 @@ export async function writeLoopDatabase(path, habits, entriesFor) {
 
     habits.forEach((h, position) => {
       const isNumerical = h.type === 'numerical';
-      // habiterall has no per-weekday reminder concept, so a reminder it does
-      // have is an all-days one: 127, every bit of Loop's weekday mask. A habit
-      // with NO reminder gets 0, which is what Loop's own writer stores
-      // (`reminder?.days?.toInteger() ?: 0`) — Loop never reads the mask unless
-      // both hour and minute are non-null, so this is fidelity rather than
-      // function. When per-weekday reminders land, this is where they go.
+      // The habit's own weekday mask, rotated into Loop's Saturday-based
+      // spelling — `maskToLoopDays` lives beside its inverse in import.js, and
+      // this used to be a literal 127 because there was no mask to write. A
+      // habit with NO reminder still gets 0, which is what Loop's own writer
+      // stores (`reminder?.days?.toInteger() ?: 0`) — Loop never reads the mask
+      // unless both hour and minute are non-null — and importing that 0 back
+      // returns the habit to the default 127 rather than to no day at all.
       const [reminderHour, reminderMin] = timeToLoopReminder(h.reminder_time);
-      const reminderDays = reminderHour === null ? 0 : LOOP_ALL_DAYS;
+      const reminderDays = reminderHour === null ? 0 : maskToLoopDays(h.reminder_days);
 
       insertHabit.run(
         h.id,

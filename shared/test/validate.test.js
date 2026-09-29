@@ -44,6 +44,30 @@ test('the unlogged-day override is clamped to the three it may be', () => {
   }
 });
 
+test('the reminder weekday mask defaults to every day, as the literal 127', () => {
+  // Written as a number rather than imported from `ui/time.js`: a test that
+  // imports the constant it checks pins the name and nothing else. 127 is the
+  // value that changes nothing for every habit that existed before the field
+  // did, and `PUT /habits/:id` REPLACES, so it is also what an older client
+  // omitting the field means.
+  assert.equal(parseHabit({ name: 'Read' }).reminder_days, 127);
+});
+
+test('parseHabit carries a real mask through, and repairs only nonsense', () => {
+  // 62 is Mon-Fri (bits 1..5) — a non-default, non-symmetric value on purpose.
+  // A fixture at 127 compares a default with itself and passes with the field
+  // dropped from `parseHabit` entirely.
+  assert.equal(parseHabit({ name: 'x', reminder_days: 62 }).reminder_days, 62);
+  assert.equal(parseHabit({ name: 'x', reminder_days: 64 }).reminder_days, 64);
+  // 0 is a legal answer meaning "no day" and must never become a daily
+  // reminder — the defect #78 refused to ship.
+  assert.equal(parseHabit({ name: 'x', reminder_days: 0 }).reminder_days, 0);
+  for (const junk of ['62', 62.5, -1, 128, true, [], {}, '__proto__', null]) {
+    assert.equal(parseHabit({ name: 'x', reminder_days: junk }).reminder_days, 127,
+      `${JSON.stringify(junk)} was not repaired`);
+  }
+});
+
 test('name is required and trimmed', () => {
   assert.throws(() => parseHabit({ name: '   ' }), ValidationError);
   assert.throws(() => parseHabit({}), ValidationError);
@@ -543,6 +567,60 @@ test('the browser holds NO copy of the fold — the category picker asks the ser
     'foldCategoryName, and the browser does not earn one: the branch that ' +
     'wanted it is unreachable offline. Let the route answer, and see ' +
     'docs/decisions/categories.md');
+});
+
+test('the habit dialog SENDS every field parseHabit stores — a PUT REPLACES (source guard)', () => {
+  // `PUT /habits/:id` REPLACES (root CLAUDE.md), so a field the dialog leaves
+  // out of its payload is not one the server leaves alone: `parseHabit`
+  // supplies its default and the stored value is overwritten. That failure is
+  // silent in exactly the worst way — the dialog never showed the field, the
+  // save succeeds, the reply is a valid habit, and the only evidence is a
+  // reminder arriving on a day the user had switched off. `reminder_days`
+  // (#72) is the third field to be at risk of it, after `icon` and
+  // `category_id`, whose own comments in `parseHabit` state the same rule.
+  //
+  // The DENOMINATOR is real rather than read out of source: `parseHabit` is
+  // CALLED and its own key list is what the payload is measured against, so a
+  // field added to the validator and forgotten in the browser fails this test
+  // on the day it is added, with no list here to remember to update. Printing
+  // both inventories is part of the assertion, per the root CLAUDE.md — an
+  // empty offender list means nothing until the denominator is known.
+  //
+  // Only the payload half reads source text, and that half has the usual
+  // limits: it cannot see a key sent with the RIGHT name and the WRONG value
+  // (`reminder_days: reminderField.value()` would pass), nor one the server
+  // then refuses. The behavioural half needs a browser — the dialog assembles
+  // this object from live controls — so it belongs in `test/browser/`
+  // (`timepicker.mjs`), where a save with one weekday unticked can be read
+  // back off the server. It is NOT written yet; see the PR notes.
+  const stored = Object.keys(parseHabit({ name: 'x' }));
+  assert.ok(stored.length > 10,
+    `parseHabit returned only ${stored.length} fields — this guard's denominator is wrong`);
+
+  const src = readFileSync(
+    new URL('../public/ui/habit-dialog.js', import.meta.url), 'utf8')
+    // Comments first, as the guards in `dates.test.js` do: this file documents
+    // its payload at length and a `// reminder_days is ...` note must not be
+    // read as the key being sent.
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const literal = /\n {2}const payload = \{([\s\S]*?)\n {2}\};/.exec(src);
+  assert.ok(literal,
+    "habit-dialog.js's `const payload = {…};` was not found — update this guard's regex");
+
+  const sent = new Set(
+    [...literal[1].matchAll(/^ {4}([A-Za-z_]\w*):/gm)].map((m) => m[1]));
+  assert.ok(sent.size > 10,
+    `the payload literal parsed to only ${sent.size} keys (${[...sent].join(', ')}) — `
+    + "update this guard's regex");
+
+  const missing = stored.filter((k) => !sent.has(k));
+  assert.deepEqual(missing, [],
+    `habit-dialog.js's payload omits ${missing.join(', ')} — and PUT /habits/:id `
+    + 'REPLACES, so every habit edited in the browser has that field reset to '
+    + "parseHabit's default.\n"
+    + `  parseHabit stores: ${stored.join(', ')}\n`
+    + `  the dialog sends:  ${[...sent].join(', ')}`);
 });
 
 /* ---------- entries ---------- */

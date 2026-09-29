@@ -1,5 +1,6 @@
 package com.habiterall.app.data
 
+import com.habiterall.app.notify.ReminderTime
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -57,6 +58,8 @@ data class Habit(
      * always used to show.
      */
     @SerialName("reminder_message") val reminderMessage: String = "",
+    /** See [HabitInput.reminderDays]; this is the stored mask coming back. */
+    @SerialName("reminder_days") val reminderDays: Int = ReminderTime.ALL_DAYS,
     /** See [HabitInput.atMostUnlogged]; this is the stored value coming back. */
     @SerialName("at_most_unlogged") val atMostUnlogged: String = "default",
     /** See [HabitInput.showAs]. */
@@ -160,6 +163,12 @@ data class Habit(
         color = color,
         reminderTime = reminderTime,
         reminderMessage = reminderMessage,
+        // The weekdays that time fires on. There is no picker for it here, so
+        // this is carry-through only — and that is exactly the shape the field
+        // is dangerous in: `setReminder` below copies a fetched habit with one
+        // field changed, so omitting the mask would widen a weekdays-only
+        // reminder set in the browser back to every day on the next tap.
+        reminderDays = reminderDays,
         showAs = showAs,
         icon = icon,
         // Every field, and this is the bridge that has to carry them: a habit
@@ -214,6 +223,17 @@ data class HabitInput(
     val color: String = DEFAULT_HABIT_COLOR,
     @SerialName("reminder_time") val reminderTime: String = "",
     @SerialName("reminder_message") val reminderMessage: String = "",
+    /**
+     * Which weekdays the reminder fires on: a 7-bit mask, bit 0 Sunday … bit 6
+     * Saturday, [ReminderTime.ALL_DAYS] for every day and 0 for none. The one
+     * declaration of that numbering on this client is `ReminderTime`, which
+     * mirrors `shared/public/ui/time.js`.
+     *
+     * Carried here for the usual reason — a habit PUT REPLACES, so leaving it
+     * out resets a mask set on the web to every day — and this client has no
+     * control that sets it, which makes carry-through the whole of its job.
+     */
+    @SerialName("reminder_days") val reminderDays: Int = ReminderTime.ALL_DAYS,
     /**
      * What a day with NO ROW is worth on an at-most target — `"default"` to
      * follow the account's `atMostUnlogged`. Carried here because a habit PUT
