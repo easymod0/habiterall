@@ -41,7 +41,7 @@ function slice(from, to, after = 0) {
 
 // The function, with `export` dropped — a module-only keyword, and this body is
 // compiled as one.
-const openCategorySrc = slice('export async function openCategory(id) {', '\n}\n', 2)
+const openCategorySrc = slice('export async function openCategory(id, redraw = false) {', '\n}\n', 2)
   .replace('export async function', 'async function');
 
 // The listener's arrow function, taken from `init()` where it is registered.
