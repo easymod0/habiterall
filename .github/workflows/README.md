@@ -11,8 +11,8 @@ uploads, work with no setup at all.
 
 | Workflow | Runs on | Publishes | Needs setup |
 |---|---|---|---|
-| `ci.yml` | every PR, and nightly at 05:17 UTC | nothing | **nothing** |
-| `android-native.yml` | every PR (it builds only if the client can be affected), and nightly at 06:17 UTC | nothing | **nothing** |
+| `ci.yml` | every PR, and weekly, Mondays at 05:17 UTC | nothing | **nothing** |
+| `android-native.yml` | every PR (it builds only if the client can be affected), and weekly, Mondays at 06:17 UTC | nothing | **nothing** |
 | `codeql.yml` | every PR and every push to `master` (each language only if it can be affected), and weekly at 06:47 UTC Monday | code scanning alerts | **default setup must stay off** |
 | `release.yml` | **a `vX.Y.Z` tag**, or manual | the APK, images, a GitHub release | signing, and only for a publishing run |
 
@@ -80,7 +80,7 @@ validate the build.
 | `android-native/**` | `Analyze (java-kotlin)` — a full client build |
 | `.github/workflows/*.yml` | `Analyze (actions)` |
 | — a merge to `master` | the same three, gated the same way |
-| — the nightly schedule | everything in both workflows, unconditionally |
+| — the weekly schedule | everything in both workflows, unconditionally |
 | — the weekly schedule | all three CodeQL languages, unconditionally |
 
 Four deliberate choices in there.
