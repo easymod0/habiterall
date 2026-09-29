@@ -367,9 +367,11 @@ ck('...and bestStreak agrees with the score beside it rather than with a ' +
  * is pinned WHERE IT STANDS rather than asserted into a parity that does not
  * hold. Not the credit date — both reads resolve the same one — and not
  * `unlogged`: purely the window. `summaryStats` gets a 765-day slice
- * (`SUMMARY_WINDOW_DAYS`) holding nothing but the skip, and a skip cannot OPEN a
- * run, so the streak starts the day after it; the window is `warmStartFor`'s
- * `[end - 765, end]`, 766 days with today. The habit's own page opens at the
+ * (`SUMMARY_WINDOW_DAYS`) holding nothing but the skip. Since #354 the window
+ * opens at `warmStartFor`'s `[end - 765, end]` rather than at that skip, and
+ * silence is credited from the lifetime answer, so the streak runs the window's
+ * whole width — 766 days with today — straight through the skip, and stops only
+ * where the window does. The habit's own page opens at the
  * stated answer 900 days back and carries that skip through without breaking
  * it. Closing the gap means making this route's streaks a lifetime read — a
  * behaviour change on the dashboard's hot path.

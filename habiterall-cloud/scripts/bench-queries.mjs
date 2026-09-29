@@ -75,7 +75,12 @@ const DENSITY_TENTHS = 8;
 /** `KEEP_LOG_DAYS` in `src/notifier.js` — how deep the watermark table goes. */
 const LOG_DAYS = 45;
 
-/** The window `/overview` reads: SUMMARY_WINDOW_DAYS(400) + SCORE_WARMUP_DAYS. */
+/**
+ * A fixed ~one-year window, as #185's figures were measured over — NOT the
+ * width `/overview` reads today, which is `SUMMARY_WINDOW_DAYS` (765 since #354,
+ * `shared/src/stats.js`). Re-measure over that before quoting these numbers as
+ * the route's cost.
+ */
 const WINDOW_START = '2025-06-01';
 const WINDOW_END = '2026-05-31';
 
