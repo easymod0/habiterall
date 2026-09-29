@@ -52,7 +52,7 @@ on:
   #
   # Not on the hour: GitHub queues `0 * * * *` heavily and delays it.
   schedule:
-    - cron: '17 5 * * *'
+    - cron: '17 5 * * 1'
 
   # No `tags:`. A tag already runs the whole suite through release.yml, which
   # calls this workflow; triggering on the tag as well ran everything twice.
@@ -71,9 +71,9 @@ concurrency:
   # A new push supersedes an in-flight run for the same ref.
   #
   # Keyed on the EVENT as well as the ref, because several triggers now share
-  # `refs/heads/master`: the nightly schedule and a manual dispatch. On the ref
+  # `refs/heads/master`: the weekly schedule and a manual dispatch. On the ref
   # alone they land in one group with `cancel-in-progress`, so a dispatch would
-  # kill the nightly — and the nightly's whole job is to run unattended, where
+  # kill the scheduled run — and the nightly's whole job is to run unattended, where
   # "cancelled" and "never ran" look the same in the Actions tab.
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
@@ -81,7 +81,7 @@ concurrency:
 jobs:
   # Which of the expensive jobs this change can possibly affect.
   #
-  # Only for pull requests. Every other trigger runs the lot: the nightly is
+  # Only for pull requests. Every other trigger runs the lot: the scheduled run is
   # asking whether master still builds against today's runner, and a
   # `workflow_call` from release.yml has no base commit to compare against.
   #

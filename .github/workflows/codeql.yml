@@ -37,7 +37,7 @@ on:
   # The weekly sweep, and the thing that makes the gating below safe. Nothing
   # in the repository needs to change for this to be worth running: the QUERIES
   # move, so a rule written after the last commit still finds what it finds.
-  # Same argument as ci.yml's nightly, one rung slower because query packs
+  # Same argument as ci.yml's schedule, one rung slower because query packs
   # change over weeks rather than days.
   schedule:
     - cron: '47 6 * * 1'
