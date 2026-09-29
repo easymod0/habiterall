@@ -3397,11 +3397,19 @@ ck("habitSort: 'streak' sorts the longest current streak first",
 /* 'recently missed' needs its own fixture: a habit with NO entries at all is
  * not "never missed" under `computeMissRuns` — its window is a single day
  * (today), unanswered, which reads as missed TODAY. "Never missed" here means
- * a continuous, gap-free run instead. */
+ * a continuous, gap-free run instead.
+ *
+ * The run is THREE days, and its length is the pin on `/overview`'s forward
+ * clamp (#354): the window opens at `warmStartFor(birth, ...)`, the habit's
+ * first row, so nothing before it is a miss. A route handing `summaryStats`
+ * the bare `cutoff` instead opens 765 days back, reads the day before the
+ * first row as a miss, and sorts this habit as missed 3 days ago — ahead of
+ * the week-ago miss. A run longer than 7 days would sort last either way,
+ * which is how the 10-day run this used to be let that mutation through. */
 const rmNever = await postHabit({ name: 'RmNeverMissed', type: 'boolean' });
 const rmWeekAgo = await postHabit({ name: 'RmMissedWeekAgo', type: 'boolean' });
 const rmYesterday = await postHabit({ name: 'RmMissedYesterday', type: 'boolean' });
-for (let i = 9; i >= 0; i--) await putEntry(rmNever.id, isoDaysAgo(i), { value: 2 });
+for (let i = 2; i >= 0; i--) await putEntry(rmNever.id, isoDaysAgo(i), { value: 2 });
 for (let i = 9; i >= 0; i--) {
   await putEntry(rmWeekAgo.id, isoDaysAgo(i), { value: i === 7 ? 0 : 2 });
 }
