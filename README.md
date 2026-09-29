@@ -2590,11 +2590,12 @@ the destination could never have delivered, and `notify.too_late` if the
 reminder was there and its minute went by unserved.
 
 If neither appears, **set `LOG_LEVEL=debug` and wait a minute.** `notify.skip`
-names the gate that dropped it — `not_yet`, `done_today`, `already_sent`,
-`too_late`, `archived`, `no_reminder_time` — and prints the clock it compared
-against. Those are in the order they are asked, which is why `already_sent`
-rather than `too_late` is what a delivered reminder reports for the rest of the
-day. `too_late` with a `zone` you did not expect is the `TZ` problem above.
+names the gate that dropped it — `archived`, `no_reminder_time`,
+`not_this_weekday`, `not_yet`, `done_today`, `already_sent`, `too_late` — and
+prints the clock it compared against. Those are in the order they are asked,
+which is why `already_sent` rather than `too_late` is what a delivered reminder
+reports for the rest of the day, and why a weekday the habit does not remind on
+is `not_this_weekday` and never a `too_late` warning. `too_late` with a `zone` you did not expect is the `TZ` problem above.
 
 ### In-app settings
 

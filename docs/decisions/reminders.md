@@ -230,6 +230,53 @@ now errs toward notifying *through* `needsReminder` with an empty entry list, so
 the only thing left for it to refuse on is the weekday, which is exactly the
 question a phone with no network can still answer for itself.
 
+**Why #72 is still five mirrors on the phone, and why `describeReminderDays` is
+not a sixth.** Calling it a sixth would be the easier and less true version. It
+is a new rule INSIDE two existing mirrors (`ReminderTime` gains `ALL_DAYS`,
+`parseReminderDays`, `weekdayOf`, `remindsOn`; `needsReminder` gains one line),
+plus a new field on the offline reminder cache, which is a cache and not a mirror
+(`HabitFilter` and the widget's figures were argued through that distinction
+already). What earns the offline copy is `Reminders.nextAllowedOccurrence`: arming
+tomorrow's alarm happens on a phone that may be in a tunnel, and a client that
+had to ask the server which day to arm for would not have reminders at all — the
+same test `needsReminder` passed. `describeReminderDays` stayed behind because no
+surface there names a weekday. The mask reaches `Api.kt` as carry-through only
+through two write bridges (`Habit` -> `toInput()` -> `HabitInput`, and `Draft` ->
+`toInput()`), each of which would silently widen a browser-set mask back to every
+day by omitting it — the `icon` and `at_most_unlogged` defect twice. A mirror
+with no caller is a second thing to keep in step for nothing.
+
+**Phone details behind the rules in `android-native/CLAUDE.md`.**
+`nextAllowedOccurrence` layers on `nextOccurrence` because the wall-clock promise
+and its two DST guarantees are only kept by continuing to ask it. Seven
+candidates are sufficient and necessary; the weekday is read off the date the
+alarm fires on because judging a 00:30 reminder against `now` judges it against
+the day before. `ReminderReceiver`'s offline branch used to skip every gate,
+answering a bare `true`: a redundant reminder beats a missed one, applied one
+level too high. The weekday is asked one level higher than `needsReminder`, as its
+own reason, because "already answered" and "not a weekday it reminds on" are two
+verdicts and a shared line reads as the wrong one for a late alarm that answered
+nothing. The mask is appended as field 9 like every field after the sixth, so an
+upgraded phone keeps arming yesterday's alarms until the next sync; the codec
+functions are `internal` and `Context`-free because a round trip moves writer and
+reader together and passes against a field inserted mid-line as happily as one
+appended, whereas the half that can fail is a SHORT line.
+
+**Why `nudge.js` imports `remindsOn`, and why the mirror is `% 7`.** `YES` and
+`WEB_CHANNEL` beside it are declared locally only because their originals live in
+`shared/src`, out of the browser's reach; `time.js` is reachable. The import cost
+`nudge.js` its "dependency-free" description, which was the wrong statement of
+the property: what has to hold is that `shared/test/nudge.test.js` can LOAD it
+under Node, and a relative specifier to a sibling with no imports resolves there
+as in the browser (`ui/calendar.js` and `ui/resample.js` already reach
+`./dates.js`). An absolute `/shared/ui/...` specifier is what would break it.
+Getting the Kotlin `% 7` wrong makes every reminder one day out, forever, with
+the dialog showing the right days. `reminderDaysField` is a sibling of
+`reminderField` because `createTimeField` abstracts one string with one input;
+the boxes are re-appended rather than rebuilt so a `weekStart` changed in another
+tab is picked up on next open. A colour-only edit in the browser that omitted the
+mask would widen a Monday-only reminder back to every day.
+
 **A tick used to cost the SUM of its accounts, and the two channels do not want
 the same fix.** `collect` and delivery both went one item at a time, so an
 instance with 400 accounts paid for 400 sequential round trips even though
