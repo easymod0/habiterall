@@ -245,16 +245,17 @@ ck('a run\'s length is the TRUE, unclipped length — greater than the days requ
 
 // A window with no runs in it answers with an empty array rather than a
 // missing key or a 500 — and note what this does NOT pin, because its first
-// version claimed to. It does not pin the 400-day bound (decision 2): this
-// fixture holds 60 days of entries, so a window at −456..−450 intersects no
-// run for a reason that has nothing to do with `SUMMARY_WINDOW_DAYS`, and
-// deleting that constant from the route entirely leaves this passing. The
-// bound is `summaryStats`' behaviour rather than the route's and is pinned
-// where it can be reached with a 500-day fixture and no HTTP: `#247` cases 2
-// and 6 in `shared/test/streaks.test.js`. What this DOES bite is the grid
+// version claimed to. It does not pin the summary window's bound (decision 2):
+// this fixture holds 60 days of entries, so a window at −806..−800 intersects
+// no run for a reason that has nothing to do with `SUMMARY_WINDOW_DAYS`, and
+// deleting that constant from the route entirely leaves this passing. (800 and
+// not the 450 it used to be: the window is 765 days since #354, so 450 is no
+// longer PAST it.) The bound is `summaryStats`' behaviour rather than the
+// route's and is pinned where it can be reached with a long fixture and no
+// HTTP: `#247` cases 2 and 6 in `shared/test/streaks.test.js`. What this DOES bite is the grid
 // window being threaded through at all — swap `summaryEnd` in for `end` and
 // it answers with a run.
-const pagedPastWindow = await overview({ days: 7, end: daysAgo(450) });
+const pagedPastWindow = await overview({ days: 7, end: daysAgo(800) });
 const pagedPastWindowRow = pagedPastWindow.habits.find((h) => h.id === runsHabit.id);
 ck('?end= paged back past the summary window returns runs: []',
   Array.isArray(pagedPastWindowRow.runs) && pagedPastWindowRow.runs.length === 0,
@@ -327,21 +328,25 @@ const lapseStats = await fetch(`${base}/api/habits/${lapsing.id}/stats`)
 
 /* The shape the first round of this fix got wrong, and the reason the credit
  * date is a LIFETIME date rather than one derived from whichever slice a figure
- * happens to read. This route reads 400 days for `score`/`currentStreak` and
- * 1830 for its own `bestStreak` scan, so a limit habit answered 500 days ago and
- * skipped since holds nothing but a skip inside the narrow slice — which reads
- * as "never answered" while the habit's own page, over lifetime rows, sees the
- * answer and credits from it. Measured: master agreed at 1.000 on both surfaces;
- * a slice-derived credit date read 0.051922 here against 1.000 there, with
- * `bestStreak` on this same payload disagreeing with both because its wider
- * slice COULD see the answer. Every fixture above puts its only row 365 days
- * back, inside both windows, where the two derivations agree and neither can
- * fail — which is exactly why this one is here. */
+ * happens to read. This route reads `SUMMARY_WINDOW_DAYS` (765, since #354) for
+ * `score`/`currentStreak` and 1830 for its own `bestStreak` scan, so a limit
+ * habit answered 900 days ago and skipped since holds nothing but a skip inside
+ * the summary slice — which reads as "never answered" while the habit's own
+ * page, over lifetime rows, sees the answer and credits from it. The 900 is the
+ * pin: it has to be OUTSIDE the summary window and it is, by 135 days. (It was
+ * 500 while the window was 400, and #354 widened the window past it — at 500
+ * this fixture stopped exercising the shape at all, its answer inside the
+ * slice.) Measured: master agreed at 1.000 on both surfaces; a slice-derived
+ * credit date read 0.051922 here against 1.000 there, with `bestStreak` on this
+ * same payload disagreeing with both because its wider slice COULD see the
+ * answer. Every fixture above puts its only row 365 days back, inside both
+ * windows, where the two derivations agree and neither can fail — which is
+ * exactly why this one is here. */
 const oldAnswer = await post('/habits', {
   name: 'Wine', type: 'numerical', target_type: 'at_most', target_value: 2,
   at_most_unlogged: 'success', unit: 'glasses',
 });
-await put(`/habits/${oldAnswer.id}/entries/${daysAgo(500)}`, { value: 1 });
+await put(`/habits/${oldAnswer.id}/entries/${daysAgo(900)}`, { value: 1 });
 await put(`/habits/${oldAnswer.id}/entries/${daysAgo(350)}`, { status: 'skip' });
 
 const withOld = await overview({ days: 7 });
@@ -361,22 +366,23 @@ ck('...and bestStreak agrees with the score beside it rather than with a ' +
 /* `currentStreak` is the one figure on this payload that does NOT agree, and it
  * is pinned WHERE IT STANDS rather than asserted into a parity that does not
  * hold. Not the credit date — both reads resolve the same one — and not
- * `unlogged`: purely the window. `summaryStats` gets a 400-day slice holding
- * nothing but the skip, and a skip cannot OPEN a run, so the streak starts the
- * day after it; the habit's own page opens at the stated answer 500 days back
- * and carries that skip through without breaking it. Older than #223,
- * reproduced identical on master, and closing it means making this route's
- * streaks a lifetime read — a behaviour change on the dashboard's hot path.
+ * `unlogged`: purely the window. `summaryStats` gets a 765-day slice
+ * (`SUMMARY_WINDOW_DAYS`) holding nothing but the skip, and a skip cannot OPEN a
+ * run, so the streak starts the day after it; the window is `warmStartFor`'s
+ * `[end - 765, end]`, 766 days with today. The habit's own page opens at the
+ * stated answer 900 days back and carries that skip through without breaking
+ * it. Closing the gap means making this route's streaks a lifetime read — a
+ * behaviour change on the dashboard's hot path.
  *
- * Two LITERALS and not `oldStats.currentStreak - 151`, because the point is
- * that changing SUMMARY_WINDOW_DAYS fails here by name: widened past 500 the
- * slice sees the answer and this reads 501, narrowed below 350 it sees no row
- * at all and reads 1. A relative assertion would go on passing through both.
- * See docs/decisions/day-states.md. */
-ck('...while currentStreak still disagrees, at the width of the 400-day slice',
-  oldRow.currentStreak === 350, String(oldRow.currentStreak));
+ * LITERALS and not `oldStats.currentStreak - 135`, because the point is that
+ * changing SUMMARY_WINDOW_DAYS fails here by name: the row reads the window's
+ * width, so widened it reads more and narrowed it reads less, and a relative
+ * assertion would go on passing through both. See docs/decisions/day-states.md
+ * and docs/decisions/categories.md. */
+ck('...while currentStreak still disagrees, at the width of the 765-day summary window',
+  oldRow.currentStreak === 766, String(oldRow.currentStreak));
 ck('...against the lifetime read behind the habit\'s own page',
-  oldStats.currentStreak === 501, String(oldStats.currentStreak));
+  oldStats.currentStreak === 901, String(oldStats.currentStreak));
 
 // ...and in ARCHIVED mode, which is the one line of the route with no other
 // test on it. The grouped lifetime read that answers the credit date used to be
@@ -405,6 +411,74 @@ ck('...and the two surfaces agree about that too',
   && lapseRow.currentStreak === lapseStats.currentStreak,
   `overview ${lapseRow.currentStreak}/${lapseRow.bestStreak} vs `
   + `stats ${lapseStats.currentStreak}/${lapseStats.bestStreak}`);
+
+/* ---- issue #354: a dashboard row is the category page's reading of the habit ----
+ *
+ * `/overview` used to score over the earliest row INSIDE a 400-day slice, and
+ * `/categories/stats` scores a member from `warmStartFor(...)` over a window
+ * reaching 765 days back, so a sparse habit read differently on the two
+ * surfaces. Both are asked for the SAME habit here, with the default request
+ * the page makes, and compared row against roster.
+ *
+ * The fixture is the one that separates the windows: a 1x/365d boolean whose
+ * two rows sit at 699 and 334 days back. Its first row is inside the 765-day
+ * window but 299 days before the 400-day slice opened, so the old window
+ * started at the 334-day row and read 0.6074; the page read 0.858236. The
+ * LITERAL is asserted beside the parity because parity alone passes if both
+ * surfaces move together to the wrong window.
+ */
+const parityCategory = await post('/categories', { name: 'Parity', color: '#aa5500' });
+const parityHabit = await post('/habits', {
+  name: 'Rare', type: 'boolean', freq_numerator: 1, freq_denominator: 365,
+  category_id: parityCategory.id,
+});
+await put(`/habits/${parityHabit.id}/entries/${daysAgo(699)}`, { value: 2 });
+await put(`/habits/${parityHabit.id}/entries/${daysAgo(334)}`, { value: 2 });
+
+const parityOverview = await overview({ days: 7 });
+const parityPage = await fetch(`${base}/api/categories/stats`).then((r) => r.json());
+const parityRow = parityOverview.habits.find((h) => h.id === parityHabit.id);
+const paritySection = parityPage.categories.find((c) => c.id === parityCategory.id);
+const parityRoster = paritySection.roster.find((r) => r.id === parityHabit.id);
+const paritySummary = parityOverview.categorySummaries.find((c) => c.id === parityCategory.id);
+
+ck('#354: a sparse habit\'s dashboard score is its score on the category page',
+  parityRow.score === parityRoster.score,
+  `${parityRow.score} vs ${parityRoster.score}`);
+ck('...and the category header mean on the dashboard is the page\'s mean',
+  paritySummary.mean === paritySection.mean,
+  `${paritySummary.mean} vs ${paritySection.mean}`);
+ck('...at the literal, not merely the same wrong number on both',
+  parityRow.score === 0.858236, String(parityRow.score));
+
+/* The other half: a habit OLDER than the window. Its rows are at 900 and 100
+ * days back, so the 765-day slice holds only the second, and with no `start`
+ * the window opened at that row — the 665 silent days before it, which an
+ * at-most habit whose silence counts as success credits in full, were never
+ * scored, and the score climbed from a cold start instead (0.869375, and a
+ * currentStreak of 101). With `start` the window reaches its own 765 days back
+ * and reads 1 with a 766-day streak, which is what the page reads. Measured on
+ * the shared functions. (`warmStartFor`'s forward clamp is the other direction
+ * — a habit YOUNGER than the window — and is pinned in `stats.test.js`.) */
+const clampCategory = await post('/categories', { name: 'Clamp', color: '#0055aa' });
+const clampHabit = await post('/habits', {
+  name: 'Limit', type: 'numerical', target_type: 'at_most', target_value: 2,
+  at_most_unlogged: 'success', unit: 'glasses', freq_numerator: 1, freq_denominator: 7,
+  category_id: clampCategory.id,
+});
+await put(`/habits/${clampHabit.id}/entries/${daysAgo(900)}`, { value: 1 });
+await put(`/habits/${clampHabit.id}/entries/${daysAgo(100)}`, { value: 1 });
+
+const clampOverview = await overview({ days: 7 });
+const clampPage = await fetch(`${base}/api/categories/stats`).then((r) => r.json());
+const clampRow = clampOverview.habits.find((h) => h.id === clampHabit.id);
+const clampRoster = clampPage.categories.find((c) => c.id === clampCategory.id)
+  .roster.find((r) => r.id === clampHabit.id);
+
+ck('#354: an at-most habit older than the window scores as the page scores it',
+  clampRow.score === clampRoster.score, `${clampRow.score} vs ${clampRoster.score}`);
+ck('...at the literal 1, which the unclamped window does not reach',
+  clampRow.score === 1, String(clampRow.score));
 
 /* ---- issue #270, the last anchor site: /overview's OWN bestStreak scan ----
  *
@@ -459,14 +533,14 @@ ck('...and all three figures agree with the habit\'s own page',
  * the pure function. `onPaceSeries`'s leniency window near the start of a
  * range is sound only where the range opens at the habit's genuine first
  * row — this route reads two BOUNDED slices that each open wherever they
- * happen to reach (the 400-day summary window for `score`/`currentStreak`,
+ * happen to reach (the 765-day summary window for `score`/`currentStreak`,
  * the 1830-day streak scan for `bestStreak`), so it must hand both
  * `summaryStats` and `recomputeBestStreak` the habit's LIFETIME first row
  * (the same `MIN(date)` read that already feeds `creditAnchor`) or the
  * leniency at either slice's own edge is mistaken for the habit's birth.
  *
  * A single row 2000 days back is this habit's whole history for a long
- * stretch — outside BOTH the 400-day and the 1830-day windows, so both bugs
+ * stretch — outside BOTH the 765-day and the 1830-day windows, so both bugs
  * are reachable through one fixture — then 300 days back it resumes and is
  * kept EXACTLY 3-per-7 (every rolling 7-day window holds precisely 3
  * completions) with the completions clustered late in each cycle: the shape
@@ -510,7 +584,7 @@ const birthWiringRow = withBirthWiring.habits.find((h) => h.id === birthWiring.i
 const birthWiringStats = await fetch(`${base}/api/habits/${birthWiring.id}/stats`)
   .then((r) => r.json());
 
-ck('a bounded 400-day slice reads this habit the same as its whole history ' +
+ck('a bounded 765-day slice reads this habit the same as its whole history ' +
   'does — currentStreak, from summaryStats (#340 wiring, #346 model)',
   birthWiringRow.currentStreak === 297, String(birthWiringRow.currentStreak));
 ck('...and so does the bounded 1830-day streak scan — bestStreak, from ' +
@@ -536,7 +610,7 @@ ck('...and /overview agrees with the habit\'s own page, which reads the ' +
  * through the very anchor round 1 introduced.
  *
  * This fixture is deliberately a habit whose real history is entirely inside
- * BOTH bounded slices (`/overview`'s 400-day window, `recomputeBestStreak`'s
+ * BOTH bounded slices (`/overview`'s 765-day window, `recomputeBestStreak`'s
  * 1830-day one), unlike `birthWiring` above — so the only source of
  * disagreement is the phantom row corrupting the raw `MIN(date)` read, not a
  * genuine slice edge. Kept in the LATE three of every 7-day cycle

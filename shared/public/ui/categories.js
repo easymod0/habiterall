@@ -224,17 +224,18 @@ export async function open(redraw = false) {
  * window that disagrees with both. A route of its own, or a member list joined
  * client-side out of `/overview`, would each be that second window.
  *
- * **The dashboard's grouped section header is a different window, and it can
- * print a different number for this same category.** That header's mean comes
- * from `/overview`'s `categorySummaries` — `summariseByCategory` over
- * `summaryStats`, a fixed 400-day window anchored on today with no forward
- * clamp to the member's own first entry — where this page is
- * `COMPARE_WINDOW_DAYS` plus the 400-day warm-up, clamped forward per member.
- * For a slow habit the two genuinely diverge (measured, a perfect 1x/90d habit
- * 700 days old: 98% here against 85% there). It is a pre-existing limitation
- * rather than something this page introduced — both surfaces are on master —
- * and `docs/decisions/categories.md` phase 6 has the figures and why it is not
- * closed here.
+ * **The dashboard's grouped section header is the same window as this page's
+ * default request, and it used to be a different one (#354).** That header's
+ * mean comes from `/overview`'s `categorySummaries` — `summariseByCategory`
+ * over `summaryStats` — which now scores over `SUMMARY_WINDOW_DAYS`
+ * (`COMPARE_WINDOW_DAYS` plus the 400-day warm-up), clamped forward per member
+ * by `warmStartFor`, exactly as this page is. Before that it was a fixed
+ * 400-day window with no forward clamp, and for a slow habit the two diverged
+ * (measured, a perfect 1x/90d habit 700 days old: 98% here against 85% there).
+ * They agree at the default request only: a page opened with an explicit
+ * `start` is a different reading, and so may print a different number.
+ * Parity is pinned in both editions' `/overview` integration suites, and
+ * `docs/decisions/categories.md` phase 6 has the figures.
  *
  * Reports whether it rendered, for the reason `open()` and `detail.open()` do:
  * the boot in `app.js` opens a deep link with no list behind it, so a refused

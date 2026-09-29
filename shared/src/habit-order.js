@@ -102,12 +102,11 @@ export function sortHabitPayloads(payloads, sort, lastMiss = new Map()) {
       // Most recent miss FIRST. A habit with no miss in the window
       // (`null`/absent from `lastMiss`) sorts LAST — and "no miss" and "missed
       // longer ago than the window reaches" are the same answer here, on
-      // purpose: the window is the 400-day summary slice
-      // (`SCORE_WARMUP_DAYS`), so a habit that last missed 500 days ago sorts
-      // as never-missed. That is a real limitation, not an oversight, and it
-      // is accepted rather than hidden — a wider window would cost every
-      // ordinary request to serve the rare account with a five-year-old
-      // habit.
+      // purpose: the window is the summary slice (`SUMMARY_WINDOW_DAYS`, 765
+      // days), so a habit that last missed 800 days ago sorts as never-missed.
+      // That is a real limitation, not an oversight, and it is accepted rather
+      // than hidden — a wider window would cost every ordinary request to serve
+      // the rare account with a five-year-old habit.
       const missOf = (p) => lastMiss.get(p.id) ?? null;
       return [...payloads].sort((a, b) => {
         const ma = missOf(a);

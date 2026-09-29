@@ -11,7 +11,7 @@ import {
   UNLOGGED_DEFAULT,
   unansweredCounts, today, addDays, daysBetween, MAX_RANGE_DAYS,
   computeCategoryStats, SCORE_WARMUP_DAYS, MAX_COMPARE_DAYS, COMPARE_WINDOW_DAYS,
-  summariseByCategory,
+  summariseByCategory, SUMMARY_WINDOW_DAYS, warmStartFor,
 } from '@habiterall/shared/stats.js';
 import { computeAwards } from '@habiterall/shared/awards.js';
 import {
@@ -19,8 +19,8 @@ import {
 } from '@habiterall/shared/summary-cache.js';
 import { resolveHabitSort, needsLastMiss, sortHabitPayloads } from '@habiterall/shared/habit-order.js';
 
-/** Lookback used for the dashboard's score/current-streak summary. */
-const SUMMARY_WINDOW_DAYS = 400;
+// The dashboard's summary lookback, `SUMMARY_WINDOW_DAYS`, is declared once in
+// `shared/src/stats.js` with the reason it is 765 days (#354).
 // Format sniffing and every parser live in shared: the two editions had
 // separate copies of the sniffing, and they had drifted.
 import { backupSettings, parseUpload } from '@habiterall/shared/import.js';
@@ -915,7 +915,7 @@ api.get('/overview', (req, res) => {
   // from "scored zero", and is used for a null check only, never `addDays` or
   // `dateRange` (root CLAUDE.md). `first_answer` is whether the habit has EVER
   // stated a value, which is what decides where silence starts counting as
-  // success (#223) — a lifetime question that a 400- or 1830-day slice holding
+  // success (#223) — a lifetime question that a 765- or 1830-day slice holding
   // nothing but skips would answer "never" for a habit that answered years ago.
   //
   // It therefore runs in ARCHIVED mode too, where it used to be skipped because
@@ -986,16 +986,17 @@ api.get('/overview', (req, res) => {
     // Both lookbacks count back from `summaryEnd`, not from the grid's
     // `end`: these three figures describe the habit today.
     //
-    // **The 400-day slice comes from a different place depending on `fresh`,
-    // and that is the whole point of the split.** A fresh habit reads only
-    // the narrow window; a stale one reads the wide 1830-day window (it has
-    // to, for `recomputeBestStreak` and the completion count below) and
-    // FILTERS its own 400-day slice out of it rather than asking for it a
-    // second time — the wide window CONTAINS the narrow one. Issuing both
-    // reads unconditionally made every stale habit fetch its last 400 days
-    // twice, ~2,230 days per habit on the cold path — the first load of any
-    // day, and every load right after a write, which is exactly the load
-    // this cache exists to make faster.
+    // **The summary slice (`SUMMARY_WINDOW_DAYS`, 765 days) comes from a
+    // different place depending on `fresh`, and that is the whole point of the
+    // split.** A fresh habit reads only the narrow window; a stale one reads
+    // the wide 1830-day window (it has to, for `recomputeBestStreak` and the
+    // completion count below) and FILTERS its own summary slice out of it
+    // rather than asking for it a second time — the wide window CONTAINS the
+    // narrow one. Issuing both reads unconditionally made every stale habit
+    // fetch its summary window twice, ~2,595 days per habit on the cold path
+    // (it was ~2,230 at 400 days) — the first load of any day, and every load
+    // right after a write, which is exactly the load this cache exists to make
+    // faster.
     const all = fresh ? null : /** @type {any} */ (
       q.entriesForSince.all(h.id, addDays(summaryEnd, -STREAK_HISTORY_DAYS))
     );
@@ -1013,25 +1014,37 @@ api.get('/overview', (req, res) => {
     // this route for the same reason, stated at the `/stats` call site above.
     // **One credit date for all three figures on this row** (#223), resolved
     // from the account's LIFETIME first stated answer rather than from either
-    // slice above. Both slices are bounded — 400 days for the summary, 1830 for
+    // slice above. Both slices are bounded — 765 days for the summary, 1830 for
     // the streak scan — and "has this habit ever answered?" is not a question a
-    // bounded window can answer: a limit habit answered 500 days ago and skipped
-    // since holds nothing but a skip inside the 400-day slice, which would read
+    // bounded window can answer: a limit habit answered 800 days ago and skipped
+    // since holds nothing but a skip inside the 765-day slice, which would read
     // as no evidence at all. Measured: 0.051922 on this row against 1.000 on the
     // habit's own page, with `bestStreak` on this same payload disagreeing with
     // both because its wider slice could see the answer. Derived once and shared,
     // so the three figures cannot disagree by construction.
     const creditFrom = creditAnchor(firstAnswer.get(h.id) ?? null, summaryEnd);
     // The habit's LIFETIME earliest row, for `onPaceSeries`'s birth gate
-    // (#340): both the 400-day summary slice below and the 1830-day streak
+    // (#340): both the 765-day summary slice below and the 1830-day streak
     // scan open wherever they happen to reach, not necessarily at the
     // habit's own first row, so the leniency at either slice's own edge must
     // not be mistaken for the habit's birth. `?? null` for the same reason
     // `firstAnswer` reads it that way — a habit with no rows at all.
     const birth = birthById.get(h.id) ?? null;
 
+    // **`start` is what makes this row the page's reading of the habit** (#354).
+    // `/categories/stats` scores a member from `warmStartFor(...)` — the window's
+    // warm-up, clamped forward to the habit's first REAL entry — and
+    // `SUMMARY_WINDOW_DAYS` is exactly how far back that reaches at its default
+    // request. Without `start`, `resolveWindow` opened at the earliest row INSIDE
+    // the slice, which for a sparse habit is a day it may not have been alive
+    // for: 0.6074 here against 0.858236 on the page, for a 1x/365d habit with two
+    // rows. `birth == null` (no rows at all) keeps `start` unset, and with it
+    // the one-day window and the "recently missed" ordering that go with it.
+    // `birth` is the lifetime `MIN(date)` and is handed over as a candidate for
+    // `warmStartFor` to vet, never `addDays`'d here.
     const stats = summaryStats(h, windowed, {
       end: summaryEnd, unlogged, creditFrom, birth, lastMiss: wantsLastMiss,
+      start: birth == null ? undefined : warmStartFor(birth, windowed.map((e) => e.date), cutoff),
       // The GRID window, never `summaryEnd`: this is what the dashboard is
       // actually showing, and the two are deliberately different dates (see
       // the comment above `const summaryEnd = now;`).

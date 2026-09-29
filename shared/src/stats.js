@@ -1969,7 +1969,8 @@ function creditFor(firstAnswer, start, end) {
  * bounded SLICE of a habit's entries.
  *
  * Both editions' `/overview` is both of those, and that is the whole reason this
- * is exported. It reads a 400-day window for `score`/`currentStreak` and an
+ * is exported. It reads a `SUMMARY_WINDOW_DAYS` (765-day since #354; 400 when
+ * the measurement below was taken) window for `score`/`currentStreak` and an
  * 1830-day one for its own `bestStreak` scan, so **whether the habit has ever
  * answered is a question neither of those slices can answer** — the same
  * argument `computeCategoryStats`' `firstEntry` and `firstAnswer` already make,
@@ -2468,7 +2469,8 @@ export function summaryStats(habit, entries,
   // range's far end, so no truncation applies to the day they report — but
   // `currentStreak` walks BACK from it, and a run reaching into the slice's
   // unreliable head is reported short. Measured on a 3x/7 habit kept perfectly
-  // for 500 days: the habit's own page reads 500 and a 400-day slice reads
+  // for 500 days: the habit's own page reads 500 and a 400-day slice (the
+  // summary window's width before #354 made it 765) reads
   // **396** — 400 of that is the slice itself, which no floor could return, and
   // the remaining 4 is this shortfall. Flooring `currentStreak` would not
   // recover them either; only fetching further back would, which is the cost
@@ -2631,11 +2633,12 @@ function clipRuns(streaks, from, to) {
  * sliced back to `[start, end]` for the response. The clamp is not a detail: see
  * `memberWarm` in `computeCategoryStats` for the habit shape it exists for.
  *
- * 400 days, which is the number both editions' `/overview` already spends on
- * the same problem (`SUMMARY_WINDOW_DAYS` in each `api.js`). Declared here and
- * imported by both routes rather than spelled once per edition: a warm-up that
- * drifted between the two would have one edition report a habit weaker than
- * the other, which is the defect class this repo names most often.
+ * 400 days. `/overview` spends `SUMMARY_WINDOW_DAYS` below, which is this plus
+ * the year a comparison covers by default, so the dashboard's rows are scored
+ * over the page's own default window (#354). Declared here and imported by
+ * both routes rather than spelled once per edition: a warm-up that drifted
+ * between the two would have one edition report a habit weaker than the other,
+ * which is the defect class this repo names most often.
  */
 export const SCORE_WARMUP_DAYS = 400;
 
@@ -2669,12 +2672,35 @@ export const MAX_COMPARE_DAYS = 1830;
  *
  * Shared for the same reason the ceiling is, and it is the same divergence
  * arriving by the other door: two editions answering a `start`-less URL with
- * different bucket counts is one request served two ways. `SUMMARY_WINDOW_DAYS`
- * and `STREAK_HISTORY_DAYS` are still spelled once per edition with a comment
- * claiming they match — that is a guard that cannot see a renamed binding, and
- * it is precedent for a pattern to stop repeating rather than to follow.
+ * different bucket counts is one request served two ways. `STREAK_HISTORY_DAYS`
+ * is spelled once per edition with a comment claiming they match — that is a
+ * guard that cannot see a renamed binding, and it is precedent for a pattern to
+ * stop repeating rather than to follow. `SUMMARY_WINDOW_DAYS` below used to be
+ * the same and is now declared once.
  */
 export const COMPARE_WINDOW_DAYS = 365;
+
+/**
+ * The span `/overview` fetches and scores over: `[end - SUMMARY_WINDOW_DAYS,
+ * end]`, opened at the habit's first entry when that is later (`warmStartFor`).
+ * It is `COMPARE_WINDOW_DAYS + SCORE_WARMUP_DAYS` — 365 + 400 — on purpose:
+ * that is exactly how far back the category page reads a member at its default
+ * request, so a dashboard row's strength, the header mean built from them and
+ * the page's roster are one number rather than three (#354). Before that
+ * `/overview` spent 400 days with no `start`, so a sparse habit's window opened
+ * at the earliest row inside it and the dashboard read it differently from the
+ * page — 0.6074 against 0.858236 on a 1x/365d habit with two rows.
+ *
+ * It is the LITERAL 765 and not the sum, because `scripts/bench-overview.mjs`
+ * guards that it prices the window the routes use by reading
+ * `const NAME = <digits>` out of this file. `test/stats.test.js` pins the
+ * equality with the three exported values it is the sum of.
+ *
+ * Declared here and imported by both routes: a summary window that drifted
+ * between the editions would print one figure two ways, which is the defect
+ * class this repo names most often.
+ */
+export const SUMMARY_WINDOW_DAYS = 765;
 
 /**
  * The strongest and the weakest member of one category.
@@ -2726,8 +2752,11 @@ export function summariseMembers(rows) {
  * members, from the SAME `habits` array `/overview` already returns — never a
  * second scoring pass. Which members count is the one rule `summariseMembers`
  * states and `#/categories` (`computeCategoryStats`'s `section`) also calls,
- * so the two agree by construction about MEMBERSHIP even though the scores
- * themselves are two different windows (see that function's header comment).
+ * so the two agree by construction about MEMBERSHIP, and at the page's default
+ * request about the scores too: `/overview` scores over `SUMMARY_WINDOW_DAYS`,
+ * which is that request's own span (#354). A caller asking the page for a
+ * shorter `start` gets a different window and a different figure, and that is
+ * the page being asked a different question.
  *
  * The partition matches `computeCategoryStats` and the grouped dashboard: a
  * `category_id` naming no row in `categories` falls into Uncategorised rather
@@ -2784,6 +2813,123 @@ export function summariseByCategory(categories, payloads, firstEntry, day) {
     ...categories.map((c) => ({ id: c.id, ...summarise(byCategory.get(c.id)) })),
     { id: null, ...summarise(uncategorised) },
   ];
+}
+
+/**
+ * The day a member's warm-up opens at: `warmStart` (`SCORE_WARMUP_DAYS` before
+ * the window), clamped forward to the member's own first REAL entry. Both
+ * `computeCategoryStats` and both editions' `/overview` ask this one function
+ * (#354), so a row on the dashboard is scored over the same window the category
+ * page scores it over and the two cannot drift apart. `/overview` passes the
+ * result as `summaryStats`' `start`.
+ *
+ * @param {string|null|undefined} firstEntry the habit's LIFETIME earliest entry
+ *   date, as `MIN(date)` answers it — phantom-capable, and refused as an anchor
+ *   here if it is not a real day
+ * @param {Iterable<string>} entryDates the dates of the entries actually
+ *   fetched; the fallback anchor when `firstEntry` is absent or a phantom
+ * @param {string|null} warmStart `SCORE_WARMUP_DAYS` before the window opens,
+ *   already a real day (it is `addDays` over a clamped date)
+ * @returns {string|null} `warmStart` when nothing later anchors it, so `null`
+ *   only when `warmStart` itself was
+ */
+export function warmStartFor(firstEntry, entryDates, warmStart) {
+  // **The warm-up is clamped forward to the member's first entry**, which is
+  // exactly what `resolveWindow` already does for a habit's own page: it opens at
+  // `start ?? firstEntry`, so scoring a member from 400 days before it existed
+  // compares it against a window it never had. For an at-least member those
+  // phantom days credit 0 and the two surfaces agree anyway; for an at-most
+  // member whose unlogged days count as kept — `at_most_unlogged: 'success'`,
+  // or the account's `atMostUnlogged`, which is every `show_as: 'avoid'` habit
+  // under that setting — an unlogged day is FULL credit, so the warm-up
+  // converged a new limit to ~0.97 where its own page read 0.41, for the first
+  // ~430 days of every avoid habit's life.
+  //
+  // The clamp leaves `computeCategoryStats`' `scoreAt` without a point for any
+  // day before this date, and the only thing that keeps `scoreAt.get(day)` from
+  // answering `undefined` — and putting NaN through every mean there — is that
+  // `landedAt` already refuses to read a member on a day before it landed. The
+  // two dates are now the same one, so that coupling is load bearing:
+  // weakening the landing rule means widening this range back.
+  //
+  // **#270's Half 2: the clamp is applied to an ANCHOR, not to the raw
+  // `firstEntry`.** The caller's `firstEntry` is left alone — it is what
+  // answers "has this habit ever been logged", which a phantom row is a
+  // genuine answer to, so `computeCategoryStats`' `landsOn` still reads it
+  // directly and a phantom-only member still LANDS rather than falling into
+  // `unloggedExcluded`. But a phantom date cannot be the day the WARM-UP
+  // opens at, for the same reason it cannot be the day a window opens in
+  // `resolveWindow`: it is not a day the habit lived. `warmAnchor` is the
+  // real day this member's warm-up may open at instead of `firstEntry` when
+  // that one is a phantom.
+  //
+  // The fallback — the earliest REAL row in the fetched slice — is narrower
+  // than the truth, and honestly so: a caller-supplied `lifetimeFirst` that
+  // is a phantom cannot be replaced by the true lifetime-first REAL row,
+  // because SQL handed us one date (`MIN(date)`, itself phantom-capable) and
+  // not a second, filtered one. Degrading further to `warmStart` when the
+  // slice holds no real row at all is the same shape of compromise.
+  //
+  // **Both of those NARROW the warm-up, and a review round found this
+  // comment claiming the opposite.** `earliestRealDay(entryDates)` is
+  // bounded below by the slice's own earliest fetched date — the route
+  // hands `computeCategoryStats` `entries` from `start - SCORE_WARMUP_DAYS` onward,
+  // never earlier — so the fallback can never land BEFORE `warmStart`, only
+  // at or after it; `warmStart` itself is of course no earlier either. A
+  // member with a phantom `firstEntry` and real rows starting partway into
+  // the window therefore lands LATER than an unguarded rollover of that same
+  // phantom sometimes did, and drops out of whichever early buckets fall
+  // before its real first row (measured: `members` 2 → 1 and `value`
+  // 0.025961 → 0.051922 on the window's first bucket, for a member logged
+  // from 2026-06-15 with a `firstEntry` of `2024-99-99` —
+  // `docs/decisions/phantom-dates.md` has the fixture in full).
+  //
+  // Narrowing is nonetheless the safe direction here, same as it is for
+  // `firstAnswer` below (Site D) — the two err in the SAME direction, not
+  // opposite ones, and an earlier version of this comment said otherwise.
+  // Landing a member before its first REAL evidence is exactly the warm-up
+  // defect the clamp above exists to prevent (0.969536 against
+  // an own-page 0.41327): admitting it any EARLIER than the truth can prove
+  // is the dangerous direction, not the safe one. Excluding a member from an
+  // early bucket it cannot yet honestly support is a smaller, visible cost —
+  // one bucket's `members` count is off by one until the real row arrives —
+  // against a wrong score standing behind a bucket that looks fully counted.
+  const warmAnchor = firstEntry != null && isRealDay(firstEntry)
+    ? firstEntry
+    : earliestRealDay(entryDates);
+  let memberWarm = warmAnchor && warmAnchor > warmStart ? warmAnchor : warmStart;
+
+  // **This block is unreachable by any input now, and is kept as a
+  // documented backstop rather than removed.** `warmAnchor` is a real day by
+  // construction on both branches — `isRealDay(firstEntry)` on the first,
+  // `earliestRealDay`'s own guarantee on the second — and `warmStart` is
+  // `addDays` over `dates[0]`, itself always real, so `memberWarm` is always
+  // one of two real days and `fromISO`/`toISO` below is always a no-op.
+  //
+  // Do not read this as still pinning an ordering a test can see: before
+  // Half 2, a phantom `firstEntry` could reach this normalise directly and
+  // the ORDER of clamp-then-normalise decided whether a member holding one
+  // was admitted at the widest warm-up or refused for the whole window (see
+  // git history on this comment for the full argument and the '9999-99-99'
+  // / '2025-99-99' measurements). A route's own `MIN(date)` read is still
+  // phantom-capable and still reaches this function — both editions' category
+  // routes hand `firstEntry` straight from SQL — but `warmAnchor` above
+  // already filtered it through `isRealDay` a few lines up, so nothing phantom
+  // survives to reach this block. `computeCategoryStats`' credit anchor reads
+  // its own SQL-supplied `firstAnswer` the same way now, for the mirror-image
+  // hole that shipped without it (a supplied `firstAnswer` reached
+  // `windowStart` unfiltered) — so neither of its own calls into
+  // `windowStart` can hand it a raw phantom. The ordering pin itself has
+  // moved to `windowStart`'s own re-clamp (#270 Half 1) and its
+  // `creditAnchor` tests in `test/stats.test.js` — `creditAnchor` is called
+  // directly by `/overview` and `/habits/:id/stats`, outside these functions,
+  // and is the one path left where a raw phantom anchor still reaches
+  // `windowStart` unfiltered.
+  if (memberWarm) {
+    const asDate = fromISO(memberWarm);
+    if (!Number.isNaN(asDate.getTime())) memberWarm = toISO(asDate);
+  }
+  return memberWarm;
 }
 
 /**
@@ -2947,101 +3093,13 @@ export function computeCategoryStats(categories, members,
         ? entries.reduce((min, e) => (e.date < min ? e.date : min), entries[0].date)
         : null);
 
-    // **And the warm-up is clamped to that same date**, which is exactly what
-    // `resolveWindow` already does for a habit's own page: it opens at
-    // `start ?? firstEntry`, so scoring a member from 400 days before it existed
-    // compares it against a window it never had. For an at-least member those
-    // phantom days credit 0 and the two surfaces agree anyway; for an at-most
-    // member whose unlogged days count as kept — `at_most_unlogged: 'success'`,
-    // or the account's `atMostUnlogged`, which is every `show_as: 'avoid'` habit
-    // under that setting — an unlogged day is FULL credit, so the warm-up
-    // converged a new limit to ~0.97 where its own page read 0.41, for the first
-    // ~430 days of every avoid habit's life.
-    //
-    // The clamp leaves `scoreAt` without a point for any day before
-    // `memberWarm`, and the only thing that keeps `scoreAt.get(day)` from
-    // answering `undefined` — and putting NaN through every mean below — is that
-    // `landedAt` already refuses to read a member on a day before it landed. The
-    // two dates are now the same one, so that coupling is load bearing:
-    // weakening the landing rule means widening this range back.
-    //
-    // **#270's Half 2: the clamp is applied to an ANCHOR, not to the raw
-    // `firstEntry`.** `firstEntry` itself is left alone above — it is what
-    // answers "has this habit ever been logged", which a phantom row is a
-    // genuine answer to, so `landsOn` below still reads it directly and a
-    // phantom-only member still LANDS rather than falling into
-    // `unloggedExcluded`. But a phantom date cannot be the day the WARM-UP
-    // opens at, for the same reason it cannot be the day a window opens in
-    // `resolveWindow`: it is not a day the habit lived. `warmAnchor` is the
-    // real day this member's warm-up may open at instead of `firstEntry` when
-    // that one is a phantom.
-    //
-    // The fallback — the earliest REAL row in the fetched slice — is narrower
-    // than the truth, and honestly so: a caller-supplied `lifetimeFirst` that
-    // is a phantom cannot be replaced by the true lifetime-first REAL row,
-    // because SQL handed us one date (`MIN(date)`, itself phantom-capable) and
-    // not a second, filtered one. Degrading further to `warmStart` when the
-    // slice holds no real row at all is the same shape of compromise.
-    //
-    // **Both of those NARROW the warm-up, and a review round found this
-    // comment claiming the opposite.** `earliestRealDay(entryMap.keys())` is
-    // bounded below by the slice's own earliest fetched date — the route
-    // hands this function `entries` from `start - SCORE_WARMUP_DAYS` onward,
-    // never earlier — so the fallback can never land BEFORE `warmStart`, only
-    // at or after it; `warmStart` itself is of course no earlier either. A
-    // member with a phantom `firstEntry` and real rows starting partway into
-    // the window therefore lands LATER than an unguarded rollover of that same
-    // phantom sometimes did, and drops out of whichever early buckets fall
-    // before its real first row (measured: `members` 2 → 1 and `value`
-    // 0.025961 → 0.051922 on the window's first bucket, for a member logged
-    // from 2026-06-15 with a `firstEntry` of `2024-99-99` —
-    // `docs/decisions/phantom-dates.md` has the fixture in full).
-    //
-    // Narrowing is nonetheless the safe direction here, same as it is for
-    // `firstAnswer` below (Site D) — the two err in the SAME direction, not
-    // opposite ones, and an earlier version of this comment said otherwise.
-    // Landing a member before its first REAL evidence is exactly the warm-up
-    // defect the clamp two paragraphs up exists to prevent (0.969536 against
-    // an own-page 0.41327): admitting it any EARLIER than the truth can prove
-    // is the dangerous direction, not the safe one. Excluding a member from an
-    // early bucket it cannot yet honestly support is a smaller, visible cost —
-    // one bucket's `members` count is off by one until the real row arrives —
-    // against a wrong score standing behind a bucket that looks fully counted.
-    const warmAnchor = firstEntry !== null && isRealDay(firstEntry)
-      ? firstEntry
-      : earliestRealDay(entryMap.keys());
-    let memberWarm = warmAnchor && warmAnchor > warmStart ? warmAnchor : warmStart;
-
-    // **This block is unreachable by any input now, and is kept as a
-    // documented backstop rather than removed.** `warmAnchor` is a real day by
-    // construction on both branches — `isRealDay(firstEntry)` on the first,
-    // `earliestRealDay`'s own guarantee on the second — and `warmStart` is
-    // `addDays` over `dates[0]`, itself always real, so `memberWarm` is always
-    // one of two real days and `fromISO`/`toISO` below is always a no-op.
-    //
-    // Do not read this as still pinning an ordering a test can see: before
-    // Half 2, a phantom `firstEntry` could reach this normalise directly and
-    // the ORDER of clamp-then-normalise decided whether a member holding one
-    // was admitted at the widest warm-up or refused for the whole window (see
-    // git history on this comment for the full argument and the '9999-99-99'
-    // / '2025-99-99' measurements). A route's own `MIN(date)` read is still
-    // phantom-capable and still reaches this function — both editions' category
-    // routes hand `firstEntry` straight from SQL — but `warmAnchor` above
-    // already filtered it through `isRealDay` one line up, so nothing phantom
-    // survives to reach this block. The credit anchor a few lines below reads
-    // its own SQL-supplied `firstAnswer` the same way now, for the mirror-image
-    // hole that shipped without it (a supplied `firstAnswer` reached
-    // `windowStart` unfiltered) — so neither of this function's own calls into
-    // `windowStart` can hand it a raw phantom. The ordering pin itself has
-    // moved to `windowStart`'s own re-clamp (#270 Half 1) and its
-    // `creditAnchor` tests in `test/stats.test.js` — `creditAnchor` is called
-    // directly by `/overview` and `/habits/:id/stats`, outside this function,
-    // and is the one path left where a raw phantom anchor still reaches
-    // `windowStart` unfiltered.
-    if (memberWarm) {
-      const asDate = fromISO(memberWarm);
-      if (!Number.isNaN(asDate.getTime())) memberWarm = toISO(asDate);
-    }
+    // The warm-up's start is `warmStartFor`'s — `SCORE_WARMUP_DAYS` before the
+    // window, clamped forward to this member's own first real entry, because
+    // that is where its own page opens too. See it for the habit shapes the
+    // clamp exists for, and for why a phantom `firstEntry` is refused as an
+    // anchor. `firstEntry` itself is left as the caller's word: it is what
+    // answers "has this habit ever been logged", which `landsOn` below reads.
+    const memberWarm = warmStartFor(firstEntry, entryMap.keys(), warmStart);
 
     // **And the credit date is a LIFETIME question too, for the same reason
     // `firstEntry` above is one** (#223). A member's window here opens at

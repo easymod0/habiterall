@@ -54,8 +54,14 @@ const ROOT = join(import.meta.dirname, '..');
  */
 const END = '2026-06-30';
 
-/** `SUMMARY_WINDOW_DAYS` — what `summaryStats` is given on `/overview` now; `computeStats` is still given it here too, for the old-cost row. */
-const WINDOW_DAYS = 400;
+/**
+ * `SUMMARY_WINDOW_DAYS` — what `summaryStats` is given on `/overview` now;
+ * `computeStats` is still given it here too, for the old-cost row. 765 since
+ * #354 (it was 400): the routes now score over the category page's default
+ * window, and `assertWindowsMatchTheRoutes` reads the declaration in
+ * `shared/src/stats.js` to keep this honest.
+ */
+const WINDOW_DAYS = 765;
 
 /**
  * `STREAK_HISTORY_DAYS` — what the separate `bestStreak` scan reads.
@@ -67,7 +73,8 @@ const HISTORY_DAYS = 1830;
 
 /**
  * Rows per day of history. 0.8 is what produces #183's stated fixture —
- * 1,464 rows over five years, 320 of them inside the summary window — and
+ * 1,464 rows over five years, 612 of them inside the summary window (320 at
+ * the 400 days #183 measured, before #354 widened it) — and
  * those two counts are asserted below rather than hoped for.
  */
 const DENSITY = 0.8;
@@ -156,19 +163,17 @@ const HABIT = {
  * This reads SOURCE TEXT, so it is the weak kind of guard CLAUDE.md warns
  * about: it cannot see a renamed binding, and it cannot see a call site that
  * stopped passing the constant at all. Kept for the one thing it does catch,
- * which is the thing that actually happens — somebody tunes 400 or 1830 and
+ * which is the thing that actually happens — somebody tunes 765 or 1830 and
  * this bench goes on quoting figures for a window the app no longer has. The
  * behavioural half is that the numbers below are per-pass: a window change
  * moves all of them together and visibly.
  *
- * **The two constants are no longer declared in the same place, and that is
- * #184.** `SUMMARY_WINDOW_DAYS` is still one declaration per edition, so both
- * are read; `STREAK_HISTORY_DAYS` moved into `shared/src/summary-cache.js`,
- * because the window a CACHED `bestStreak` was computed over is part of what
- * the stored number means and two editions must not drift on it. So it is read
- * once, from there. This function reading both editions in one pass is why it
- * had to be repointed for both at once even though only cloud's declaration
- * has gone yet.
+ * **Neither constant is declared per edition any more.** `STREAK_HISTORY_DAYS`
+ * moved into `shared/src/summary-cache.js` (#184), because the window a CACHED
+ * `bestStreak` was computed over is part of what the stored number means and
+ * two editions must not drift on it. `SUMMARY_WINDOW_DAYS` followed into
+ * `shared/src/stats.js` (#354), beside `SCORE_WARMUP_DAYS` and
+ * `COMPARE_WINDOW_DAYS`, of which it is the sum. Each is read once, from there.
  */
 function assertWindowsMatchTheRoutes() {
   /**
@@ -195,9 +200,7 @@ function assertWindowsMatchTheRoutes() {
     }
   };
 
-  for (const edition of ['habiterall-cloud', 'habiterall-personal']) {
-    windowIn(join(edition, 'src', 'api.js'), 'SUMMARY_WINDOW_DAYS', WINDOW_DAYS);
-  }
+  windowIn(join('shared', 'src', 'stats.js'), 'SUMMARY_WINDOW_DAYS', WINDOW_DAYS);
   windowIn(join('shared', 'src', 'summary-cache.js'), 'STREAK_HISTORY_DAYS', HISTORY_DAYS);
 }
 
@@ -235,8 +238,8 @@ function pick(days, count, rng) {
 /**
  * Five years of history, dense but not regular.
  *
- * The two segments are filled INDEPENDENTLY — 80% of the 400-day summary
- * window and 80% of the 1,430 days before it — so both counts #183 states are
+ * The two segments are filled INDEPENDENTLY — 80% of the 765-day summary
+ * window and 80% of the 1,065 days before it — so both counts stated above are
  * exact, rather than one of them being a draw around its mean.
  *
  * The arrangement inside each segment is shuffled rather than periodic. A
@@ -254,7 +257,12 @@ function buildEntries() {
   const historyStart = addDays(END, -(HISTORY_DAYS - 1));
 
   const window = boundedRange(windowStart, END);
-  const before = boundedRange(historyStart, addDays(windowStart, -1));
+  // Ends TWO days before the window, not one: the routes' slice is `date >=
+  // cutoff` with `cutoff = END - WINDOW_DAYS`, which is the day before
+  // `windowStart`, so a row drawn there lands inside the slice and walks it at
+  // WINDOW_DAYS + 1. At 400 days the seed happened not to draw it; at 765 it
+  // does, so the exclusion is stated rather than left to the draw.
+  const before = boundedRange(historyStart, addDays(windowStart, -2));
 
   const dates = [
     ...pick(before, Math.round(beforeDays * DENSITY), rng),
@@ -293,12 +301,13 @@ const historyAnchor = (dates) => earliestRealDay(dates) ?? END;
  * empty result is fast for a reason that has nothing to do with the program.
  */
 function verify(all, recent, streaks) {
-  // The LITERALS #183 states, not `HISTORY_DAYS * DENSITY`. Deriving the
+  // The LITERALS #183 states (the window's count re-derived for 765 days by
+  // #354: round(765 * 0.8), and the 1,464 total is unchanged), not `HISTORY_DAYS * DENSITY`. Deriving the
   // expectation from the constants that built the fixture makes the check
   // self-consistent and therefore unfalsifiable — it passed with DENSITY
   // changed to 0.7, which is a different fixture and different numbers.
   const expectRows = 1464;
-  const expectWindow = 320;
+  const expectWindow = 612;
 
   const check = (label, got, want) => {
     if (got !== want) {

@@ -442,8 +442,8 @@ lives in `charts.js`, a presentation module `shared/src` cannot import, and
 the calendar, the strip and the dashboard must all read the same gate, so the
 server ships every run's true length and the client decides which count.
 
-**The bound is the ~400-day `SUMMARY_WINDOW_DAYS` window the ENTRIES are
-already read over, not a wider one, and two wider alternatives were
+**The bound is the `SUMMARY_WINDOW_DAYS` window (400 days then, 765 since #354)
+the ENTRIES are already read over, not a wider one, and two wider alternatives were
 rejected.** Both editions' `/overview` bound the entries they read for every
 habit to `[now - SUMMARY_WINDOW_DAYS, now]` — anchored to today, not to
 whatever page the grid is showing — before ever calling `summaryStats`, so
@@ -717,7 +717,8 @@ old rule is how a dashboard and a detail page come to disagree about one habit.
 
 1. **`/overview`'s three figures, and the credit date is a LIFETIME question.**
    Both editions scan streaks themselves for `bestStreak`, over a wider window
-   than `summaryStats` uses (`STREAK_HISTORY_DAYS`, 1830 days against 400),
+   than `summaryStats` uses (`STREAK_HISTORY_DAYS`, 1830 days against 400 — 765
+   since #354),
    starting at `entries[0].date` — the earliest row of any kind. So `score` and
    `currentStreak` came from the fixed entry point while `bestStreak` beside them
    did not: measured on the skip-only fixture, `/stats` reported `bestStreak` 1
@@ -756,7 +757,9 @@ old rule is how a dashboard and a detail page come to disagree about one habit.
 
    What is left, and it is older than this issue: the credit date is now one
    date, but the WINDOWS it is applied over are still three. `score` and
-   `currentStreak` read 400 days (`SUMMARY_WINDOW_DAYS`), `bestStreak` reads
+   `currentStreak` read 400 days (`SUMMARY_WINDOW_DAYS`; 765 since #354, so the
+   500-day example below is now inside it and the fixture sits at 900),
+   `bestStreak` reads
    1830 (`STREAK_HISTORY_DAYS`), and `/habits/:id/stats` reads lifetime — so a
    habit whose only stored row is 500 days old still reports `score` 0.051922,
    `currentStreak` **1** and `bestStreak` 501 on the dashboard, against 1 / 501
