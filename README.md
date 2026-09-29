@@ -1695,6 +1695,14 @@ included:
 habits.example.com {
 	# Caddy gets and renews the certificate itself. Nothing else to configure.
 	reverse_proxy localhost:3000
+
+	# habiterall compresses nothing itself, so this is where the dashboard JSON
+	# and the whole unbundled shell stop going out as plain text. `zstd gzip`
+	# is what a bare `encode` already means, and Caddy's default content types
+	# already cover the JSON, the modules and the stylesheet — the nginx example
+	# next door has to name them, because its list replaces rather than
+	# extends. The app icons are PNG and neither example touches them, rightly.
+	encode zstd gzip
 }
 ```
 <!-- /generated -->
@@ -1714,6 +1722,28 @@ server {
 
     ssl_certificate     /etc/letsencrypt/live/habits.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/habits.example.com/privkey.pem;
+
+    # Nothing in the app compresses anything — that is this proxy's job.
+    # nginx's `gzip_types` REPLACES the list rather than adding to it, and
+    # `text/html` is the only entry that is implicit and unremovable, so
+    # `gzip on` by itself compresses the one thing this app barely serves.
+    #
+    # Every type below is one habiterall actually sends, so name them all: the
+    # dashboard JSON is the big single response, but there is no build step
+    # here, so a cold load also fetches three dozen separate ES modules and the
+    # stylesheet. `text/javascript` and not `application/javascript` — that is
+    # what a `.js` resolves to, and a list naming only the latter silently
+    # leaves the whole shell plain. The web manifest is `manifest.json` and so
+    # is covered by `application/json` already. `image/svg+xml` is here for the
+    # mask-icon Safari fetches, and for the icon sprite that is coming; the app
+    # icons themselves are PNG, and no list should name those.
+    #
+    # `gzip_proxied any;` is deliberately not here. It governs requests that
+    # arrive at nginx already carrying a `Via` header — a CDN in front of
+    # nginx — not nginx in front of an app, and it changes nothing in this
+    # shape.
+    gzip on;
+    gzip_types application/json text/css text/javascript image/svg+xml;
 
     location / {
         proxy_pass http://127.0.0.1:3000;
@@ -1749,6 +1779,7 @@ already sends the headers above. **Hosts → Proxy Hosts → Add Proxy Host:**
 | Block Common Exploits | on |
 | Websockets Support | not needed; harmless if on |
 | **SSL** tab | request a Let's Encrypt certificate, then **Force SSL** on |
+| **Advanced** tab | `gzip_types application/json text/css text/javascript image/svg+xml;` — NPM turns gzip on for `text/html` and nothing else, and it strips `Accept-Encoding` on the way upstream, so this is the only place compression can be switched on. `gzip_types` replaces the list rather than adding to it, which is why the shell's own types are named alongside the API's |
 
 The one that catches everybody: **`localhost` in *Forward Hostname* means NPM's
 own container**, not your server. It resolves, connects to nothing, and shows a
@@ -1792,6 +1823,41 @@ reachable through the proxy** — otherwise anything on the LAN can send those
 headers itself. Set `BIND_ADDR=127.0.0.1` to publish to loopback only, or, if the
 proxy is on a different host, leave `BIND_ADDR` empty and firewall to that host
 instead.
+
+### Compression is the proxy's job
+
+`/overview` is the largest response on the app's hot path — at fifty habits
+over a year's window it is thousands of date-keyed entries and every habit's
+row, in JSON that repeats itself heavily. Neither edition compresses it, and
+that is a decision rather than an omission:
+
+- **Only the proxy can do it for everything.** The app's own JSON is the big
+  single response, but there is no build step here, so a cold load also fetches
+  three dozen separate ES modules and the stylesheet through
+  `express.static` — together a good deal more. The proxy compresses all of it,
+  and the service worker then caches what it is given. That is why the nginx
+  list above names the shell's content types and not only the API's.
+- **A proxy is entitled to take the choice away.** Nginx Proxy Manager sends
+  `Accept-Encoding: ""` upstream by default, so an app behind one is asked for
+  a plain response no matter what it would otherwise have done. An
+  implementation inside habiterall would be dead code there.
+- **TLS termination is already in front.** Every deployment documented here
+  puts a proxy there for the certificate, so compression costs no extra moving
+  part — only the one line.
+
+Each of the three examples above now enables it, and that is the whole of the
+fix.
+
+**If you expose the app directly, with nothing in front, nothing compresses
+anything** — and nothing warns you about it. That is deliberate: the app never
+learns what became of a response after it left, so the only thing it could warn
+from is its own configuration, and every gate available there is either silent
+for the case that matters most — a proxy in front with no compression line,
+which looks identical from here to one that has it — or noisy for the LAN
+instance that is configured correctly and pays nothing.
+`docs/decisions/compose-and-env.md` has the four reasons in full. So this is
+one more cost of a direct port, alongside no certificate, no service worker and
+no *Add to Home Screen*.
 
 ### Turning the guards off
 
