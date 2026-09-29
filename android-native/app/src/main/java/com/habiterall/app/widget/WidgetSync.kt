@@ -85,22 +85,59 @@ object WidgetSync {
                         .takeIf { it != record }
                 }
 
-                settings.putWidgets(updated)
-                overviewIds.forEach { widgetId ->
-                    settings.putWidgetSet(
+                val sets = overviewIds.associateWith { widgetId ->
+                    reconciledRows(
+                        app,
+                        records.filter { it.widgetId == widgetId },
                         widgetId,
-                        reconciledRows(
-                            app,
-                            records.filter { it.widgetId == widgetId },
-                            widgetId,
-                            habits,
-                            today,
-                        ),
+                        habits,
+                        today,
                     )
                 }
+                // ONE `edit` for the whole write. Everything above was worked
+                // out from `records`, read before a WorkManager round trip
+                // (`Outbox.isPending`), and a `noteAnswer` landing in that gap
+                // would be written straight back over by two separate
+                // `putWidgets`/`putWidgetSet` calls. `mergeFetched` sees the
+                // store as it is NOW.
+                settings.updateWidgets { current -> mergeFetched(current, records, updated, sets) }
                 HabitWidget.redraw(app)
             }
         }
+    }
+
+    /**
+     * The store after a fetch, given what it holds NOW ([current]) and what it
+     * held when the fetch's rows were worked out ([snapshot]).
+     *
+     * [updated] are single-habit records, upserted by (widget, habit); [sets]
+     * are overview widgets' whole sets, each replacing its widget's rows. Any
+     * row written whose stored counterpart CHANGED since [snapshot] and is
+     * about the same day keeps that counterpart's answer and its stale flag:
+     * an answer recorded while the fetch was in flight is newer than the
+     * server's reply, which is by definition older than it.
+     */
+    internal fun mergeFetched(
+        current: List<Widgets.Record>,
+        snapshot: List<Widgets.Record>,
+        updated: List<Widgets.Record>,
+        sets: Map<Int, List<Widgets.Record>>,
+    ): List<Widgets.Record> {
+        val now = current.associateBy { it.widgetId to it.habitId }
+        val then = snapshot.associateBy { it.widgetId to it.habitId }
+        fun keepNewer(row: Widgets.Record): Widgets.Record {
+            val key = row.widgetId to row.habitId
+            val cur = now[key] ?: return row
+            if (cur == then[key] || cur.date != row.date) return row
+            return row.copy(value = cur.value, skip = cur.skip, figuresStale = cur.figuresStale)
+        }
+        val upserts = updated.map { keepNewer(it) }.associateBy { it.widgetId to it.habitId }
+        val kept = current
+            .filterNot { it.widgetId in sets }
+            .map { upserts[it.widgetId to it.habitId] ?: it }
+        val fresh = sets.values.flatten().map { keepNewer(it) }
+        val appended = upserts.filterKeys { k -> !now.containsKey(k) }.values
+        return kept + fresh + appended
     }
 
     /**

@@ -1062,4 +1062,35 @@ found in `refreshFromServer`: `MainActivity` fetches
 `Grid.INITIAL_DAYS` (30) and only ever grows toward `Grid.MAX_DAYS` (365), so
 it can never be narrower than the seven days `encodeHistory` needs.
 
+## The overview widget's note line: how it got its third arm (#145)
 
+The third arm first read `figuresStale`, reversing the section's earlier claim
+that "no figures are painted here, so the flag says nothing about this screen".
+That was right about figures and wrong about the grid: `Widgets.answered`
+advances `record.date` with no fetch behind it, so a row fetched on T-3 and
+answered offline on T reads `date == today` while the T-2 and T-1 columns paint
+UNKNOWN off a history nothing refreshed. The flag was the available witness.
+
+Review then found it was the wrong witness: `answered` sets `figuresStale` on
+EVERY answer, including one given today on a row fetched today, so the "Grid
+updates on next sync" note appeared after any ordinary tap. The field that
+answers the grid's question is the day the history was fetched through
+(`Record.historyThrough`, field 19), which an answer never moves; the grid has
+a hole exactly when that is before the day before `date`
+(`Widgets.gridBehind`).
+
+The spoken sentence had the mirror-image mistake first: it branched on
+`figuresStale` alone, so a widget whose line read "As of 2026-08-14" was
+announced as "Your habits: 2 of 2" and an empty one as "Your habits: 0 of 0" -
+a count where the screen states a reason (#332's stats-widget finding on a third
+surface).
+
+The gone-row filter in `OverviewWidget.render` was first described as the
+mechanism that hides a gone row; it is only defence for a `gone` carried in from
+before the id was an overview's, since `refreshFrom` never marks a live
+overview's records gone.
+
+`WidgetSync.refreshFrom` also used to read the store outside an `edit` and write
+it back after a WorkManager round trip, which could overwrite a `noteAnswer`
+that landed between; the write is now one `updateWidgets` through `mergeFetched`,
+which keeps a newer local answer for the same day.

@@ -498,25 +498,21 @@ MANUAL order — an account sorting by name would see its widget disagree with
 every other surface it owns. Stored (field 18, fail-safe `0`) and not left
 implicit in list order, which `putWidgetSet`'s tail-append does not preserve.
 
-**The note line has THREE arms, and the third reads `figuresStale` — reversing
-what this section first said.** No rows drawn → `overview_empty`; any drawn row
-dated before today → `overview_stale`, naming the OLDEST row drawn, since "as
-of" is a claim about every row above it; otherwise any drawn row with
-`figuresStale` → `overview_grid_behind`, which names no date because the date IS
-today. The first argument — "no figures are painted here, so the flag says
-nothing about this screen" — is right about FIGURES and wrong about the GRID:
-`record.date` is not a fetch date, `Widgets.answered` advances it on an answer
-recorded with no network, so a row answered offline reads `date == today` while
-its older columns still paint UNKNOWN off a history nothing refreshed, and this
-flag is the only witness that `date` moved with no fetch behind it.
-**`overview_root`'s spoken sentence takes the same arms in the same order**, and
-adding an arm to one half means adding it to the other: `overview_summary_empty`,
-`overview_summary_stale`, `overview_summary_grid_behind`, then the plain
-`overview_summary`. It branched on `figuresStale` alone first, so a widget whose
-line read "As of 2026-08-14" was announced as "Your habits: 2 of 2" and an empty
-one as "Your habits: 0 of 0" — a count where the screen states a reason. That is
-#332's stats-widget finding on a third surface, which is why `stats_root` is the
-shape to copy rather than a thing to re-derive.
+**The note line has THREE arms, and the third reads `Widgets.gridBehind`, not
+`figuresStale`.** No rows drawn → `overview_empty`; any drawn row dated before
+today → `overview_stale`, naming the OLDEST row drawn, since "as of" is a claim
+about every row above it; otherwise any drawn row whose history was fetched
+through a day before yesterday → `overview_grid_behind`, which names no date
+because the date IS today. `record.date` is not a fetch date (`Widgets.answered`
+advances it with no network), so the witness is `Record.historyThrough`, which
+only a fetch moves (field 19, empty reads "not behind"). `figuresStale` is set
+by EVERY answer and answers the stats widget's question, "are my figures
+current", not this one. **`overview_root`'s spoken sentence takes the same arms
+in the same order**, and adding an arm to one half means adding it to the other:
+`overview_summary_empty`, `overview_summary_stale`,
+`overview_summary_grid_behind`, then the plain `overview_summary`; `stats_root`
+is the shape to copy. Tests drive the real `noteAnswer` after a real `refreshed`
+at several ages. History: `docs/decisions/android.md`.
 
 **A gone row DISAPPEARS here and the rows below close up, where the two
 single-habit widgets say "Removed".** Both are right: hiding the one thing on
@@ -524,8 +520,8 @@ THEIR screen leaves a blank widget with nothing to explain it, while here the
 overview is "your habits" and the vanishing row IS the signal.
 `Widgets.reconcileOverview` drops such a record and `OverviewWidget.render`
 filters `gone` as well — cheap defence against a `gone` carried in from before
-the id was an overview's, NOT the mechanism the comment first claimed
-(`refreshFrom` excludes a live overview's records from the gone-marking path).
+the id was an overview's (`refreshFrom` excludes a live overview's records from
+the gone-marking path).
 `refreshedOrGone`'s `gone = false` arm clears it; left set, a flag the render
 filters on is permanent.
 

@@ -42,17 +42,14 @@ import java.util.Locale
  * about the grid itself: a record not refreshed today has no data for today's
  * column, so it paints UNKNOWN — indistinguishable from "answered nothing
  * today" until the line says otherwise. **It reads
- * [Widgets.Record.figuresStale] too**, and this paragraph used to say the
- * opposite: "no figures are painted here, so the flag says nothing about
- * anything on this screen". That is right about FIGURES and wrong about the
- * grid. `Widgets.answered` is the one event that advances `date` with no fetch
- * behind it, and it sets `figuresStale` doing so — which makes the flag the
- * only available witness that `date` has stopped being a fetch date. A row
- * fetched on T-3 and answered offline on T reads `date == today`, so the dated
- * arm goes quiet while the columns for T-2 and T-1 still paint UNKNOWN off a
- * `history` nothing refreshed. A field is defined by what its reader asks of
- * it: `StatsWidget` asks "are my figures current", this widget asks "is my
- * grid current", and the same flag answers both.
+ * [Widgets.gridBehind] too**, not [Widgets.Record.date] alone: `Widgets.answered`
+ * advances `date` with no fetch behind it, so a row fetched on T-3 and answered
+ * offline on T reads `date == today` while the columns for T-2 and T-1 paint
+ * UNKNOWN off a `history` nothing refreshed. `Record.historyThrough` is the
+ * witness (the day the history was fetched through, which an answer never
+ * moves). It is NOT `figuresStale`: that flag answers "are my figures current"
+ * for the stats widget and is set by every answer, including one given today on
+ * a row fetched today, where the grid has no hole and the note would be false.
  */
 class OverviewWidget : AppWidgetProvider() {
 
@@ -260,7 +257,7 @@ class OverviewWidget : AppWidgetProvider() {
             // -reporting staleness is the fail-safe direction, the same one
             // `figuresStale` takes on the stats widget.
             //
-            // And [Widgets.Record.figuresStale] IS read here, as the third arm.
+            // And [Widgets.gridBehind] is the third arm.
             // `record.date` is not a fetch date: `Widgets.answered` advances it
             // on an answer recorded with no network at all, and
             // `WidgetSync.noteAnswer` maps that over every record for the
@@ -269,15 +266,15 @@ class OverviewWidget : AppWidgetProvider() {
             // stopping at T-3 — so the dated arm goes quiet exactly when the
             // columns for T-2 and T-1 have nothing behind them and paint
             // UNKNOWN, which is the "indistinguishable from answered-nothing"
-            // confusion this line exists to resolve. `figuresStale` is the one
-            // witness that `date` moved with no fetch behind it, which is what
-            // makes it the right question for a grid as well as for a figure.
+            // confusion this line exists to resolve. `historyThrough` is the
+            // witness that the fetch stopped short of the day before `date`;
+            // `figuresStale` is not, since any answer sets it.
             // It says so WITHOUT a date, for the reason `stats_figures_behind`
             // is not `stats_stale`: here the date IS today, and naming it would
             // be false.
             val asOf = shown.map { it.date }.filter { it.isNotEmpty() }.minOrNull()
             val stale = asOf != null && asOf != today
-            val behind = shown.any { it.figuresStale }
+            val behind = shown.any { Widgets.gridBehind(it) }
             views.setViewVisibility(
                 R.id.overview_note,
                 if (shown.isEmpty() || stale || behind) {

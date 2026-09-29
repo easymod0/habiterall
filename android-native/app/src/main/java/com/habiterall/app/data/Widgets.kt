@@ -116,12 +116,10 @@ object Widgets {
          * construction — nothing moved — while leaving exactly the case
          * above presenting stale figures as current; the field is defined by
          * what its readers ask of it, not by the mechanism that happens to
-         * make it true elsewhere. There are TWO of those readers, and the
-         * second was added a round later: `StatsWidget.render` asks "are my
-         * figures current", and `OverviewWidget.render` asks "is my grid
-         * current" — the same question, because [answered] advancing [date]
-         * with no fetch behind it is what makes [date] stop being a fetch
-         * date, and this flag is the only witness to that. Cleared in
+         * make it true elsewhere. Its reader is
+         * `StatsWidget.render` ("are my figures current"); the overview
+         * widget's grid asks a different question and reads [historyThrough]
+         * instead, because this flag is set by every answer. Cleared in
          * [refreshed] — a successful fetch is exactly what makes the figures
          * current again. `WidgetSync.noteRefused` is the one exception: a
          * refusal never reached the server, so the last fetch's figures are
@@ -137,6 +135,20 @@ object Widgets {
          * pre-upgrade local answer, closing at the very next fetch.
          */
         val figuresStale: Boolean = false,
+        /**
+         * The last day [history] was FETCHED through — the day of the last
+         * `/overview` answer that produced it, and unlike [date] never moved
+         * by [answered]. Empty means unknown (a record from before this field
+         * existed, or never fetched), and reads as "not behind".
+         *
+         * [figuresStale] cannot answer "does the grid have a hole in it": it
+         * is set by EVERY answer, including one given today on a row fetched
+         * today, where nothing is missing. The grid has a hole exactly when
+         * the fetch stopped before the day before [date] — the columns between
+         * are drawn from [history] alone, and today's comes from [value].
+         * See [gridBehind].
+         */
+        val historyThrough: String = "",
         /**
          * Where this habit sits in the OVERVIEW widget's list — the index it
          * held in the `/api/overview` reply, and nothing else.
@@ -525,6 +537,7 @@ object Widgets {
         // A successful fetch is exactly what makes the figures current
         // again — see the KDoc on `Record.figuresStale`.
         figuresStale = false,
+        historyThrough = today,
     )
 
     /**
@@ -607,6 +620,20 @@ object Widgets {
     }
 
     /**
+     * Whether the strip has columns no fetch ever filled: [Record.history]
+     * stops before the day before [Record.date]. An answer given today on a row
+     * fetched today (or yesterday) leaves no such column, and so is not
+     * "behind" however many answers have set [Record.figuresStale].
+     */
+    fun gridBehind(record: Record): Boolean {
+        if (record.historyThrough.isEmpty() || record.date.isEmpty()) return false
+        val through = runCatching { LocalDate.parse(record.historyThrough) }.getOrNull()
+            ?: return false
+        val day = runCatching { LocalDate.parse(record.date) }.getOrNull() ?: return false
+        return through.isBefore(day.minusDays(1))
+    }
+
+    /**
      * The record after an answer given somewhere else on this phone — the
      * notification's buttons, or its number pad.
      *
@@ -637,7 +664,15 @@ object Widgets {
             // The strip has moved too; the score and streak have not —
             // nothing here re-fetched `/overview`, so `figuresStale` records
             // that the two have parted ways until the next one does.
-            record.copy(date = date, value = value, skip = skip, figuresStale = true)
+            record.copy(
+                date = date,
+                value = value,
+                skip = skip,
+                figuresStale = true,
+                // The fetch date, kept as `date` moves off it: the FIRST
+                // answer after a fetch is the one that carries it across.
+                historyThrough = record.historyThrough.ifEmpty { record.date },
+            )
         }
 
     /**
@@ -690,6 +725,9 @@ object Widgets {
         // existed has eighteen fields and must still draw. `0` read back for
         // one is also what every single-habit record legitimately holds.
         r.rank.toString(),
+        // Field 19, appended like every field since 12: the day `history` was
+        // fetched through. Empty for a record written before it existed.
+        r.historyThrough,
     ).joinToString("|")
 
     /**
@@ -762,6 +800,7 @@ object Widgets {
             // build does not understand shifting this one, must not cost the
             // whole record and with it the widget.
             rank = f.getOrNull(18)?.toIntOrNull() ?: 0,
+            historyThrough = f.getOrNull(19) ?: "",
         )
     }
 

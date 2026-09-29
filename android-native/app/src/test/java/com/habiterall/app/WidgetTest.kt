@@ -710,14 +710,14 @@ class WidgetTest {
     }
 
     @Test
-    fun `a nineteen-field line reads its own rank`() {
+    fun `a twenty-field line reads its own rank`() {
         // The other half, separately: a record that HAS a rank must come back
         // holding it, and not holding the fallback the test above asserts. 4
         // rather than 0 on purpose — a fixture holding a field's default
         // compares equal to itself and passes with the field dropped entirely.
         val fifth = record(waterHabit(), rank = 4)
         val line = Widgets.encode(fifth)
-        assertEquals("rank is field 18, appended and never inserted", 19, line.split('|').size)
+        assertEquals("rank is field 18, appended and never inserted; historyThrough follows as 19", 20, line.split('|').size)
         assertEquals("4", line.split('|')[18])
 
         val back = Widgets.decode(line)!!

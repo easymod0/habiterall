@@ -534,6 +534,102 @@ class OverviewWidgetTest {
             )
         }
 
+    /**
+     * A row FETCHED through [fetchedDaysAgo], then answered today through the
+     * real `noteAnswer`; the note line's visibility and the row afterwards.
+     */
+    private fun answeredAfterFetch(widgetId: Int, fetchedDaysAgo: Long): Pair<Int, Widgets.Record> =
+        runBlocking {
+            val manager = AppWidgetManager.getInstance(context)
+            val shadowManager = shadowOf(manager)
+            shadowManager.bindAppWidgetId(widgetId, ComponentName(context, OverviewWidget::class.java))
+            val now = java.time.LocalDate.now()
+            val habit = boolHabit()
+            val settings = Settings(context)
+            // Through `refreshed`, the real fetch path, so `historyThrough` is
+            // stamped by the code under test and not by the fixture.
+            settings.putWidgetSet(
+                widgetId,
+                listOf(
+                    Widgets.refreshed(
+                        Widgets.blank(widgetId, habit.id),
+                        habit,
+                        now.minusDays(fetchedDaysAgo).toString(),
+                    ),
+                ),
+            )
+            WidgetSync.noteAnswer(context, habit.id, now.toString(), Sentinels.YES, skip = false)
+            val row = settings.cachedWidgetSet(widgetId).single()
+            val view = shadowManager.getViewFor(widgetId)!!
+            view.findViewById<TextView>(R.id.overview_note).visibility to row
+        }
+
+    @Test
+    fun `an ordinary answer to a row fetched today does not say the grid is behind`() {
+        val (visibility, row) = answeredAfterFetch(96, fetchedDaysAgo = 0)
+        assertTrue(
+            "the fixture is only meaningful once the answer has set the flag the old predicate read",
+            row.figuresStale,
+        )
+        assertEquals(View.GONE, visibility)
+    }
+
+    @Test
+    fun `an answer to a row fetched yesterday has no hole either, but two days ago does`() {
+        assertEquals(View.GONE, answeredAfterFetch(97, fetchedDaysAgo = 1).first)
+        assertEquals(View.VISIBLE, answeredAfterFetch(98, fetchedDaysAgo = 2).first)
+    }
+
+    /* ---------- refreshFrom's write does not clobber an answer that landed mid-fetch ---------- */
+
+    @Test
+    fun `mergeFetched keeps an answer recorded after the snapshot the fetch was worked out from`() {
+        val habit = boolHabit()
+        val snapshot = record(habit, widgetId = 5, value = null)
+        // What `noteAnswer` wrote while the fetch was waiting on WorkManager.
+        val current = snapshot.copy(value = Sentinels.YES, figuresStale = true)
+        // What the fetch worked out from the snapshot: the server has no answer.
+        val fetched = snapshot.copy(name = "Renamed", history = "x")
+
+        val merged = WidgetSync.mergeFetched(
+            current = listOf(current),
+            snapshot = listOf(snapshot),
+            updated = listOf(fetched),
+            sets = emptyMap(),
+        ).single()
+
+        assertEquals("the fetch's own news still lands", "Renamed", merged.name)
+        assertEquals("the newer local answer survives", Sentinels.YES, merged.value)
+        assertTrue(merged.figuresStale)
+    }
+
+    @Test
+    fun `mergeFetched replaces an overview widget's set and leaves other widgets alone`() {
+        val a = boolHabit(1, "A")
+        val b = boolHabit(2, "B")
+        val other = record(a, widgetId = 6)
+        val stale = record(a, widgetId = 5, rank = 0)
+        val gone = record(b, widgetId = 5, rank = 1)
+        val fresh = record(b, widgetId = 5, rank = 0)
+
+        val merged = WidgetSync.mergeFetched(
+            current = listOf(other, stale, gone),
+            snapshot = listOf(other, stale, gone),
+            updated = emptyList(),
+            sets = mapOf(5 to listOf(fresh)),
+        )
+
+        assertEquals(listOf(6 to 1L, 5 to 2L), merged.map { it.widgetId to it.habitId })
+    }
+
+    @Test
+    fun `historyThrough survives the encoding and an old record reads it empty`() {
+        val r = record(boolHabit()).copy(historyThrough = "2026-08-13")
+        assertEquals("2026-08-13", Widgets.decodeAll(Widgets.encodeAll(listOf(r))).single().historyThrough)
+        val old = Widgets.encode(r).split("|").take(19).joinToString("|")
+        assertEquals("", Widgets.decodeAll(old).single().historyThrough)
+    }
+
     /* ---------- case 8b: the note line and the spoken sentence take the SAME arm ---------- */
 
     // #332's finding, one layer up: the visible note line grew to three arms
