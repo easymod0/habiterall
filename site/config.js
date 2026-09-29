@@ -44,16 +44,17 @@ export const SITE = {
   /**
    * Whether `app.habiterall.ca` is open to public registration.
    *
-   * FALSE today: the hosted edition runs, accounts exist, but nobody can create
-   * one. So the hero's primary button reads "Sign in" and carries a note saying
-   * signups are coming, rather than a "Get started free" that leads to a wall.
+   * TRUE since 2026-09-28, when registration opened: the hero's primary button
+   * reads "Create a free account" and there is no coming-soon note. While it
+   * was closed this was `false`, and the button read "Sign in" with a note
+   * saying signups were coming, rather than a "Get started free" that led to a
+   * wall.
    *
-   * Flip this to `true` when registration opens and the copy changes with it —
-   * the button becomes "Create a free account" and the note disappears. One
-   * line, and `shared/test/site.test.js` asserts BOTH states against the
+   * Set it back to `false` if registration closes, and the copy changes with it.
+   * One line, and `shared/test/site.test.js` asserts BOTH states against the
    * rendered HTML, so this cannot be a constant nothing reads.
    */
-  hostedSignups: false,
+  hostedSignups: true,
 };
 
 /**
