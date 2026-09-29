@@ -199,12 +199,13 @@ let openSeq = 0;
  *
  * @returns {Promise<boolean>}
  */
-export async function open() {
+export async function open(redraw = false) {
   // Taken before anything is awaited, so the number describes THIS request.
   const ticket = ++openSeq;
   try {
     const data = await api(`/categories/stats?granularity=${GRANULARITY}`);
     if (ticket !== openSeq) return true;
+    if (redraw && !state.openCategories) return true;
     render(data);
     return true;
   } catch (e) {
@@ -241,10 +242,20 @@ export async function open() {
  * to leave something on screen. A DISCARDED reply answers `true`, for the
  * reason `open()` above states.
  *
+ * **`redraw` is the 'change' handler's, and it is the half `openSeq` cannot
+ * see.** A redraw is a refetch of a page that is ALREADY open, so it may only
+ * land while that page still is. Back emits 'reload' and `dashboard.load()`
+ * paints the list and clears the flags without touching this module's counter,
+ * so a redraw still in flight after Back holds the current ticket and used to
+ * repaint the page over the dashboard and push `#/category/N`. The flag is
+ * asked after the await, because it is the moment the reply could draw. A first
+ * open (a press, a deep link) passes nothing: the flag is not yet set then.
+ *
  * @param {number} id
+ * @param {boolean} [redraw]
  * @returns {Promise<boolean>}
  */
-export async function openCategory(id) {
+export async function openCategory(id, redraw = false) {
   // Taken before anything is awaited, so the number describes THIS request —
   // see `openSeq` above for what a second press in this interval would
   // otherwise push onto the history stack.
@@ -257,6 +268,7 @@ export async function openCategory(id) {
     // since the sentence below would be about a press the user has already
     // moved on from.
     if (ticket !== openSeq) return true;
+    if (redraw && state.openCategoryId !== id) return true;
     const section = data.categories.find((c) => c.id === id);
     if (!section) {
       // A bookmark, a shared link or the address bar naming a category this
@@ -770,10 +782,10 @@ export function init() {
   // the server never got to. The parentheses are explicit rather than left to
   // a reader working out that `!await f() && x` groups the way it needs to.
   on('change', async () => {
-    if (state.openCategories) { open(); return; }
+    if (state.openCategories) { open(true); return; }
     const id = state.openCategoryId;
     if (id == null) return;
-    const refused = !(await openCategory(id));
+    const refused = !(await openCategory(id, true));
     if (refused && state.openCategoryId == null) emit('reload');
   });
 }

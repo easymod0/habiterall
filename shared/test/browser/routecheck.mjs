@@ -834,6 +834,62 @@ try {
     && race.title.includes(RACE_B.name),
     JSON.stringify(race));
 
+  /* ---------- a redraw in flight when Back is pressed ---------- */
+
+  // Saving a habit from the dialog opened over a category page announces
+  // 'change', and the refetch goes out. Back before the reply emits 'reload',
+  // and `dashboard.load()` paints the list WITHOUT touching `openSeq`, so the
+  // reply still held the current ticket and repainted the category page over
+  // the dashboard, pushing `#/category/N`. `openCategory(id, true)` asks
+  // `state.openCategoryId` after the await.
+  //
+  // Mutation target: delete the `redraw && state.openCategoryId !== id` line
+  // in `openCategory` and this block reports the category page over the list.
+  await raceEv(`(() => {
+    window.__held2 = 0;
+    window.__landed2 = 0;
+    const gate2 = new Promise((r) => { window.__release2 = r; });
+    const realFetch = window.__realFetch;
+    window.fetch = (url, opts) => {
+      if (String(url).includes('/api/categories/stats')) {
+        window.__held2++;
+        return gate2
+          .then(() => realFetch(url, opts))
+          .then((res) => { window.__landed2++; return res; });
+      }
+      return realFetch(url, opts);
+    };
+    return true;
+  })()`);
+  const beforeBackRedraw = await raceEv(`history.length`);
+  await raceEv(`(async () => {
+    const s = await import('/shared/ui/store.js');
+    s.emit('change');
+    return true;
+  })()`);
+  await waitUntil(raceEv, `window.__held2 === 1`,
+    { what: `the 'change' redraw of the category page to be fired and held` });
+  await raceEv(`[...document.querySelectorAll('#view-categories button')]
+    .find((b) => b.textContent.includes('Back')).click()`);
+  await waitUntil(raceEv, `!document.getElementById('view-list').hidden`,
+    { what: 'the dashboard to be showing after Back' });
+  await raceEv(`window.__release2()`);
+  await waitUntil(raceEv, `window.__landed2 === 1`,
+    { what: 'the held redraw reply to land' });
+  // A settle: what is asserted is that the reply did NOT draw.
+  await sleep(1200);
+  const afterBackRedraw = await raceEv(`(() => ({
+    length: history.length,
+    hash: location.hash,
+    list: !document.getElementById('view-list').hidden,
+    category: !document.getElementById('view-categories').hidden,
+  }))()`);
+  ck('a redraw still in flight when Back is pressed does not repaint the category page',
+    afterBackRedraw.list && !afterBackRedraw.category, JSON.stringify(afterBackRedraw));
+  ck('...and pushes no history entry naming it',
+    afterBackRedraw.length <= beforeBackRedraw && !afterBackRedraw.hash.startsWith('#/category/'),
+    `${beforeBackRedraw} -> ${afterBackRedraw.length}, hash ${afterBackRedraw.hash}`);
+
   // Left as it was found. `fixtures.reset()` clears settings before the next
   // suite the runner starts, but a standalone run of this file has no such
   // reset and would otherwise leave the account grouped.
