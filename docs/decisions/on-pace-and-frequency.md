@@ -211,7 +211,7 @@ not lived this long" unconditionally — true when `dates[0]` is the habit's own
 first row, and false when the range merely *opens* there because that is all
 the caller fetched. Three callers fetch a bounded SLICE rather than a habit's
 whole history: both editions' `/overview` (`summaryStats` over
-`SUMMARY_WINDOW_DAYS`, 400 days), `recomputeBestStreak`
+`SUMMARY_WINDOW_DAYS`, 400 days — 765 since #354), `recomputeBestStreak`
 (`shared/src/summary-cache.js`) over `STREAK_HISTORY_DAYS` (1830 days), and
 `GET /habits/:id/stats?start=`. The days a bounded slice's window reaches back
 into DID happen and DO have rows — the caller simply did not fetch them — so
@@ -332,7 +332,7 @@ birth and the gate is shut:
 A streak changed, two miss runs became one, and `lastMiss` moved — with no
 birth anywhere near it. The true off-birth blast radius is *every non-daily
 habit that has ever used a skip day, at every point in its history*, which on
-the dashboard is any such habit older than the 400-day slice. That is a wider
+the dashboard is any such habit older than the summary slice (400 days then, 765 since #354). That is a wider
 and more visible change than "only at a birth", and it is the right change —
 narrowing the floor to births would re-break the skip inversion this record
 exists to close.

@@ -23,7 +23,9 @@
  * Pure logic: no storage, no HTTP, no DOM. See `docs/decisions/caching.md`.
  */
 
-import { bestStreak, computeStreaks, earliestRealDay } from './stats.js';
+import {
+  addDays, bestStreak, computeStreaks, earliestRealDay, warmStartFor,
+} from './stats.js';
 
 /**
  * How far back the dashboard's streak scan reads.
@@ -181,6 +183,14 @@ export function summaryCacheHit(row, summaryEnd) {
  * supply it from the same `MIN(date)` read that already feeds `creditAnchor`;
  * see `summaryStats`'s JSDoc for what a caller gets for withholding it.
  *
+ * **Given a `birth`, the scan opens where `/overview`'s summary window opens
+ * (#354), not at the slice's earliest row.** Both go through `warmStartFor`, one
+ * over `SUMMARY_WINDOW_DAYS` and one over `STREAK_HISTORY_DAYS`, so the scan
+ * CONTAINS the summary window under the same anchor rule and `bestStreak >=
+ * currentStreak` is structural rather than a coincidence of two slices. Opening
+ * at the slice's earliest row instead let a limit credited from before that row
+ * read a `currentStreak` of 766 against a `bestStreak` of 9.
+ *
  * @param {import('./types.js').Habit} habit
  * @param {Array<{date: string, value: number, status?: string}>} entries the
  *   habit's rows over the last `STREAK_HISTORY_DAYS`. Any order.
@@ -200,10 +210,25 @@ export function recomputeBestStreak(habit, entries, { summaryEnd, unlogged, cred
   // itself, because on an at-most habit whose unanswered days count as success
   // that single day is a real streak of one. `earliestRealDay` answering `null`
   // — every row a phantom — lands in the same place, and for the same reason.
+  //
+  // With a `birth`, the scan opens by the SAME rule `/overview`'s summary window
+  // does (#354): `warmStartFor` over `STREAK_HISTORY_DAYS` back, so the summary
+  // window is contained in this scan under one anchor rule and `bestStreak >=
+  // currentStreak` holds by construction. The summary window now opens at
+  // `max(birth, summaryEnd - SUMMARY_WINDOW_DAYS)` — the habit's own first row
+  // when it is inside the range — where this scan used to open at the earliest
+  // row inside ITS slice; for a habit whose first row is older than the slice and
+  // whose next row is more than `SUMMARY_WINDOW_DAYS` later, the summary window
+  // then reached back further than the scan and credited a streak the scan
+  // could not see. Without a `birth` there is nothing to anchor on and the
+  // slice's own earliest row is all there is.
+  const from = birth == null
+    ? earliestRealDay(entryMap.keys()) ?? summaryEnd
+    : warmStartFor(birth, entryMap.keys(), addDays(summaryEnd, -STREAK_HISTORY_DAYS));
   const streaks = computeStreaks(
     habit,
     entryMap,
-    earliestRealDay(entryMap.keys()) ?? summaryEnd,
+    from,
     summaryEnd,
     unlogged,
     creditFrom,

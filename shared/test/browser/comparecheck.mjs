@@ -736,20 +736,19 @@ try {
   // **There is deliberately NO cross-surface check against the dashboard's own
   // section header here, and its absence is the honest answer rather than a
   // gap.** That header's mean comes from `/overview`'s `categorySummaries` —
-  // `summariseByCategory` over `summaryStats`, a fixed 400-day window anchored
-  // on today with no forward clamp to a member's first entry — while this page
-  // is `COMPARE_WINDOW_DAYS` (365) plus a 400-day warm-up, clamped forward per
-  // member. Two windows, so the two numbers are not equal in general: measured
-  // through `computeCategoryStats` and `summaryStats` + `summariseByCategory`
-  // for a habit kept perfectly since its first day, `freq_numerator: 1` and
-  // 700 days old, this page reads 100% / 99% / 98% at denominators 30 / 60 /
-  // 90 where the header reads 98% / 94% / 85% — and `LIMITS.freqDenominator`
-  // is 365, so those are ordinary habits.
-  // The disagreement is pre-existing — both surfaces are on master and #259
-  // moved neither — and an equality assertion here would pass only because
-  // this suite's fixtures are daily habits days old, where both windows
-  // collapse onto the same range: a coincidence of the fixture pinned as a
-  // rule. `docs/decisions/categories.md` phase 6 records the limitation.
+  // `summariseByCategory` over `summaryStats` — and since #354 it is scored over
+  // the same window this page reads at its default request: `SUMMARY_WINDOW_DAYS`
+  // (765, `COMPARE_WINDOW_DAYS` plus a 400-day warm-up), clamped forward per
+  // member by `warmStartFor`. Before that the two were different windows and
+  // disagreed for a slow habit: measured for a habit kept perfectly since its
+  // first day, `freq_numerator: 1` and 700 days old, this page read 100% / 99% /
+  // 98% at denominators 30 / 60 / 90 where the header read 98% / 94% / 85%.
+  // Parity is now pinned where it can fail — both editions' `/overview`
+  // integration suites, over habits older than the warm-up — and an equality
+  // assertion HERE would pass by fixture coincidence: this suite's habits are
+  // daily and days old, where every window collapses onto the same range, so it
+  // would have passed before #354 too. `docs/decisions/categories.md` phase 6
+  // records the history.
 
   // The sentence under it is `sectionFigure`'s, shared with the comparison
   // rather than written twice — so a second wording would show up here.

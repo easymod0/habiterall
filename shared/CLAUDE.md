@@ -215,7 +215,7 @@ the habit has answered once (#223). A route that computes a pass ITSELF, or
 hands `summaryStats` a bounded SLICE — both editions' `/overview` does both —
 must ask `creditAnchor` with the habit's LIFETIME first answer out of SQL, and
 hand the one date to every figure on the row: whether a habit has ever answered
-is not a question a 400- or an 1830-day window can answer, and two windows
+is not a question a 765- or an 1830-day window can answer, and two windows
 deriving it separately disagree exactly when the answer falls between them.
 
 That window is derived inside `computeStats` and never returned, which is why
@@ -372,11 +372,12 @@ with the other — `stats.test.js`'s `#223 / #346` case exists to stop that.
 **Coverage is WINDOW-INDEPENDENT from `from + (den - 1)` onward, and that is the
 property to protect.** A block is anchored to a real completion and begins no
 earlier than `den - 1` days before any day it covers, so past that point
-`computeStats` over a full history and `summaryStats` over a 400-day slice
-cannot disagree about a day. Loop's `snapIntervalsTogether` is deliberately not
-ported because it breaks even that — ported verbatim it read 302 against 301 on
-#340's own fixture. Anything that makes coverage depend on where the caller
-opened its range, or on `birth`, reintroduces the bug #340 exists to close.
+`computeStats` over a full history and `summaryStats` over the summary slice
+(`SUMMARY_WINDOW_DAYS`) cannot disagree about a day. Loop's
+`snapIntervalsTogether` is deliberately not ported because it breaks even that
+— ported verbatim it read 302 against 301 on #340's own fixture. Anything that
+makes coverage depend on where the caller opened its range, or on `birth`,
+reintroduces the bug #340 exists to close.
 
 **The `den - 1` head of a bounded walk is the bound, and it is not cosmetic: it
 turns an unbroken habit into one carrying a lapse.** `edgeSafeStart` is the ONE
@@ -467,11 +468,14 @@ and `ui/detail.js` sends **no `start`** to `/habits/:id/stats` — so a habit's 
 page is always converged from its first entry, while a comparison starting cold
 at `start` reports that same habit weaker. Two surfaces disagreeing about one
 habit is indistinguishable from one of them being broken. `SCORE_WARMUP_DAYS` is
-400, the number both editions' `/overview` already spends on the same problem,
-and it is exported from `stats.js` and imported by both routes rather than
-spelled once per edition. What makes it easy to lose again: a year of window
-swamps the warm-up, so dropping it moves nothing on the DEFAULT request and only
-an explicitly short `start` can falsify it — measured in
+400, exported from `stats.js` and imported by both routes rather than spelled
+once per edition. `/overview` scores over `SUMMARY_WINDOW_DAYS` — 765, which is
+`COMPARE_WINDOW_DAYS` (365) plus that 400 — with `start` from `warmStartFor`,
+the clamp this paragraph describes, so the dashboard's rows and section headers
+equal the page's default reading of the same habit (#354; pinned in both
+editions' `/overview` integration suites). What makes it easy to lose again: a
+year of window swamps the warm-up, so dropping it moves nothing on the DEFAULT
+request and only an explicitly short `start` can falsify it — measured in
 `docs/decisions/categories.md`, and the reason the suite's window is 20 days
 rather than the route's own year.
 
@@ -667,8 +671,8 @@ fallback than `id` alone.
 **`recently missed` sorts by the end of the habit's last miss run, most recent
 first, and "never missed" and "missed longer ago than the window reaches" are
 the SAME answer** — the window is
-`SCORE_WARMUP_DAYS` (400 days), so a habit that last missed 500 days ago sorts
-as never-missed. That is a real, accepted limitation, not an oversight: a wider
+`SUMMARY_WINDOW_DAYS` (765 days, #354), so a habit that last missed 800 days ago
+sorts as never-missed. That is a real, accepted limitation, not an oversight: a wider
 window would cost every ordinary request to serve the rare account with a
 years-old habit.
 

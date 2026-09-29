@@ -541,7 +541,7 @@ end is still issue #223, and it is not this one's to fix either.
 makes over `stats.streaks` — so the ghost tick above reaches a third grid with
 no new renderer, only a caller that had been passing the `new Set()` default.
 `habit.runs` rides on `/overview`: `summaryStats` already reads its `score`
-and `currentStreak` off entries the route bounded to a fixed ~400-day window
+and `currentStreak` off entries the route bounded to a fixed 765-day window
 anchored to today (`SUMMARY_WINDOW_DAYS`, not to the grid's own `end`), and
 `runs` is that same `streaksFrom` array, clipped into the GRID window the
 route is about to answer (its own `start`/`end`, never `summaryEnd`) instead
@@ -551,7 +551,7 @@ depending on cache freshness, and a second, narrower entries read plus a
 second `onPaceSeries` pass for a paged-back grid window was rejected too,
 since a narrower window moves `onPaceSeries`'s own birth-gated leniency and
 would put the dashboard at odds with the detail page about the same run. So a
-grid paged back past the 400-day entries window shows no run marks for those
+grid paged back past the 765-day entries window shows no run marks for those
 days, accepted rather than coded around, and each run's `length` on the wire
 is the TRUE unclipped length, never the span visible in whatever grid window
 clipped it.
@@ -562,10 +562,11 @@ none.** `onPaceSeries` judges a day against the trailing `denominator`-day
 window ending on it, so a day less than `den - 1` from the start of the walked
 range is judged against a window missing history that really happened — with
 #340's leniency correctly withheld, because the range opened at the slice's
-edge and not at the habit's birth. Measured on a 3x/7 habit kept perfectly for
-500 days: the 400-day slice reported its own first fortnight as a 4-day run,
-then a ONE-DAY HOLE, then the real run, where the habit's own page reports one
-unbroken 499. Drawn, that is a blank square mid-band on the dashboard while the
+edge and not at the habit's birth. Measured, when the slice was 400 days (it is
+765 since #354, so the edge now falls further back; the mechanism is the same at
+any bounded edge), on a 3x/7 habit kept perfectly for 500 days: the slice
+reported its own first fortnight as a 4-day run, then a ONE-DAY HOLE, then the
+real run, where the habit's own page reports one unbroken 499. Drawn, that is a blank square mid-band on the dashboard while the
 calendar strokes through the same day. `summaryStats` therefore floors the
 `runs` window at `from + (den - 1)` whenever `from > birth`, so those days are
 absent instead of wrong — `score` and `currentStreak` are untouched, both being

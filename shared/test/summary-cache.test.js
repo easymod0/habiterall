@@ -5,6 +5,7 @@ import {
   STREAK_HISTORY_DAYS, SUMMARY_CACHE_COLUMNS, stripSummaryCache,
   summaryCacheHit, recomputeBestStreak,
 } from '../src/summary-cache.js';
+import { addDays, creditAnchor, summaryStats, warmStartFor } from '../src/stats.js';
 
 /** The day every case below asks for its figures as of. */
 const TODAY = '2026-06-05';
@@ -219,4 +220,37 @@ test('recomputeBestStreak anchors on earliestRealDay, never the lexical minimum'
       { summaryEnd: TODAY, unlogged: 'miss' }),
     5
   );
+});
+
+test('recomputeBestStreak opens where the summary window does, so bestStreak >= currentStreak (#354)', () => {
+  // The premise shape, measured. A limit credited under `success`, its first row
+  // 2000 days back and its next 100 back. The route hands `summaryStats` a
+  // 765-day slice opened by `warmStartFor`, which anchors on the habit's
+  // lifetime `birth` and so reaches back to `end - 765`; the scan's own slice
+  // holds only the 100-days-ago row, and before #354 it opened THERE and read
+  // 101 against a `currentStreak` of 766.
+  const end = '2026-09-28';
+  const habit = { ...limitHabit, target_value: 2, at_most_unlogged: 'success' };
+  const birth = addDays(end, -2000);
+  const rows = [
+    { date: birth, value: 1, status: '' },
+    { date: addDays(end, -100), value: 1, status: '' },
+  ];
+  const creditFrom = creditAnchor(birth, end);
+
+  const summaryCut = addDays(end, -765);
+  const summarySlice = rows.filter((r) => r.date >= summaryCut);
+  const { currentStreak } = summaryStats(habit, summarySlice, {
+    end, unlogged: 'miss', creditFrom, birth,
+    start: warmStartFor(birth, summarySlice.map((e) => e.date), summaryCut),
+  });
+  assert.equal(currentStreak, 766);
+
+  const scanSlice = rows.filter((r) => r.date >= addDays(end, -1830));
+  const best = recomputeBestStreak(habit, scanSlice, {
+    summaryEnd: end, unlogged: 'miss', creditFrom, birth,
+  });
+  // 1831: `[end - 1830, end]`, every day credited. A literal, and not 766 or 101.
+  assert.equal(best, 1831);
+  assert.ok(best >= currentStreak);
 });

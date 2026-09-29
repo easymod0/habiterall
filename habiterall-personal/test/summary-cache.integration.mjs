@@ -6,7 +6,8 @@
  * write actually reaches `clearHabitSummary`, that a cache HIT is genuinely
  * served rather than silently ignored, and that the cold path — every stamp
  * cleared at once — still gets `score`/`currentStreak` right over the
- * 400-day slice this edition derives by FILTERING the 1830-day one rather
+ * summary slice (`SUMMARY_WINDOW_DAYS`, 765 days since #354) this edition
+ * derives by FILTERING the 1830-day one rather
  * than fetching it a second time.
  *
  * Personal has no `data_version` and no `withUserWrite` to hang invalidation

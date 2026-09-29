@@ -7,6 +7,7 @@ const {
   computeWeekdays, computeWeekdayByMonth, computeFrequency, computeScores, computeStats,
   summaryStats, computeCoverage, computeResilience,
   computeCategoryStats, computeMissRuns, computeRecovery, SCORE_WARMUP_DAYS, creditAnchor,
+  SUMMARY_WINDOW_DAYS, COMPARE_WINDOW_DAYS, warmStartFor,
   summariseMembers, summariseByCategory,
   isCompleted, dateRange, boundedRange, addDays, daysBetween, toISO, fromISO, MAX_RANGE_DAYS,
   isRealDay, CANONICAL_DATE_RE, TREND_CONVERGED_SCORE,
@@ -2288,11 +2289,85 @@ const CATS = [
   { id: 2, name: 'Admin', color: '#6a1b9a', position: 1 },
 ];
 
-test('SCORE_WARMUP_DAYS is 400, the number /overview already spends', () => {
-  // The literal, not the imported name: both editions' SUMMARY_WINDOW_DAYS is
-  // 400 for the same reason, and a warm-up that quietly widened here would
-  // change every figure on the comparison and nothing else in the suite.
+test('SCORE_WARMUP_DAYS is 400, and it is the warm-up half of what /overview spends', () => {
+  // The literal, not the imported name: a warm-up that quietly widened here
+  // would change every figure on the comparison and nothing else in the suite.
+  // `/overview` spends SUMMARY_WINDOW_DAYS (this plus the page's default year),
+  // pinned in the next case.
   assert.equal(SCORE_WARMUP_DAYS, 400);
+});
+
+test('SUMMARY_WINDOW_DAYS is 765, which is COMPARE_WINDOW_DAYS + SCORE_WARMUP_DAYS (#354)', () => {
+  // Literals on the right of all four, because each imported name compared to
+  // another imported name pins the sum and lets all three drift together. 765
+  // is the span the category page reads a member over at its DEFAULT request;
+  // `/overview` matches it so a row, the header mean and the page's roster are
+  // one figure. `scripts/bench-overview.mjs` reads this declaration as
+  // `const NAME = <digits>`, which is why it is a literal rather than a sum.
+  assert.equal(SUMMARY_WINDOW_DAYS, 765);
+  assert.equal(COMPARE_WINDOW_DAYS, 365);
+  assert.equal(SCORE_WARMUP_DAYS, 400);
+  assert.equal(SUMMARY_WINDOW_DAYS, COMPARE_WINDOW_DAYS + SCORE_WARMUP_DAYS);
+});
+
+test('warmStartFor opens at the first real entry when that is later than warmStart, and at warmStart when it is not', () => {
+  const warmStart = '2026-01-01';
+  // A real first entry after warmStart: the habit did not exist before it.
+  assert.equal(warmStartFor('2026-03-05', ['2026-03-05', '2026-04-01'], warmStart), '2026-03-05');
+  // A real first entry BEFORE warmStart: the warm-up is what bounds it.
+  assert.equal(warmStartFor('2025-06-01', ['2026-02-01'], warmStart), '2026-01-01');
+  // Phantom lifetime first entry, real rows in the slice: the earliest real
+  // row is the anchor — never the phantom, which is not a day the habit lived.
+  assert.equal(warmStartFor('2024-99-99', ['2026-05-09', '2026-04-02', '2026-06-01'], warmStart), '2026-04-02');
+  // ...and warmStart when that earliest real row is not later than it.
+  assert.equal(warmStartFor('2024-99-99', ['2025-12-01', '2026-04-02'], warmStart), '2026-01-01');
+  // A phantom sitting among the slice's dates is skipped too.
+  assert.equal(warmStartFor('2024-99-99', ['2026-02-30', '2026-04-02'], warmStart), '2026-04-02');
+  // Nothing anchoring it: null lifetime first entry over an empty slice.
+  assert.equal(warmStartFor(null, [], warmStart), '2026-01-01');
+  assert.equal(warmStartFor('2024-99-99', [], warmStart), '2026-01-01');
+  // The slice may be any iterable — `computeCategoryStats` hands a Map's keys.
+  assert.equal(warmStartFor(null, new Map([['2026-07-04', 1]]).keys(), warmStart), '2026-07-04');
+});
+
+test('/overview\'s window reads a sparse habit at the page\'s own figure, not the 400-day slice\'s (#354)', () => {
+  // The issue's measured shape: a perfect boolean 1x/365d habit 700 days old,
+  // its two rows at 699 and 334 days back. Scored over only the last 400 days
+  // its window opened at the SECOND row, at 0.6074; the page scores it from
+  // its first entry, 0.858236. `summaryStats` over the 765-day slice with
+  // `start` from `warmStartFor` is what both editions' `/overview` now does,
+  // so it must equal the page's roster score for the same habit.
+  const end = '2026-09-28';
+  const habit = { ...boolHabit, id: 41, name: 'Annual', category_id: 1,
+    freq_numerator: 1, freq_denominator: 365 };
+  const birth = addDays(end, -699);
+  const rows = [
+    { date: birth, value: YES, status: '' },
+    { date: addDays(end, -334), value: YES, status: '' },
+  ];
+  const cutoff = addDays(end, -765);
+  const slice = rows.filter((r) => r.date >= cutoff);
+
+  const row = summaryStats(habit, slice, {
+    end, unlogged: 'miss', creditFrom: creditAnchor(birth, end), birth,
+    start: warmStartFor(birth, slice.map((e) => e.date), cutoff),
+  });
+
+  const page = computeCategoryStats(CATS, [
+    { habit, entries: rows, firstEntry: birth, firstAnswer: birth },
+  ], { start: addDays(end, -365), end }).categories[0].roster[0].score;
+
+  assert.equal(Math.round(row.score * 1e6) / 1e6, 0.858236);
+  assert.equal(row.score, page,
+    'the dashboard row and the category page score one habit over one window');
+
+  // The 400-day slice with no `start` is the old behaviour and is not equal:
+  // this is what the case above would read with the fix taken out.
+  const old400 = addDays(end, -400);
+  const stale = summaryStats(habit, rows.filter((r) => r.date >= old400), {
+    end, unlogged: 'miss', creditFrom: creditAnchor(birth, end), birth,
+  });
+  assert.equal(Math.round(stale.score * 1e4) / 1e4, 0.6074);
 });
 
 test('a category\'s mean is the mean of its members\' own strengths, warmed up the way their own pages are', () => {

@@ -1281,7 +1281,11 @@ zero is wrong until the row is fixed, where a STORED zero is wrong until
 something invalidates it, and nothing about `2026-07-99` ever changes on its
 own. The anchor is `earliestRealDay(entryMap.keys())` now, the same refusal
 `firstStatedAnswer` and `creditAnchor` already apply, which also means the
-function no longer depends on its caller's row order.
+function no longer depends on its caller's row order. (Given a `birth`, the scan
+opens at `warmStartFor(birth, ..., summaryEnd - STREAK_HISTORY_DAYS)` since
+#354 — the same rule as the summary window, so `bestStreak >= currentStreak` is
+structural; `earliestRealDay` is still what it falls back on, and is what
+`warmStartFor` itself uses when the lifetime first row is absent or a phantom.)
 
 **One of the two already had a test that caught it, and that is the part worth
 remembering.** The salvaged draft's own `test:summarycache` asserts that a

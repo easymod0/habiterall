@@ -749,8 +749,9 @@ about the same habit is indistinguishable from one of them being broken, and it
 is the user who has to decide which. So each member's series is computed over
 `[start - SCORE_WARMUP_DAYS, end]` and sliced back to `[start, end]`, with
 `SCORE_WARMUP_DAYS = 400` — the number both editions' `/overview` already
-spends on the same problem as `SUMMARY_WINDOW_DAYS`, declared once in
-`stats.js` and imported by both routes rather than spelled twice.
+spent on the same problem as `SUMMARY_WINDOW_DAYS` when this was written (that
+constant is 765 since #354, this one plus `COMPARE_WINDOW_DAYS`), declared once
+in `stats.js` and imported by both routes rather than spelled twice.
 
 **And it is clamped forward to the member's own first entry, which the first
 version was not.** The same sentence that justifies the warm-up justifies the
@@ -1342,8 +1343,9 @@ A route of its own would recompute — and recomputing is the only way it could
 disagree. Joining the member list client-side out of `/overview`'s per-habit
 `score` looks cheaper still and is the worse of the two: `/categories/stats`
 runs over 365 days (`COMPARE_WINDOW_DAYS`) with a 400-day warm-up in front of
-it, while `/overview` anchors its own 400-day `SUMMARY_WINDOW_DAYS` on today.
-Two windows on one page, and the visible symptom is not an abstraction leak —
+it, while `/overview` anchored its own 400-day `SUMMARY_WINDOW_DAYS` on today
+(765 and the page's own window since #354 — see "Resolved by #354" below). Two
+windows on one page, and the visible symptom is not an abstraction leak —
 the member strengths printed under a mean would not average to it. Phase 3
 already paid for the lesson in the opposite direction (the warm-up exists
 because a comparison and a habit's own page disagreeing about one habit is
@@ -1360,8 +1362,8 @@ spread and the roster on ONE page consistent with each other; it says nothing
 about the other surface, and the header is exactly the second window the
 paragraph above refuses. `summariseByCategory` aggregates `/overview`'s
 per-habit `score`, which `summaryStats` computes over a fixed
-`SUMMARY_WINDOW_DAYS` (400) anchored on today with **no forward clamp to the
-member's own first entry**; `computeCategoryStats` runs `COMPARE_WINDOW_DAYS`
+`SUMMARY_WINDOW_DAYS` (400 when this was written; #354 changed it, below)
+anchored on today with **no forward clamp to the member's own first entry**; `computeCategoryStats` runs `COMPARE_WINDOW_DAYS`
 (365) plus `SCORE_WARMUP_DAYS` (400) and clamps forward per member. For a habit
 younger than 400 days the two coincide on an at-least member — the days before
 its birth credit 0 and leave the EWMA at 0 either way, which is the same
@@ -1395,11 +1397,59 @@ means one of them changing window, which is a decision about what a category's
 strength is "as of" rather than a wiring fix, and it is not this issue's:
 `/overview` cannot afford `computeCategoryStats`' warm-up per habit per load,
 and moving this page onto `/overview`'s window is the client-side join refused
-above. So it is written down here instead, and **no test asserts the two
-surfaces are equal** — `comparecheck.mjs` says so at the point where such a
+above. So it was written down here instead, and **no test asserted the two
+surfaces were equal** — `comparecheck.mjs` said so at the point where such a
 check would sit, because the fixture's habits are daily and days old, exactly
 the shape where both windows collapse onto one range and an equality assertion
 would pin a coincidence.
+
+**Resolved by #354 (2026-09-28).** `/overview` took option (a): it adopts the
+page's window. It fetches and scores over `SUMMARY_WINDOW_DAYS`, now 765
+(`COMPARE_WINDOW_DAYS` plus `SCORE_WARMUP_DAYS`, the span of the page's default
+reading), and hands `summaryStats` a `start` from `warmStartFor` — the same
+function `computeCategoryStats` clamps each member with — so the dashboard's
+rows, its section headers and this page are one figure at the page's default
+request. The table above, after, with the same fixture (a perfect habit 700 days
+old, `freq_numerator: 1`, alone in its category):
+
+| `freq_denominator` | this page | dashboard header, before | dashboard header, after |
+|---|---|---|---|
+| 30 | 0.998902 | 98% | 0.998902 |
+| 90 | 0.980439 | 85% | 0.980439 |
+| 365 | 0.858236 | 61% | 0.858236 |
+
+The cost is `summaryStats` at 0.313 → 0.588 ms per habit, and only for a habit
+older than 400 days; a younger one already fitted in the old window. A habit with
+no rows at all still passes no `start`, so its one-day window and its "recently
+missed sorts it as missed today" behaviour are unchanged. What remains is the
+page against a habit's own LIFETIME page past 765 days (a 1200-day 1/365 habit
+reads 0.730637 against 0.9649), and that is the page's own design, not this
+gap.
+
+Two things the first cut got wrong, recorded because each looked finished:
+
+- **The first cut opened the summary window by `warmStartFor` and left the
+  streak scan on its slice's earliest row.** For an at-most `success` habit with
+  a very old first row and a next row more than 765 days later, the window then
+  reached back to `end - 765` and credited every unanswered day, while
+  `recomputeBestStreak` — opening at the earliest row inside its own 1830-day
+  slice — could not see the first row, and started at the later one. It read
+  `currentStreak` 766 against `bestStreak` 9 (cloud's "PhantomCloud 270"
+  fixture). `bestStreak >= currentStreak` had held only because both used to open
+  at the earliest row inside their own slices and one slice contained the other.
+  The scan now takes the same anchor, `warmStartFor` over `STREAK_HISTORY_DAYS`,
+  which makes the invariant structural rather than a coincidence of two widths.
+- **With an explicit `start`, `resolveWindow`'s slice-derived credit date
+  collapses to `start`,** so whether a habit answered before the window can no
+  longer be read off the slice at all. `/overview`'s lifetime `creditFrom` (from
+  `creditAnchor` over the `MIN` of the habit's answered rows) is now the only
+  thing that tells a habit answered before the window from a skip-only one, and
+  the #223 fixture that pinned it had stopped testing that shape: `Wine 223`'s
+  answer sat 500 days back, which the 765-day window contains. It now sits 900
+  days back, outside the window, and the fixture pins it at the window's width —
+  the overview's `currentStreak` is 766 against the lifetime page's 901, and
+  `score` is 1 on both. Swapping `creditFrom` for a slice-derived one makes those
+  checks fail by name.
 
 `roster` is returned unconditionally rather than behind an opt-out like
 `coverage`. `coverage` earns its flag by being its own pass (~10-11% of a call,

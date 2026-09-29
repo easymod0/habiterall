@@ -2722,7 +2722,7 @@ every habit's stored position into that order, and the same reason gates the
 Android app's own **Reorder habits** menu item. **Recently missed**, under the
 default "unlogged counts as a miss" setting, treats a habit you have never
 logged at all as missed *today*, so a brand-new habit sorts to the top under
-it, and a miss further back than 400 days reads the same as never having
+it, and a miss further back than 765 days reads the same as never having
 missed at all — that being the window the dashboard already computes each
 row's strength and current streak over. A habit with an "unlogged counts as
 kept" override — an At most habit set that way, or an account with that as its
