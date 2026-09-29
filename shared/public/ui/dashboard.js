@@ -36,7 +36,10 @@ import { SKIP } from '/shared/ui/values.js';
 import * as views from '/shared/ui/views.js';
 import { GRID_DAYS, gridColumns } from '/shared/ui/window.js';
 import { open as openHabit } from '/shared/ui/detail.js';
-import { syncEntry as syncCompareEntry } from '/shared/ui/categories.js';
+// A one-way edge: `ui/categories.js` imports `store`, `views` and `routes` and
+// never this file, so widening this to the category page's own opener adds no
+// cycle.
+import { openCategory, syncEntry as syncCompareEntry } from '/shared/ui/categories.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -626,10 +629,14 @@ function canReorder({ showArchived, filtering, grouped, sort, count }) {
 
 export function paint() {
   state.openHabitId = null;
-  // ...and neither is the comparison, which this paint is about to cover. Set
-  // beside `openHabitId` because the two answer one question between them —
-  // see the note on the field in `ui/store.js`.
+  // ...and neither is the comparison, which this paint is about to cover, nor
+  // one category's own page. Set beside `openHabitId` because the three answer
+  // one question between them — see the note on the fields in `ui/store.js`.
+  // Left set, `dashboardShowing()` goes on answering false with the list on
+  // screen, and every guard that asks it declines: the 'change' repaint, the
+  // breakpoint reflow, the day-change refetch.
   state.openCategories = false;
+  state.openCategoryId = null;
   // The top-bar entry point to that comparison, which `ui/categories.js`
   // owns: this is the one place that runs after `state.categories` has been
   // refreshed. Not every category mutation ends in a 'reload' any more —
@@ -801,29 +808,54 @@ const pct = (v) => `${Math.round(v * 100)}%`;
  * all — and so does `summary.members === 0`: `/overview` only fetches
  * active habits, so a category every member of which is archived arrives
  * with `members: 0` too, and is not told apart from an empty one.
+ *
+ * A real category's header is a way into that category's own page
+ * (`#/category/<id>`); Uncategorised's is not, because there is no such page
+ * for a state a habit is IN (`shared/CLAUDE.md`) — so it is also not drawn to
+ * look like one.
  */
 function sectionHeader(name, color, count, categoryId, summary) {
-  const header = document.createElement('div');
-  header.className = 'category-section-header' + (categoryId == null ? ' uncategorised' : '');
-  header.dataset.categoryId = categoryId == null ? '' : String(categoryId);
+  // The ARIA Authoring Practices heading-wraps-button pattern. The heading
+  // element is built UNCONDITIONALLY and identically for every section —
+  // only its single child differs — for the same reason `role="heading"` was
+  // unconditional when this was one element: the markup must not change shape
+  // depending on whether a summary happens to be present, or on whether this
+  // section has a page behind it.
+  //
   // A bare `<div>` maps to role="generic", which ARIA specifies as
   // name-prohibited — confirmed against this app's own accessibility tree
   // (CDP `Accessibility.getPartialAXTree`, see `categorycheck.mjs`): a
   // generic element here is never reachable by a screen reader's "next
   // heading" navigation and never reports a `level`, whatever its
-  // `aria-label` says. `role="heading"` is the honest fix: this element IS
-  // the heading of a section of the list, and it is set unconditionally —
-  // for every header, summarised or not — so the markup does not change
-  // shape depending on whether a summary happens to be present. Level 2:
-  // `#view-list` carries no page-title heading of its own (unlike
-  // `#view-categories`'s own `<h2>`), so this is the first heading reached
-  // inside it, directly under the app's own `<h1>` in index.html's topbar —
-  // level 3 would skip a level.
-  header.setAttribute('role', 'heading');
-  header.setAttribute('aria-level', '2');
+  // `aria-label` says. Level 2: `#view-list` carries no page-title heading of
+  // its own (unlike `#view-categories`'s own `<h2>`), so this is the first
+  // heading reached inside it, directly under the app's own `<h1>` in
+  // index.html's topbar — level 3 would skip a level. The role stays on this
+  // wrapper rather than moving onto the button, because an element cannot be
+  // both the heading and the control it contains.
+  const heading = document.createElement('div');
+  heading.className = 'category-section-heading';
+  heading.setAttribute('role', 'heading');
+  heading.setAttribute('aria-level', '2');
+
+  // `.category-section-header` stays the class on the INNER element in both
+  // branches — it is what every layout rule, browser check and
+  // `responsive.mjs` selector already names — and so does `data-category-id`.
+  const header = document.createElement(categoryId == null ? 'div' : 'button');
+  header.className = 'category-section-header' + (categoryId == null ? ' uncategorised' : '');
+  header.dataset.categoryId = categoryId == null ? '' : String(categoryId);
+  if (categoryId != null) {
+    /** @type {HTMLButtonElement} */ (header).type = 'button';
+    // `paint()` rebuilds `#grid` with `replaceChildren()` on every keystroke,
+    // so a rebuilt control keeps focus by what it IS and never by where it
+    // sat (`shared/public/CLAUDE.md`).
+    header.dataset.focusKey = `section:${categoryId}`;
+    header.addEventListener('click', () => openCategory(categoryId));
+  }
   // Same custom property the category chips set (habit-dialog.js) — a border
   // has to stay legible whatever the category's own colour is, so it is
-  // never a filled background.
+  // never a filled background. It goes on whichever element carries the
+  // border, which is this one in both branches.
   if (color) header.style.setProperty('--chip-color', color);
 
   // Reuses the swatch class the habit dialog's own manage list already
@@ -897,11 +929,26 @@ function sectionHeader(name, color, count, categoryId, summary) {
     header.append(figure);
     // The header is not a table row — there is no cell structure an assistive
     // technology could read the figures against — so the whole sentence is
-    // named here rather than left to be read off the child text nodes.
+    // named here rather than left to be read off the child text nodes. On the
+    // button branch this is the BUTTON's name, and the heading above takes its
+    // own name from its contents.
     header.setAttribute('aria-label', `${name}, ${sentence}`);
   }
 
-  return header;
+  // Decoration, and last so it sits at the end of the row: the button's role
+  // is what announces that this opens something, and a name that is just a
+  // glyph is the failure `categorycheck.mjs` asserts against. Uncategorised
+  // gets none — it has no page, so it must not look like a way in.
+  if (categoryId != null) {
+    const chevron = document.createElement('span');
+    chevron.className = 'category-section-chevron';
+    chevron.setAttribute('aria-hidden', 'true');
+    chevron.textContent = '›';
+    header.append(chevron);
+  }
+
+  heading.append(header);
+  return heading;
 }
 
 /** One habit row, built the same way whether the list is flat or grouped. */

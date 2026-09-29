@@ -88,6 +88,16 @@ export const state = {
   // never as a second hand-written conjunction** — that is the whole reason the
   // predicate exists.
   openCategories: false,
+  // The id of the category whose OWN page is showing, and null otherwise — the
+  // FOURTH answer to the same question, and mutually exclusive with the field
+  // above: `openCategories` stays exactly what it has always been, the
+  // comparison over every category, where this is one category's own page.
+  // Both are cleared by whatever paints over them (`paint()` in
+  // `ui/dashboard.js`, `render()` in `ui/detail.js` and in `ui/categories.js`),
+  // because a stale flag here is the dashboard silently declining to repaint
+  // itself. **Read it through `dashboardShowing()` below, never as a third
+  // hand-written conjunction** — same rule, same reason.
+  openCategoryId: null,
   // null means "use the saved setting". The per-habit toggles set these for
   // the session, so trying a different view does not rewrite your default —
   // same arrangement as calZoom below.
@@ -135,10 +145,12 @@ export const state = {
  * Whether the DASHBOARD is the view the user is looking at.
  *
  * **One question, one predicate, and it is here because it has already been
- * copied wrong.** Six places need it — `app.js` twice (which view a traversal
- * lands on, and whether the browser reminder may reload the list),
- * `dashboard.js` twice (the `'change'` listener and the breakpoint reflow),
- * `settings-dialog.js` once and `habit-dialog.js` five times — and until
+ * copied wrong.** Eight call sites in four modules ask it — `app.js` twice
+ * (which view a traversal lands on, and whether the browser reminder may
+ * reload the list), `dashboard.js` four times (the `'change'` listener, the
+ * breakpoint reflow, the day-change refetch and the guard on opening the day
+ * editor over the list), `settings-dialog.js` once and `habit-dialog.js`
+ * through its one `announce()`, which five presses reach — and until
  * `#/categories` existed they could all spell it `state.openHabitId == null`
  * and be right. Adding a second full-page view made that spelling wrong at
  * every one of them at once, and the two that were missed on the first pass
@@ -151,10 +163,15 @@ export const state = {
  * A function rather than a getter on `state`, so it cannot be spread, cached
  * into a local at render time, or serialised into a payload by accident.
  *
- * A THIRD view means editing this and nothing else. That is the point.
+ * **The third view arrived (#259) and this is the one function it edited** —
+ * `#/category/<id>`, one category's own page, which is not the comparison and
+ * has no habit id to give it away either. That is what the sentence this
+ * paragraph replaces was for: a view is added by adding a clause here, and the
+ * eight call sites above are not touched.
  */
 export function dashboardShowing() {
-  return state.openHabitId == null && !state.openCategories;
+  return state.openHabitId == null && !state.openCategories
+    && state.openCategoryId == null;
 }
 
 /** Fold case and strip the accents, so "cafe" finds "Café". */

@@ -342,10 +342,24 @@ body {
 .grid { display: flex; flex-direction: column; gap: 10px; }
 
 /* One per category, drawn directly into `#grid` when `groupByCategory` is on
-   (dashboard.js). Left border rather than a filled background, for the same
-   reason the category chip's border is — a header has to stay legible
-   whatever the category's own colour is. */
+   (dashboard.js). The heading is the wrapper and the header is its only
+   child — a `<button>` into that category's own page, or, for the trailing
+   Uncategorised section, the plain `<div>` it has always been. The wrapper
+   is markup for the accessibility tree and has no box of its own — it needs
+   no rule, and everything visible below is still on
+   `.category-section-header`.
+
+   Left border rather than a filled background, for the same reason the
+   category chip's border is — a header has to stay legible whatever the
+   category's own colour is. The five button resets come first so the
+   declarations below still win: `font: inherit` would otherwise take the size
+   and the weight with it, and `border: 0` the left border this rule is about. */
 .category-section-header {
+  font: inherit;
+  background: none;
+  border: 0;
+  width: 100%;
+  text-align: left;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -356,9 +370,23 @@ body {
   color: var(--text-dim);
   border-left: 3px solid var(--chip-color, var(--accent));
 }
-.category-section-header:first-child { margin-top: 0; }
+/* Scoped through the wrapper: the header is the only child of its heading, so
+   a bare `.category-section-header:first-child` now matches EVERY section
+   rather than the first one. */
+.category-section-heading:first-child .category-section-header { margin-top: 0; }
 /* The trailing Uncategorised section has no colour of its own to border with. */
 .category-section-header.uncategorised { border-left-color: var(--border); }
+
+/* Only the button branch is a way in, so only it gets the affordances. The
+   Uncategorised header has no page behind it and deliberately looks like
+   nothing you can press. */
+button.category-section-header { cursor: pointer; border-radius: 6px; }
+button.category-section-header:hover { background: var(--surface-2); }
+button.category-section-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.category-section-chevron { flex: none; color: var(--text-dim); }
 .category-section-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .category-section-count { flex: none; color: var(--text-dim); }
 

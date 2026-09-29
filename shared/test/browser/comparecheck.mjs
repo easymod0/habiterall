@@ -15,6 +15,15 @@
  * category, a one-member one, an empty one, one whose only member has never
  * been logged, an archived member, and Uncategorised. Each is a branch in
  * `sectionCard`, and four of them draw a sentence rather than a percentage.
+ *
+ * The block at the bottom is issue #259's half — what ONE category's own page
+ * (`#/category/<id>`) says, which is the same question asked of the other view
+ * `ui/categories.js` owns. It is here rather than in `categorycheck.mjs`
+ * because this suite's seed already holds every shape that page has to draw: a
+ * category with two logged members and a member roster to list them in, and
+ * one whose only member has never been logged, which is the row that must say
+ * so rather than read 0%. Where the URL goes and how many history entries it
+ * costs is `routecheck.mjs`, as before.
  */
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,7 +31,9 @@ import { join } from 'node:path';
 import {
   closeChrome, devtoolsPort, devtoolsUrl, launchChrome, reloadAndWaitFor, waitUntil,
 } from './chrome.mjs';
-import { SPREAD_ARCHIVED_HABIT, seedCategorySpread } from './fixtures.mjs';
+import {
+  SPREAD_ARCHIVED_HABIT, SPREAD_UNLOGGED_HABIT, seedCategorySpread,
+} from './fixtures.mjs';
 
 const APP = process.env.BASE ?? 'http://localhost:3000';
 const PORT = devtoolsPort(9326);
@@ -578,6 +589,309 @@ try {
     const made = habits.find(h => h.name === ${JSON.stringify(NEW_HABIT)});
     if (made) await fetch('/api/habits/' + made.id, { method: 'DELETE' });
   })()`);
+
+  /* ---------- issue #259: what ONE category's own page says ---------- */
+
+  console.log('\n--- a category on its own page ---');
+
+  // The way in is the dashboard's grouped section header, which `paint()`
+  // draws only while `groupByCategory` is on. Written before the navigation
+  // below, not after: `settings.init()` runs once per page load and `paint()`
+  // reads the answer it cached.
+  await ev(`fetch('/api/settings', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupByCategory: true }) })`);
+
+  const PAGE_ID = spread.wellbeing.id;
+
+  /**
+   * **The view unhidden, with a card that is NOT a comparison card and has a
+   * real box.**
+   *
+   * Both category views render into `#view-categories`, and the loser's nodes
+   * survive in it until the winner's `replaceChildren()` runs — so "a card is
+   * present" is satisfied by the comparison this page is replacing, and a
+   * measurement taken then is of the wrong render. `:not(.compare-card)` is
+   * what makes this about `renderOne`, exactly as the `READY` predicate above
+   * is about `render`.
+   */
+  const PAGE_READY = `(() => {
+    const view = document.getElementById('view-categories');
+    if (!view || view.hidden) return false;
+    if (view.querySelector('.compare-card')) return false;
+    const c = view.querySelector('.card');
+    return !!c && c.getBoundingClientRect().width > 0;
+  })()`;
+
+  /**
+   * What the page drew, in one read.
+   *
+   * **Every selector is scoped to a member ROW, and none of them names
+   * `.compare-member-label`.** The spread's own reader at the top of this file
+   * dereferences that class on every `.compare-member` it finds, and a roster
+   * row deliberately has no label element at all — `member(null, m)` — so
+   * reusing it here would throw rather than fail. The `a, button` count is
+   * scoped the same way and for the opposite reason: the page's own Back
+   * control IS a `<button>` and has to stay one, so a count over the whole
+   * view would assert the reverse of what this claims.
+   */
+  const PAGE_READ = `(() => {
+    const view = document.getElementById('view-categories');
+    const rows = [...view.querySelectorAll('.compare-member')];
+    return {
+      title: view.querySelector('h2').textContent,
+      sub: view.querySelector('.habit-sub').textContent,
+      mean: view.querySelector('.compare-mean').textContent,
+      notes: [...view.querySelectorAll('.compare-note')].map(n => n.textContent),
+      subhead: view.querySelector('.card-subhead')
+        ? view.querySelector('.card-subhead').textContent : null,
+      cards: view.querySelectorAll('.card').length,
+      rows: rows.map(r => ({
+        tag: r.tagName,
+        name: r.querySelector('.compare-member-name').textContent,
+        score: r.querySelector('.compare-member-score').textContent,
+        controls: r.querySelectorAll('a, button, [href]').length,
+      })),
+      links: view.querySelectorAll('a, [href]').length,
+      hash: location.hash,
+      list: !document.getElementById('view-list').hidden,
+      page: !document.getElementById('view-categories').hidden,
+    };
+  })()`;
+
+  const headerSelector =
+    `#grid .category-section-header[data-category-id="${PAGE_ID}"]`;
+  await reloadAndWaitFor(ev,
+    `location.hash === '' && !document.getElementById('view-list').hidden
+       && !!document.querySelector('${headerSelector}')`,
+    {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the grouped dashboard, with a section header to open',
+    });
+
+  const pageData = await ev(
+    `fetch('/api/categories/stats?granularity=week').then(r => r.json())`);
+  const pageSection = pageData.categories.find((c) => c.id === PAGE_ID);
+
+  await ev(`document.querySelector('${headerSelector}').click()`);
+  await waitUntil(ev, PAGE_READY, { what: "the category's own page to render" });
+  const page = await ev(PAGE_READ);
+
+  ck('the section header opens that category, and the page names it',
+    page.page && !page.list && page.title.includes(spread.wellbeing.name)
+    && page.hash === `#/category/${PAGE_ID}`, JSON.stringify(page.title));
+
+  /* -- the roster: every member, with its own strength -- */
+
+  // `roster.length === members` is the payload's own invariant (`stats.js`),
+  // and the page has to spend all of it: a view that dropped the never-logged
+  // members, or listed only `best` and `worst`, draws a shorter list against
+  // the count printed above it.
+  ck('every active member is listed, and the list is the whole roster',
+    page.rows.length === pageSection.roster.length
+    && page.rows.length === pageSection.members,
+    `${page.rows.length} rows, roster ${pageSection.roster.length}, `
+    + `members ${pageSection.members}`);
+  ck('...in the order the payload listed them, each with its own strength',
+    page.rows.every((r, i) => r.name === pageSection.roster[i].name
+      && r.score === (pageSection.roster[i].score === null
+        ? 'never logged' : pct(pageSection.roster[i].score))),
+    JSON.stringify({ drawn: page.rows.map(r => [r.name, r.score]),
+                     server: pageSection.roster.map(m => [m.name, m.score]) }));
+  // The archived member is in this category and in neither the roster nor the
+  // count — the same claim the comparison's card makes above, asked of the
+  // surface that now LISTS the members rather than summarising them.
+  ck('and the archived member is listed nowhere',
+    !page.rows.some((r) => r.name === SPREAD_ARCHIVED_HABIT),
+    JSON.stringify(page.rows.map(r => r.name)));
+
+  /* -- and none of those rows is a way anywhere -- */
+
+  // **The invariant, not a style preference**, which is why it is asserted on
+  // the rendered TAG NAMES. The app is exactly one fragment entry deep
+  // (`ourEntry` is a single boolean, `go(LIST)` a single `history.back()`), so
+  // `dashboard → category → habit` would be two of ours and Back out of that
+  // habit would land on `#/category/N` with the dashboard painted underneath.
+  // Lifting that ceiling is issue #348.
+  ck('THE assertion: no member row is an <a> or a <button>',
+    page.rows.length > 0
+    && page.rows.every((r) => r.tag === 'DIV' && r.controls === 0),
+    JSON.stringify(page.rows.map(r => [r.tag, r.controls])));
+  // Counted over the whole view as well, so a link added anywhere on the page
+  // — in the header, in a note — trips it. `[href]` and not `button`: the Back
+  // control is a button and must remain one.
+  ck('...and the page as a whole links to no habit',
+    page.links === 0, `${page.links} link(s)`);
+
+  /* -- one arithmetic, one surface -- */
+
+  // The page draws what `/categories/stats` computed and nothing of its own:
+  // the figure, the members under it and the chart all come out of the one
+  // reply, which is what keeps the mean and the roster printed beneath it the
+  // same arithmetic.
+  ck('the mean on the page is the mean the server computed',
+    page.mean === pct(pageSection.mean),
+    `drew ${page.mean}, server said ${pct(pageSection.mean)}`);
+
+  // **There is deliberately NO cross-surface check against the dashboard's own
+  // section header here, and its absence is the honest answer rather than a
+  // gap.** That header's mean comes from `/overview`'s `categorySummaries` —
+  // `summariseByCategory` over `summaryStats`, a fixed 400-day window anchored
+  // on today with no forward clamp to a member's first entry — while this page
+  // is `COMPARE_WINDOW_DAYS` (365) plus a 400-day warm-up, clamped forward per
+  // member. Two windows, so the two numbers are not equal in general: measured
+  // through `computeCategoryStats` and `summaryStats` + `summariseByCategory`
+  // for a habit kept perfectly since its first day, `freq_numerator: 1` and
+  // 700 days old, this page reads 100% / 99% / 98% at denominators 30 / 60 /
+  // 90 where the header reads 98% / 94% / 85% — and `LIMITS.freqDenominator`
+  // is 365, so those are ordinary habits.
+  // The disagreement is pre-existing — both surfaces are on master and #259
+  // moved neither — and an equality assertion here would pass only because
+  // this suite's fixtures are daily habits days old, where both windows
+  // collapse onto the same range: a coincidence of the fixture pinned as a
+  // rule. `docs/decisions/categories.md` phase 6 records the limitation.
+
+  // The sentence under it is `sectionFigure`'s, shared with the comparison
+  // rather than written twice — so a second wording would show up here.
+  ck('and it says what it is over, in the comparison\'s own words',
+    page.notes[0] === `over ${pageSection.members} habits`,
+    JSON.stringify(page.notes));
+
+  /* -- a phone turned sideways is not a navigation, here either -- */
+
+  // `dashboard.js`'s `matchMedia('(max-width: 640px)')` listener calls
+  // `paint()`, which SHOWS the list and unwinds the fragment — guarded only by
+  // `dashboardShowing()`, which is the one function #259 edited. 900 then 360,
+  // so the crossing is unambiguously the second call.
+  await send('Emulation.setDeviceMetricsOverride',
+    { width: 900, height: 800, deviceScaleFactor: 1, mobile: false }, sessionId);
+  await sleep(200);
+  await send('Emulation.setDeviceMetricsOverride',
+    { width: 360, height: 800, deviceScaleFactor: 1, mobile: false }, sessionId);
+  // A settle, not a poll: what is asserted is that something did NOT happen.
+  await sleep(700);
+  const pageAfterRotate = await ev(`(() => ({
+    matched: window.matchMedia('(max-width: 640px)').matches,
+    page: !document.getElementById('view-categories').hidden,
+    list: !document.getElementById('view-list').hidden,
+    hash: location.hash,
+  }))()`);
+  ck('control: the viewport really did cross the 640px breakpoint',
+    pageAfterRotate.matched === true, JSON.stringify(pageAfterRotate));
+  ck('THE assertion: crossing it does not paint the dashboard over the category page',
+    pageAfterRotate.page === true && pageAfterRotate.list === false
+    && pageAfterRotate.hash === `#/category/${PAGE_ID}`,
+    JSON.stringify(pageAfterRotate));
+
+  await send('Emulation.clearDeviceMetricsOverride', {}, sessionId);
+  await sleep(300);
+
+  /* -- saving a habit from here redraws this page, it does not leave it -- */
+
+  // `#btn-new` is in `auth-session.js`'s SIGNED_IN_ONLY and nothing hides it
+  // per view, so the habit dialog opens over this page. Two things have to
+  // hold and they fail differently: `announce()` must emit `'change'` rather
+  // than `'reload'` (which means "go to the dashboard"), and this module's
+  // `'change'` listener must answer for THIS view as well as the comparison —
+  // without that the page stays up and stale, showing a roster the save just
+  // changed.
+  const PAGE_HABIT = 'Zzz Category Page Created';
+  await ev(`document.getElementById('btn-new').click()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === true`,
+    { what: 'the habit dialog over the category page' });
+  await ev(`document.querySelector('#habit-form [name=name]').value = ${JSON.stringify(PAGE_HABIT)}`);
+  // By the option's TEXT, not by an id assumed to be its value — the same way
+  // `categorycheck.mjs` picks a category out of this select.
+  await ev(`(() => {
+    const select = document.querySelector('#habit-form [name=category_id]');
+    const opt = [...select.options].find(o => o.textContent === ${JSON.stringify(spread.wellbeing.name)});
+    select.value = opt.value;
+  })()`);
+  await ev(`document.getElementById('habit-form').requestSubmit()`);
+  await waitUntil(ev, `document.getElementById('habit-dialog').open === false`,
+    { what: 'the habit dialog to close' });
+
+  // The ROSTER gaining the row, not merely the view still being there: a
+  // listener that skipped the refetch would leave this page up and stale,
+  // which is a different bug wearing the same face. Swallowed, so the
+  // assertions below report what actually happened rather than a timeout.
+  await waitUntil(ev, `(() => {
+    const view = document.getElementById('view-categories');
+    if (view.hidden) return false;
+    return [...view.querySelectorAll('.compare-member-name')]
+      .some(n => n.textContent === ${JSON.stringify(PAGE_HABIT)});
+  })()`, { what: 'the new member to appear on the roster' }).catch(() => {});
+
+  const afterSave = await ev(PAGE_READ);
+  ck('THE assertion: saving a habit from a category page stays on that page',
+    afterSave.page === true && afterSave.list === false
+    && afterSave.hash === `#/category/${PAGE_ID}`,
+    JSON.stringify({ page: afterSave.page, list: afterSave.list, hash: afterSave.hash }));
+  ck('...and the page refetched, so the member it just gained is on the roster',
+    afterSave.rows.length === page.rows.length + 1
+    && afterSave.rows.some((r) => r.name === PAGE_HABIT),
+    JSON.stringify({ before: page.rows.map(r => r.name),
+                     after: afterSave.rows.map(r => r.name) }));
+  // A habit created moments ago has no entry, so it is in `members` and in
+  // `unloggedExcluded` and in no figure — the roster is where the payload's
+  // `score: null` becomes a sentence, and it must not be a percentage.
+  ck('...saying so in words, because it has never been logged',
+    afterSave.rows.find((r) => r.name === PAGE_HABIT)?.score === 'never logged',
+    JSON.stringify(afterSave.rows.map(r => [r.name, r.score])));
+
+  await ev(`(async () => {
+    const habits = await (await fetch('/api/habits')).json();
+    const made = habits.find(h => h.name === ${JSON.stringify(PAGE_HABIT)});
+    if (made) await fetch('/api/habits/' + made.id, { method: 'DELETE' });
+  })()`);
+
+  /* -- a category whose only member has never been logged -- */
+
+  // The same row shape reached the other way: 'Just started' holds one habit
+  // the fixtures never log, so this page has a roster of exactly one and no
+  // mean at all. Reached by pressing the page's own Back — which announces
+  // `'reload'` rather than navigating, the dashboard owning its own loading —
+  // and then the other section's header.
+  await ev(`document.querySelector('#view-categories .detail-head button').click()`);
+  const freshSelector =
+    `#grid .category-section-header[data-category-id="${spread.fresh.id}"]`;
+  await waitUntil(ev,
+    `location.hash === '' && !document.getElementById('view-list').hidden
+       && !!document.querySelector('${freshSelector}')`,
+    { what: 'the dashboard again, with the never-logged category on it' });
+  await ev(`document.querySelector('${freshSelector}').click()`);
+  await waitUntil(ev, PAGE_READY, { what: "the never-logged category's page" });
+
+  const freshPage = await ev(PAGE_READ);
+  const freshSection = await ev(
+    `fetch('/api/categories/stats?granularity=week').then(r => r.json())`
+  ).then((d) => d.categories.find((c) => c.id === spread.fresh.id));
+
+  ck('a category whose only member has never been logged still lists that member',
+    freshPage.rows.length === 1 && freshPage.rows[0].name === SPREAD_UNLOGGED_HABIT
+    && freshSection.roster.length === 1 && freshSection.roster[0].score === null,
+    JSON.stringify({ drawn: freshPage.rows, server: freshSection.roster }));
+  // **THE row.** `null` is the absence of a strength, not a strength of zero —
+  // the claim the payload makes by sending `null` and the figure above makes
+  // by leaving the member out of the mean. A bare dash is refused too: that
+  // reads as a figure that failed to load.
+  ck('THE assertion: it says so in words, and does NOT read 0%',
+    freshPage.rows[0].score === 'never logged'
+    && !freshPage.rows[0].score.includes('%') && freshPage.rows[0].score !== '—',
+    JSON.stringify(freshPage.rows[0]));
+  ck('and the figure above it is the em dash with the reason the comparison gives',
+    freshPage.mean === '—'
+    && freshPage.notes.includes('1 habit, never logged — no strength to average.'),
+    JSON.stringify({ mean: freshPage.mean, notes: freshPage.notes }));
+  ck('...and that row is not a way anywhere either',
+    freshPage.rows[0].tag === 'DIV' && freshPage.rows[0].controls === 0
+    && freshPage.links === 0, JSON.stringify(freshPage.rows[0]));
+
+  // Left as it was found: `fixtures.reset()` clears settings before the next
+  // suite the runner starts, but a standalone run of this file has no reset.
+  await ev(`fetch('/api/settings', { method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupByCategory: false }) })`);
 
   console.log(fails === 0 ? '\nALL COMPARISON CHECKS PASSED' : `\n${fails} FAILED`);
 } catch (e) {

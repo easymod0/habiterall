@@ -128,6 +128,17 @@ try {
       : `.category-section-header[data-category-id="${found.categoryId}"]`;
   };
 
+  // Issue #259: `.category-section-header` is no longer the heading — it is the
+  // heading's only CHILD, a `<button>` for a real category and the same plain
+  // `<div>` as before for Uncategorised. The wrapper deliberately carries no id
+  // of its own (it is identical for every section, which is the whole point of
+  // the pattern), so the only way to name one from CSS is through the child that
+  // does: `:has()`, which this Chrome has had since 105.
+  const headingSelectorByName = async (name) => {
+    const inner = await headerSelectorByName(name);
+    return inner && `.category-section-heading:has(${inner})`;
+  };
+
   // `!!document.querySelector('#grid .habit-row')` returns the instant the
   // grid holds ANY row — including one left behind by whatever loaded before
   // this navigation settled. 'Meditate' is a fixture habit `reset()` always
@@ -889,8 +900,9 @@ try {
   // `<div>` maps to `role="generic"`, which ARIA marks name-prohibited. This
   // reads the COMPUTED role and name instead, out of the browser's own
   // accessibility tree over CDP (`Accessibility.getPartialAXTree`).
-  // Mutation target: remove the `role="heading"` `sectionHeader` sets, leaving
-  // the `aria-label` in place. The ROLE assertion is the one that is load
+  // Mutation target: remove the `role="heading"`/`aria-level` pair
+  // `sectionHeader` sets on the wrapper, leaving the `aria-label` in place. The
+  // ROLE assertion is the one that is load
   // bearing here: measured directly against this Chrome build, the computed
   // NAME still comes back as the `aria-label` text even with no role at all —
   // this Chromium does not withhold an author-supplied name from a generic
@@ -899,14 +911,73 @@ try {
   // name alone would pass against the unfixed markup. The computed ROLE does
   // not: it reports `generic`, not `heading`, with no `level` property at all,
   // until `role="heading"` is restored.
+  //
+  // Since #259 the role is read off the HEADING WRAPPER and the name off the
+  // `.category-section-header` inside it, which is where the `aria-label` goes
+  // and which is the button on this branch. Reading both off one element is what
+  // stopped being possible: an element cannot be both the heading and the
+  // control it contains.
   const workHeaderSelector = await headerSelectorByName('Work');
+  const workHeadingAx = await axInfo(await headingSelectorByName('Work'));
   const workAx = await axInfo(workHeaderSelector);
   ck('THE assertion: the header is exposed to the accessibility tree as a HEADING, level 2 — not a generic div',
-    workAx?.role === 'heading' && workAx?.level === 2,
-    JSON.stringify({ workAx }));
+    workHeadingAx?.role === 'heading' && workHeadingAx?.level === 2,
+    JSON.stringify({ workHeadingAx, workAx }));
   ck('and its computed accessible name (not just the aria-label attribute) carries the same reason',
     workAx?.name != null && workAx.name.includes('Work') && workAx.name.includes('never logged'),
     JSON.stringify({ workAx, ariaLabelAttribute: figures.work.ariaLabel }));
+
+  /* ---------- issue #259: the section header is a way into the category's
+     own page, and the heading pattern survives it ----------
+
+     The ARIA Authoring Practices heading-wraps-button pattern: a heading
+     element that never changes shape, with one child that does. `Work` is a
+     real category, so its child is a `<button>`; the Uncategorised section
+     below has no page and so keeps the plain `<div>` it always had.
+
+     Mutation targets, each of which must fail exactly one of these:
+       1. drop the wrapping heading `<div>` and put `role="heading"` on the
+          button — the level-2 assertion above fails;
+       2. drop the `<button>` and hang the click listener on the div — the
+          button assertion here fails;
+       3. drop `data-focus-key` — the focus-after-rebuild check below fails. */
+
+  ck('THE assertion: a real category\'s heading contains a BUTTON, not a div with a listener',
+    workAx?.role === 'button', JSON.stringify({ workAx }));
+  // A name that is just the chevron is the failure this guards — the same
+  // shape `gridcheck.mjs` asserts about a `.check` cell's glyph. `Work` is
+  // summarised here, so the name comes from the `aria-label`; the unsummarised
+  // case is asserted on `Fitness` further down, where the name is read off the
+  // button's own child text and the chevron is the only thing in it that is not
+  // prose.
+  ck('...and the button\'s computed name is prose, not the bare chevron glyph',
+    !!workAx?.name && workAx.name.length > 1 && !workAx.name.includes('›'),
+    JSON.stringify({ workAx }));
+
+  // `paint()` rebuilds `#grid` with `replaceChildren()` on every keystroke, so
+  // the control has to come back focused by WHAT IT IS. Focus the header, call
+  // `paint()` (the same rebuild a search keystroke causes, without the typing),
+  // and ask where focus landed — reading the `data-focus-key` ATTRIBUTE alone
+  // would pass against a build that sets it and never restores through it, and
+  // the element under test is a new node either way, so the assertion is on
+  // `matches(sel)` rather than on node identity.
+  const refocused = await ev(`(async()=>{
+    const dash = await import('/shared/ui/dashboard.js');
+    const sel = ${JSON.stringify(workHeaderSelector)};
+    document.querySelector(sel).focus();
+    dash.paint();
+    const active = document.activeElement;
+    return {
+      sameHeader: !!active && typeof active.matches === 'function' && active.matches(sel),
+      key: active && active.dataset ? active.dataset.focusKey ?? null : null,
+      onBody: active === document.body,
+    };
+  })()`);
+  ck('THE assertion: a section header comes back focused after paint() rebuilds #grid',
+    refocused.sameHeader === true, JSON.stringify(refocused));
+  ck('...and the key names what the control IS, never where it sat',
+    typeof refocused.key === 'string' && /^section:\d+$/.test(refocused.key),
+    JSON.stringify(refocused));
   ck('a category with a logged member draws a real mean percentage',
     figures.fitness.mean != null && /^\d+%$/.test(figures.fitness.mean),
     JSON.stringify(figures.fitness));
@@ -945,6 +1016,52 @@ try {
   ck('and its mean matches the same fetch',
     uncategorisedFigure.mean === pctOf(uncategorised.mean),
     JSON.stringify({ uncategorisedFigure, uncategorised }));
+
+  /* ---------- issue #259: Uncategorised is a heading and NOT a way in ----------
+
+     `shared/CLAUDE.md`: Uncategorised is a state a habit is in, never a
+     category it belongs to, so there is no page for it — and a header with
+     nothing behind it must not LOOK like a way in, which is the complaint the
+     issue opens with. The heading element is identical to a real category's;
+     only its single child differs. Mutation target: build the Uncategorised
+     branch with a `<button>` too. */
+
+  const uncategorisedAx = await axInfo('.category-section-header.uncategorised');
+  const uncategorisedHeadingAx = await axInfo(
+    '.category-section-heading:has(.category-section-header.uncategorised)');
+  ck('the Uncategorised header is a heading at level 2, exactly like a real category\'s',
+    uncategorisedHeadingAx?.role === 'heading' && uncategorisedHeadingAx?.level === 2,
+    JSON.stringify({ uncategorisedHeadingAx }));
+  // `uncategorisedAx != null` first: a selector that matched nothing would
+  // otherwise satisfy "is not a button" without having looked at anything.
+  ck('THE assertion: and it contains NO button — it has no page to be a way into',
+    uncategorisedAx != null && uncategorisedAx.role !== 'button',
+    JSON.stringify({ uncategorisedAx }));
+  // The tag name as well as the role, because "not announced as a button" and
+  // "not a button" are different claims and only the second survives somebody
+  // adding `role="presentation"` to keep the first true. No chevron either: the
+  // glyph is the affordance, and drawing one here is the defect this whole
+  // paragraph exists to avoid.
+  const uncategorisedShape = await ev(`(()=>{
+    const header = document.querySelector('#grid .category-section-header.uncategorised');
+    const heading = header ? header.parentElement : null;
+    return {
+      tag: header ? header.tagName : null,
+      headingTag: heading ? heading.tagName : null,
+      headingClass: heading ? heading.className : null,
+      buttons: header ? header.querySelectorAll('button').length : null,
+      chevrons: header ? header.querySelectorAll('.category-section-chevron').length : null,
+      focusKey: header && header.dataset ? header.dataset.focusKey ?? null : null,
+    };
+  })()`);
+  ck('...on the rendered tag name, not only the announced role',
+    uncategorisedShape.tag === 'DIV' && uncategorisedShape.buttons === 0,
+    JSON.stringify(uncategorisedShape));
+  ck('...and it draws no chevron, so nothing about it reads as pressable',
+    uncategorisedShape.chevrons === 0, JSON.stringify(uncategorisedShape));
+  ck('...inside the same unconditional heading wrapper a real category has',
+    uncategorisedShape.headingClass === 'category-section-heading',
+    JSON.stringify(uncategorisedShape));
 
   /* ---------- fix round 1, item 1: a category whose members are all
      archived is not "empty" ----------
@@ -1042,13 +1159,25 @@ try {
   // element's computed name from CONTENT (as opposed to an `aria-label`) comes
   // back genuinely EMPTY, so this one assertion alone would already fail the
   // mutation — the role check is added anyway, for the same reason as above.
+  //
+  // Since #259 the role is read off the wrapper and the name off the button
+  // inside it, for the reason given at the `Work` block above.
   const fitnessAx = await axInfo(await headerSelectorByName('Fitness'));
+  const fitnessHeadingAx = await axInfo(await headingSelectorByName('Fitness'));
   ck('THE assertion: a header with no summary is still exposed as a HEADING, level 2',
-    fitnessAx?.role === 'heading' && fitnessAx?.level === 2,
-    JSON.stringify({ fitnessAx }));
+    fitnessHeadingAx?.role === 'heading' && fitnessHeadingAx?.level === 2,
+    JSON.stringify({ fitnessHeadingAx, fitnessAx }));
   ck('and it still has a usable accessible name, from its own text',
     fitnessAx?.name != null && fitnessAx.name.length > 0 && fitnessAx.name.includes('Fitness'),
     JSON.stringify({ fitnessAx }));
+  // #259: the unsummarised branch is where the name is built from CHILD TEXT,
+  // so it is the one where the chevron could become the whole name — and the
+  // chevron is `aria-hidden`, so it must contribute nothing. A name of `›`
+  // alone is what a dropped `aria-hidden` plus a dropped label would leave.
+  ck('THE assertion: the unsummarised button\'s name is prose, not the aria-hidden chevron',
+    !!fitnessAx?.name && !fitnessAx.name.includes('›'), JSON.stringify({ fitnessAx }));
+  ck('...and it is still a BUTTON with no summary to name it',
+    fitnessAx?.role === 'button', JSON.stringify({ fitnessAx }));
 
   // Same figures, same real `categorySummaries` still sitting in `state` —
   // only the client-side archived flag changes, exactly as `reorderable`

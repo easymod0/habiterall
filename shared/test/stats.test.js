@@ -2948,6 +2948,64 @@ test('a habit with no entries yet is counted in `members` and excluded from the 
   assert.deepEqual(health.best, health.worst);
 });
 
+test('`roster` lists every active member at the strength that fed the mean, and a never-logged one at null', () => {
+  // The member list a category's own page draws, riding on the payload that
+  // already scored every one of them. The point of the test is that it is ONE
+  // arithmetic: the roster's scores are read back against `best`/`worst` out of
+  // the same response rather than against numbers of this test's own, so a
+  // roster rebuilt from a second pass — a different window, a re-derivation —
+  // fails here even when each number looks plausible on its own.
+  const lapsed = { ...boolHabit, id: 23, name: 'Floss', category_id: 1 };
+  const lapsedRows = rowsOn(CAT_HISTORY, CAT_END, YES, (d) => dowOf(d) === 0);
+  const fresh = { ...boolHabit, id: 20, name: 'Fresh start', category_id: 1 };
+  const shelved = { ...readHabit, id: 19, name: 'Shelved', archived: 1 };
+
+  const health = computeCategoryStats(CATS, [
+    { habit: readHabit, entries: readRows },
+    { habit: lapsed, entries: lapsedRows },
+    { habit: fresh, entries: [] },
+    { habit: shelved, entries: readRows },
+  ], CAT_WINDOW).categories[0];
+
+  // The roster is the ACTIVE roster, whole: three members, the archived one in
+  // neither it nor `members`.
+  assert.equal(health.members, 3);
+  assert.equal(health.archivedExcluded, 1);
+  assert.equal(health.roster.length, health.members);
+  assert.equal(health.roster.length, 3);
+  assert.ok(health.roster.every((m) => m.id !== 19),
+    'an archived member is excluded from every figure, and the roster is one of them');
+
+  // In the order the members were handed in — not sorted by strength, because
+  // which end of the list a weak habit belongs at is the view's decision.
+  assert.deepEqual(health.roster.map((m) => m.id), [11, 23, 20]);
+  assert.deepEqual(health.roster.map((m) => m.name), ['Read', 'Floss', 'Fresh start']);
+
+  // A member that has never been logged has no strength, which is not a
+  // strength of zero — the same claim `unloggedExcluded` makes about it.
+  assert.equal(health.unloggedExcluded, 1);
+  const never = health.roster.find((m) => m.id === 20);
+  assert.equal(never.score, null,
+    'a never-logged member is listed, and its strength is null rather than 0');
+
+  // One arithmetic: the two logged members carry exactly the numbers the spread
+  // reports for them, by id.
+  assert.equal(health.best.id, 11, 'the fully-kept member is the strong end');
+  assert.equal(health.worst.id, 23, 'the once-a-week daily habit is the weak end');
+  assert.ok(health.best.score > health.worst.score,
+    `the fixture must have a real spread: ${health.best.score} vs ${health.worst.score}`);
+  for (const end of [health.best, health.worst]) {
+    const entry = health.roster.find((m) => m.id === end.id);
+    assert.equal(entry.score, end.score,
+      `roster says ${entry.score} for ${end.name} and the spread says ${end.score}`);
+  }
+  // ...and those are real, separated readings rather than two members that
+  // happen to agree — a roster of one number would satisfy the loop above.
+  assert.ok(health.best.score > 0.99, `a fully-kept daily habit read ${health.best.score}`);
+  assert.ok(health.worst.score > 0 && health.worst.score < 0.3,
+    `a daily habit kept one day in seven read ${health.worst.score}`);
+});
+
 test('the final bucket and the headline mean are the same number, unconditionally', () => {
   // The property the last-day bucket rule and the landing rule exist to hold
   // together: a chart whose final point disagrees with the number printed over

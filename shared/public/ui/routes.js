@@ -21,7 +21,7 @@
 
 /**
  * @typedef {{view: 'list'} | {view: 'habit', id: number}
- *           | {view: 'categories'}} Route
+ *           | {view: 'categories'} | {view: 'category', id: number}} Route
  */
 
 /** The dashboard: the route with no fragment. @type {Route} */
@@ -48,6 +48,16 @@ const HABIT_RE = /^#?\/habit\/(\d+)$/;
 const CATEGORIES_RE = /^#?\/categories$/;
 
 /**
+ * `#/category/<id>`, and nothing else.
+ *
+ * Anchored at both ends and digits only, for the reason `HABIT_RE` is: this is
+ * a string arriving from outside — a bookmark, a shared link, a typed URL — so
+ * it is matched rather than picked apart. Singular, and it does not overlap
+ * `CATEGORIES_RE`, which carries no id at all.
+ */
+const CATEGORY_RE = /^#?\/category\/(\d+)$/;
+
+/**
  * The route a fragment names.
  *
  * Never throws and never returns null: anything unrecognised is the list,
@@ -59,6 +69,15 @@ const CATEGORIES_RE = /^#?\/categories$/;
 export function parseRoute(hash = '') {
   const text = String(hash).trim();
   if (CATEGORIES_RE.test(text)) return CATEGORIES;
+
+  const category = CATEGORY_RE.exec(text);
+  if (category) {
+    const id = Number(category[1]);
+    // A 30-digit id parses to a float, which is not an id and would be sent to
+    // the server as one. `\d+` alone does not bound what Number() can produce.
+    if (!Number.isSafeInteger(id) || id <= 0) return LIST;
+    return { view: 'category', id };
+  }
 
   const match = HABIT_RE.exec(text);
   if (!match) return LIST;
@@ -81,6 +100,7 @@ export function parseRoute(hash = '') {
 export function hashFor(route) {
   if (route?.view === 'habit') return `#/habit/${route.id}`;
   if (route?.view === 'categories') return '#/categories';
+  if (route?.view === 'category') return `#/category/${route.id}`;
   return '';
 }
 
@@ -123,17 +143,26 @@ let ourEntry = false;
  * pushed; `replaceState` remains for every other case, including the first
  * paint of a cold deep link, where there is nothing of ours to unwind.
  *
- * **The comparison is pushed the same way, and NOTHING here keeps the stack
- * one deep — the views do.** `ourEntry` is a single boolean and the unwind is
- * a single `history.back()`, so both depend on there never being two entries
- * of ours at once. Two rules elsewhere are what make that unreachable rather
- * than merely unlikely: the comparison links to no habit (see
- * `ui/categories.js`), and its top-bar button is absent while a habit is open
- * (`syncEntry`, same file). Do not weaken either without reading this, and do
- * not "fix" a third route by making this function replace instead: a
- * same-document open counts an entry in `WebBackStack.floorAfterShow` on
- * Android, so replacing leaves `currentIndex` AT the floor and the next system
- * Back closes the screen rather than reaching the dashboard.
+ * **The comparison and a category's own page are pushed the same way, and
+ * NOTHING here keeps the stack one deep — the views do.** `ourEntry` is a
+ * single boolean and the unwind is a single `history.back()`, so both depend
+ * on there never being two entries of ours at once. Three rules elsewhere are
+ * what make it unreachable to NAVIGATE into two, rather than merely unlikely:
+ * the comparison links to no habit (see `ui/categories.js`); its top-bar button
+ * is absent while a habit OR a category's own page is open (`syncEntry`, same
+ * file); and a category's own page links to no habit and is reachable only from
+ * the dashboard, never from the comparison. What they do not bound is a
+ * REQUEST that was already in flight when a second view opened: the older reply
+ * lands, renders, and calls this function, which pushes. Each view's own ticket
+ * (`openSeq`, in `ui/categories.js` and in `ui/detail.js`) discards its own
+ * module's stale replies and neither can see the other's, so the cross-view
+ * case is open — pre-existing, and issue **#348**'s to close with a real stack.
+ * Do not weaken any of the three without reading this, and do not "fix" a
+ * fourth route by making this function
+ * replace instead: a same-document open counts an entry in
+ * `WebBackStack.floorAfterShow` on Android, so replacing leaves `currentIndex`
+ * AT the floor and the next system Back closes the screen rather than reaching
+ * the dashboard.
  * `android-native/CLAUDE.md` requires all three back-stack rules to be re-read
  * together and checked on an emulator whenever this function changes, and
  * records that every wrong version still passes `WebBackStackTest`.
@@ -192,11 +221,12 @@ export function init(onRoute) {
   const fire = () => {
     if (location.hash === handled) return;
     handled = location.hash;
-    // Landing on a habit or the comparison means that entry is one we wrote —
-    // nothing else creates one — so it stays unwindable after a Forward as
-    // well as a Back. Asked as "does this route have a fragment" rather than
-    // by naming the two views, which is the same question `go` above asks and
-    // keeps the two from drifting as a third fragment route is added.
+    // Landing on a habit, the comparison or a category's own page means that
+    // entry is one we wrote — nothing else creates one — so it stays
+    // unwindable after a Forward as well as a Back. Asked as "does this route
+    // have a fragment" rather than by naming the views, which is the same
+    // question `go` above asks and keeps the two from drifting as a fragment
+    // route is added — the third one needed nothing here.
     ourEntry = hashFor(parseRoute(location.hash)) !== '';
     onRoute(current());
   };

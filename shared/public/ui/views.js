@@ -37,7 +37,14 @@ export function showDetail() {
   return only(detail);
 }
 
-/** Show the category comparison. @returns its container, for the view to fill */
+/**
+ * Show a category view. **It serves both of them** — the comparison over every
+ * category and one category's own page — because `ui/categories.js` owns the
+ * two and they are never on screen at once, so a second `#view-*` container
+ * would be a second id for one question this file already answers.
+ *
+ * @returns its container, for the view to fill
+ */
 export function showCategories() {
   return only(categories);
 }

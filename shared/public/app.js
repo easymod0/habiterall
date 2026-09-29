@@ -96,6 +96,10 @@ function initRouting() {
       // this view: a traversal that lands on the fragment already showing must
       // not refetch it.
       if (!state.openCategories) categories.open();
+    } else if (route.view === 'category') {
+      // ...and again, against the id: a Forward onto the page already drawn is
+      // the same non-navigation, and the fragment names which category it is.
+      if (route.id !== state.openCategoryId) categories.openCategory(route.id);
     } else if (!dashboardShowing()) {
       // 'reload' rather than a repaint: the dashboard is coming back after a
       // detour, and the entries behind it may have moved since.
@@ -256,6 +260,13 @@ export async function start(adapter) {
       // back to the dashboard rather than leaving a blank page.
       routes.go(routes.LIST);
       if (!await categories.open()) await dashboard.load();
+    } else if (opening.view === 'category') {
+      // The third of the same shape, and the fallback earns its keep here more
+      // than anywhere: this fragment names a category the account may have
+      // deleted since the link was made, which `openCategory` reports as a
+      // refusal rather than an empty page.
+      routes.go(routes.LIST);
+      if (!await categories.openCategory(opening.id)) await dashboard.load();
     } else {
       await dashboard.load();
     }

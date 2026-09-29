@@ -125,7 +125,10 @@ mean strength and the spread between its weakest and strongest habit — the
 same rule for which habits count as the comparison view below — and it steps
 aside while you are searching or showing archived habits, exactly as
 reordering does, rather than draw a mean over a different set of habits than
-the count sitting right beside it.
+the count sitting right beside it. A section header is also a way in: press one
+and it opens that category's own page, described below. The Uncategorised
+header is the exception — it has no page behind it, so it is drawn as a plain
+heading rather than as something to press.
 
 **Compare your categories** — once you have one category, a **▤** button
 (*Compare categories*) appears in the header and opens a card per category: the
@@ -141,6 +144,18 @@ strength *yet* rather than a strength of zero: it is counted and left out of
 the average, so adding a habit to a category never drags that category down on
 the day you decide to do more about it. Archived habits are left out too, and
 the page says how many.
+
+**One category on its own** — pressing a grouped section header opens a page
+for that category alone: the same mean over the same year, the same count and
+the same recovery figure the comparison card shows for it, its strength chart
+at full width, and then every habit in it by name with its own strength. The
+numbers agree because they are the same numbers — the page asks for exactly
+what the comparison asks for and draws one card of the answer — so a member's
+strength is one of the values the mean above it was averaged from. A habit you
+have never logged is listed and says so, rather than reading 0%. The names on
+that list are text and not links: the app keeps exactly one page open above the
+dashboard at a time, so opening a habit from here would leave Back pointing
+somewhere you never were. Uncategorised has no page of its own.
 
 **Undo** — deleting a habit offers an Undo that restores every entry and note.
 
