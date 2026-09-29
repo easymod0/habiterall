@@ -186,7 +186,12 @@ try {
     const r = await flush();
     return { ...r, remaining: await pendingCount() };
   })()`);
-  check('queued writes are sent on reconnect', flushed.sent >= 1, JSON.stringify(flushed));
+  // The page drains its own outbox on the `online` event (`connectivity.js`),
+  // and the half-second above is long enough for that to win on a fast runner,
+  // leaving this call nothing to send. Who sent it is not the claim: that the
+  // queue emptied AND the server holds the write (checked below) is.
+  check('queued writes are sent on reconnect',
+    flushed.sent >= 1 || flushed.remaining === 0, JSON.stringify(flushed));
   check('queue is empty afterwards', flushed.remaining === 0, String(flushed.remaining));
 
   const applied = await ev(`(async()=>{
