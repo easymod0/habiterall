@@ -767,9 +767,17 @@ disagreeing about what was typed.
 clamped in a background tab, a service worker has no wake-at-time event,
 Notification Triggers never shipped, Periodic Background Sync picks its own
 interval. What is built is the honest half: on boot and on `visibilitychange`,
-anything whose reminder time has passed and whose day is still unanswered says
-so. `delivery: 'device'` still fits — `serverChannels` filters on it, so an
-account with only this on costs the tick nothing.
+anything whose reminder time has passed, whose `reminder_days` mask names
+today's weekday, and whose day is still unanswered says so. `delivery: 'device'`
+still fits — `serverChannels` filters on it, so an account with only this on
+costs the tick nothing.
+
+**The weekday gate in `outstanding` sits where the server's does:** after the
+`minutesOfDay` check, before lateness, against the `date` the caller handed in
+(this device's `todayISO()`), never a fresh clock of the module's own.
+`remindsOn` is IMPORTED from `./time.js`. `shared/test/nudge.test.js` must be
+able to LOAD `nudge.js` under Node, so relative specifiers to import-free
+siblings are fine and an absolute `/shared/ui/...` specifier is not.
 
 **`isDayAnswered` in `ui/nudge.js` is `answeredIds`,** mirrored because the nudge
 runs from `state` with no network; `shared/test/nudge.test.js` runs both over the
@@ -1486,6 +1494,31 @@ you add a form to one, add it to both. The two that catch people out: `12 am` is
 00:00 while `12 pm` is 12:00, and an empty box means "no reminder" while
 unparseable text is an error to report — the caller does different things with
 them, so they are `''` and `null` rather than both falsy.
+
+**The WEEKDAY half of that file is mirrored the same way.** `reminder_days` is
+a 7-bit mask in which bit N is JS `getDay()` N (bit 0 Sunday ... bit 6 Saturday);
+`parseReminderDays`, `weekdayOf` and `remindsOn` are pinned in `ReminderTimeTest`
+against the same literal examples as `test/time.test.js`. Kotlin's
+`DayOfWeek.value` is 1 Monday ... 7 Sunday, so the mirror turns on one `% 7`.
+Rules that must not drift: `0` is legal, means no day, and is never repaired to
+127 by a validator (a PICKER may snap back; `reminderDaysField` says "nothing
+will be sent" instead); `weekStart` decides display ORDER only, stored bits are
+absolute; `describeReminderDays` is NOT mirrored. `weekdayOf` builds its date in
+UTC from the string. Stated divergence: an impossible date (`2026-02-30`) rolls
+over here and answers null in Kotlin.
+
+**`describeReminderDays` takes its `names` as an argument and must keep doing
+so.** `time.js` has no imports, and `dates.test.js`'s source guard refuses a
+seven-item weekday label array under `shared/public/`, so the caller passes
+`weekdayNames()` from `ui/dates.js`, indexed by `getDay()`. It lists in BIT order
+whatever order the boxes are in.
+
+**`reminderDaysField` is a SIBLING of `reminderField`, not a widening of it.**
+Seven checkboxes over a number, submitted as a separate field; they share a
+fieldset only because to a reader it is one question. The boxes are created once
+and re-`append`ed in display order on every `set()` (which MOVES nodes, keeping
+listeners). The mask is sent on **every** save: `PUT /habits/:id` REPLACES, so an
+omitted mask resets to every day.
 
 **A habit shown as something to avoid keeps the cycle and changes the
 encoding** — see `shared/CLAUDE.md`'s "Day states and habit shape" for the

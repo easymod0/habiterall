@@ -11,7 +11,7 @@ import { api } from '/shared/ui/api.js';
 import { focusKeyOf } from '/shared/ui/components.js';
 import { convention } from '/shared/ui/count-field.js';
 import { iconField, initIconField } from '/shared/ui/icon-field.js';
-import { reminderField } from '/shared/ui/reminder-field.js';
+import { reminderDaysField, reminderField } from '/shared/ui/reminder-field.js';
 import * as settings from '/shared/ui/settings.js';
 import { dashboardShowing, emit, on, staysOnList, state } from '/shared/ui/store.js';
 import { toast } from '/shared/ui/toast.js';
@@ -1047,6 +1047,10 @@ export function openDialog(habit = null) {
   f.freq_denominator.value = habit?.freq_denominator ?? 1;
   f.color.value = habit?.color ?? '#3b82f6';
   reminderField.set(habit?.reminder_time ?? '');
+  // No `??` of our own: the field asks `parseReminderDays`, which answers the
+  // default of every day for an absent mask — which is a create, and also an
+  // `/overview` served out of a service-worker cache that predates the field.
+  reminderDaysField.set(habit?.reminder_days);
   f.reminder_message.value = habit?.reminder_message ?? '';
   f.archived.checked = !!habit?.archived;
   archivedWrap.hidden = !habit; // only meaningful for an existing habit
@@ -1147,6 +1151,11 @@ async function saveHabit(e) {
     // Normalised by the picker, so '8:30 pm' reaches the server as '20:30' and
     // an empty field as '' — which the validator reads as "no reminder".
     reminder_time: reminderTime,
+    // Sent on EVERY save, including one that never opened this control.
+    // `PUT /habits/:id` REPLACES, so an omitted mask is not "leave it alone" —
+    // `parseHabit` would supply the default and a colour-only edit made in the
+    // browser would silently widen a Monday-only reminder back to every day.
+    reminder_days: reminderDaysField.value(),
     reminder_message: f.reminder_message.value,
     archived: f.archived.checked,
   };

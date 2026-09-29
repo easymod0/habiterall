@@ -1047,7 +1047,7 @@ test('habits without a reminder, or archived, are never due', () => {
 });
 
 test('every reason a reminder is not sent reports itself', () => {
-  // Six conditions decide this and none is visible from outside, so a reminder
+  // Seven conditions decide this and none is visible from outside, so a reminder
   // that does not arrive looks identical to a broken webhook — which sends
   // people to check the part that is working. `too_late` is the one nobody
   // guesses: a time already past on the server's clock is not late, it is gone
@@ -1067,6 +1067,15 @@ test('every reason a reminder is not sent reports itself', () => {
   assert.equal(reasons('2026-08-13T08:00:00Z', { archived: true })[0].reason, 'archived');
   assert.equal(reasons('2026-08-13T08:00:00Z', { reminder_time: '' })[0].reason,
     'no_reminder_time');
+
+  // 2026-08-13 is a Thursday and 64 is Saturday alone. The detail carries the
+  // mask the gate actually used, normalised, for the same reason `zone` carries
+  // the zone the clock used: a line naming what was ASKED for misdirects.
+  const off = reasons('2026-08-13T08:00:00Z', { reminder_days: 64 })[0];
+  assert.deepEqual(
+    { reason: off.reason, at: off.at, days: off.days },
+    { reason: 'not_this_weekday', at: '08:00', days: 64 }
+  );
 
   const early = reasons('2026-08-13T07:30:00Z')[0];
   assert.deepEqual(
@@ -1127,6 +1136,87 @@ test('the due date follows the user\'s zone, not the server\'s', () => {
   });
   assert.equal(due.length, 1);
   assert.equal(due[0].date, '2026-08-14');
+});
+
+/* ---------- which weekdays it fires on ---------- */
+
+/** Every skip `dueReminders` reported, with its detail flattened in. */
+const skipsFor = (isoUtc, over = {}, args = {}) => {
+  const seen = [];
+  dueAt(isoUtc, over, { ...args, onSkip: (h, reason, detail) => seen.push({ reason, ...detail }) });
+  return seen;
+};
+
+test('a reminder fires only on the weekdays its mask names', () => {
+  // 2026-08-13 is a Thursday. The masks are written as literals and none of
+  // them is 127: every value this gate can be asked about is a fixed point at
+  // 127, so a suite built on the default passes against a gate that was never
+  // wired up at all.
+  assert.equal(new Date('2026-08-13T08:00:00Z').getUTCDay(), 4, 'the fixture day is a Thursday');
+
+  assert.equal(dueAt('2026-08-13T08:00:00Z', { reminder_days: 62 }).length, 1,
+    'Mon–Fri names a Thursday');
+  assert.equal(dueAt('2026-08-13T08:00:00Z', { reminder_days: 64 }).length, 0,
+    'Saturday alone does not');
+  assert.equal(dueAt('2026-08-13T08:00:00Z', { reminder_days: 16 }).length, 1,
+    'and Thursday alone does');
+
+  // 0 is a legal answer meaning no day, and is never repaired to every day —
+  // the defect #78 refused to ship. The scheduler needs no special case for it:
+  // no weekday matches, so nothing is ever due.
+  assert.equal(dueAt('2026-08-13T08:00:00Z', { reminder_days: 0 }).length, 0);
+
+  // A habit written before this existed carries no mask at all, and must go on
+  // firing exactly as it did.
+  assert.equal(dueAt('2026-08-13T08:00:00Z').length, 1);
+  assert.equal(dueAt('2026-08-13T08:00:00Z', { reminder_days: 127 }).length, 1);
+});
+
+test('the weekday comes from the account\'s own date, not the server\'s', () => {
+  // The case this gate exists for. 2026-08-16T20:00Z is still SUNDAY where a
+  // UTC container is, and already 08:00 on MONDAY in Auckland — so a scheduler
+  // reading its own clock, or `new Date()`, fires the wrong habit here and is
+  // right on every fixture that does not straddle a date line.
+  const instant = new Date('2026-08-16T20:00:00Z');
+  assert.equal(instant.getUTCDay(), 0, 'the server\'s weekday must be Sunday');
+  assert.equal(zonedClock(instant, 'Pacific/Auckland').date, '2026-08-17');
+  assert.equal(new Date('2026-08-17T00:00:00Z').getUTCDay(), 1,
+    'and the account\'s must be Monday, or this case proves nothing');
+
+  const auckland = (over) => dueReminders({
+    habits: [habit(over)], instant, timeZone: 'Pacific/Auckland',
+  });
+
+  // 2 is Monday alone and 1 is Sunday alone.
+  const monday = auckland({ reminder_days: 2 });
+  assert.equal(monday.length, 1, 'a Monday-only reminder fires on the ACCOUNT\'s Monday');
+  assert.equal(monday[0].date, '2026-08-17', 'and is filed under that day');
+
+  assert.deepEqual(auckland({ reminder_days: 1 }), [],
+    'a Sunday-only one does not, though it is still Sunday where the server is');
+});
+
+test('a day the habit does not remind on is never reported as a lost reminder', () => {
+  // The gate order. `too_late` is a WARN meaning a reminder was LOST, and at
+  // 20:23 the catch-up window is long shut for every habit — so with the
+  // weekday gate below it, every masked-out habit puts that warning in the log
+  // once per channel for the rest of its day, about reminders nothing ever
+  // intended to send.
+  assert.equal(skipsFor('2026-08-13T20:23:00Z', { reminder_days: 64 })[0].reason,
+    'not_this_weekday');
+  // ...and the same habit on a day its mask DOES name still reports the loss,
+  // or this assertion would pass against a gate that had swallowed `too_late`.
+  assert.equal(skipsFor('2026-08-13T20:23:00Z', { reminder_days: 62 })[0].reason,
+    'too_late');
+
+  // Answered and sent are asked after it for the same reason: neither says
+  // anything about a day the habit was never going to ask about.
+  assert.equal(
+    skipsFor('2026-08-13T08:00:00Z', { reminder_days: 64 }, { doneToday: new Set([1]) })[0].reason,
+    'not_this_weekday');
+  assert.equal(
+    skipsFor('2026-08-13T08:00:00Z', { reminder_days: 64 }, { alreadySent: () => true })[0].reason,
+    'not_this_weekday');
 });
 
 test('answeredIds asks isCompleted, so a numerical 3 is an amount', () => {

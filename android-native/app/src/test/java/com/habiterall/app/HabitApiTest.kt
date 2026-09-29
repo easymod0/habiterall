@@ -54,6 +54,11 @@ class HabitApiTest {
         color = "#ef4444",
         reminderTime = "08:30",
         reminderMessage = "Any soda today?",
+        // Mon-Fri, and deliberately not 127: that is both the Kotlin default
+        // and `parseHabit`'s, so at 127 every assertion below would compare a
+        // default with itself and pass with the field dropped from `toInput()`
+        // entirely — the failure mode this whole fixture is shaped against.
+        reminderDays = 62,
         atMostUnlogged = "success",
         position = 4,
         archived = true,
@@ -85,5 +90,10 @@ class HabitApiTest {
         assertEquals(JsonPrimitive("success"), sent["at_most_unlogged"])
         assertEquals(JsonPrimitive("08:30"), sent["reminder_time"])
         assertEquals(JsonPrimitive(false), sent["archived"])
+        // And the weekdays that time fires on, which is the field `setReminder`
+        // is most likely to widen: it copies a fetched habit with the TIME
+        // changed, so a mask this bridge drops turns a Mon-Fri reminder into a
+        // daily one on the next tap from the list.
+        assertEquals(JsonPrimitive(62), sent["reminder_days"])
     }
 }

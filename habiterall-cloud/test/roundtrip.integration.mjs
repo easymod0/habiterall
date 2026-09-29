@@ -113,14 +113,22 @@ async function seed(userId) {
         // resolved against `categoryIds` above rather than left null, or every
         // habit's category compares '' against '' and this suite watches
         // nothing either.
+        // `reminder_days` is the trap a fourth time, and the sharpest of them:
+        // its default is 127 rather than '' or null, so a habit seeded without
+        // it does not look empty — it looks like a perfectly ordinary every-day
+        // reminder, and the fixture's 62 and 64 compare 127 against 127 while
+        // `LOOP_DB_HABIT_FIELDS` appears to be watching them. `?? ALL_DAYS` and
+        // not `|| ALL_DAYS`: a mask of 0 is a legal "no day" and must survive
+        // the seeding it is being tested through.
         `INSERT INTO habits (user_id, name, description, type, unit, target_value,
                              target_type, freq_numerator, freq_denominator, color,
-                             reminder_time, reminder_message, at_most_unlogged,
-                             show_as, icon, position, archived, category_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`,
+                             reminder_time, reminder_days, reminder_message,
+                             at_most_unlogged, show_as, icon, position, archived,
+                             category_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING id`,
         [userId, h.name, h.description, h.type, h.unit, h.target_value,
           h.target_type, h.freq_numerator, h.freq_denominator, h.color,
-          h.reminder_time ?? '', h.reminder_message ?? '',
+          h.reminder_time ?? '', h.reminder_days ?? 127, h.reminder_message ?? '',
           h.at_most_unlogged ?? 'default', h.show_as ?? 'amount', h.icon ?? '', i, h.archived,
           categoryIds.get(h.category) ?? null]
       );

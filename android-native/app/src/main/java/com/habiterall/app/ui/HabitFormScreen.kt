@@ -91,6 +91,13 @@ internal data class Draft(
     val color: String = DEFAULT_HABIT_COLOR,
     val reminderTime: String = "",
     val reminderMessage: String = "",
+    /**
+     * Which weekdays the reminder fires on — see [HabitInput.reminderDays].
+     * No control on this screen sets it, so it is here to be carried: a habit
+     * PUT REPLACES, and a phone edit that dropped it would widen a
+     * weekdays-only reminder set in the browser back to every day.
+     */
+    val reminderDays: Int = ReminderTime.ALL_DAYS,
     val atMostUnlogged: String = "default",
     val showAs: String = "amount",
     val icon: String = "",
@@ -121,6 +128,7 @@ internal fun Habit.toDraft() = Draft(
     color = color,
     reminderTime = reminderTime,
     reminderMessage = reminderMessage,
+    reminderDays = reminderDays,
     atMostUnlogged = atMostUnlogged,
     showAs = showAs,
     icon = icon,
@@ -159,6 +167,10 @@ internal fun Draft.toInput() = HabitInput(
     // disabled for that, so the elvis is unreachable rather than lossy.
     reminderTime = ReminderTime.parse(reminderTime) ?: "",
     reminderMessage = reminderMessage.replace("\n", " ").trim().take(200),
+    // No control for this on this screen either — see [Draft.reminderDays] —
+    // and carried through untouched for the same PUT-replaces reason as the
+    // icon below.
+    reminderDays = reminderDays,
     // Sent whether or not the habit is a limit right now, and whether or not
     // the control below is on screen: a habit PUT REPLACES, so an omitted
     // field is reset rather than left alone.

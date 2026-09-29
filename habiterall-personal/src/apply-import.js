@@ -18,9 +18,9 @@ import { assertDate, foldCategoryName, DEFAULT_COLOR, LIMITS } from '@habiterall
 const insertHabit = db.prepare(`
   INSERT INTO habits (name, description, type, unit, target_value, target_type,
                       freq_numerator, freq_denominator, color, reminder_time,
-                      reminder_message, at_most_unlogged, show_as, icon, position,
-                      archived, category_id)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      reminder_days, reminder_message, at_most_unlogged, show_as,
+                      icon, position, archived, category_id)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 // A user's own categories, resolved by NAME (never by the stale id a backup
 // carries — see `resolveOrCreateCategory` below) before any habit that names
@@ -300,6 +300,7 @@ export function applyImport(habits, mode = 'merge', categories = []) {
           clean.freq_denominator,
           clean.color,
           clean.reminder_time,
+          clean.reminder_days,
           clean.reminder_message,
           clean.at_most_unlogged,
           clean.show_as,

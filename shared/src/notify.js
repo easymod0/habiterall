@@ -34,6 +34,12 @@ import { isCompleted } from './stats.js';
 // so nothing there needs to watch this one. Depends on `toggle.js` staying
 // DOM-free; keep it that way.
 import { isAvoided } from '../public/ui/toggle.js';
+// The second, on exactly the same grounds: `ui/time.js` is DOM-free by its own
+// header and is already what `test/time.test.js` imports under node. It is also
+// the file the Kotlin `ReminderTime` mirrors, so the weekday a reminder fires on
+// is ONE declaration shared by the browser, this scheduler and `parseHabit`
+// (`validate.js` imports the same module), with the phone as the only mirror.
+import { parseReminderDays, remindsOn } from '../public/ui/time.js';
 
 /** 'YYYY-MM-DD'. Kept local rather than imported from validate.js, which
  *  imports this file for its settings rules. */
@@ -1194,11 +1200,11 @@ export function answeredIds(habits, rows) {
 /**
  * The reminders due right now for one account.
  *
- * A reminder is due when its local time has arrived, is no more than
- * `catchUpMinutes` old, the habit is not already done for the day, and
- * nothing has been sent for it today. That last check is the account's
- * responsibility to answer — see `alreadySent` — because it is the only part
- * that needs to survive a restart.
+ * A reminder is due when the account's own weekday is one its `reminder_days`
+ * mask names, its local time has arrived, is no more than `catchUpMinutes` old,
+ * the habit is not already done for the day, and nothing has been sent for it
+ * today. That last check is the account's responsibility to answer — see
+ * `alreadySent` — because it is the only part that needs to survive a restart.
  *
  * A reminder whose window straddles local midnight (23:50 with the next tick
  * at 00:05) is dropped rather than re-dated: `late` goes hugely negative, so
@@ -1269,7 +1275,7 @@ export function dueReminders({
   /**
    * Every `continue` below reports itself.
    *
-   * Six conditions decide this and all six are invisible from outside: a
+   * Seven conditions decide this and all seven are invisible from outside: a
    * reminder that does not arrive looks exactly like a broken webhook, which
    * sends people to check the thing that is working. `too_late` in particular
    * is unguessable — a time already past on this clock is not late, it is gone
@@ -1291,6 +1297,29 @@ export function dueReminders({
 
     const at = minutesOfDay(habit.reminder_time);
     if (at === null) { skip(habit, 'no_reminder_time'); continue; }   // '' — none set
+
+    // Which weekdays that time fires on, asked of `clock.date` — the account's
+    // OWN calendar day, already resolved through `resolveTimeZone` — and never
+    // of the server's. The two are a different day for anyone far enough east
+    // or west, so reading the container's weekday would fire a Monday-only
+    // reminder on Sunday evening in Auckland and silence it on Monday morning,
+    // every week, with a correct-looking time beside it. Same argument as
+    // `zonedClock` above: the zone decides which DAY this is, not only what
+    // o'clock it is.
+    //
+    // Asked beside `no_reminder_time` and deliberately ahead of `done_today` /
+    // `already_sent` / `too_late`: a day the habit does not remind on is not a
+    // lost reminder, and `too_late` is a WARN that says one was lost. Below the
+    // lateness gate, every masked-out habit would put that warning in the log
+    // once per channel for the rest of its day.
+    if (!remindsOn(habit.reminder_days, clock.date)) {
+      // The mask the gate USED, normalised, for the reason `skip` reports the
+      // zone the clock used rather than the one asked for.
+      skip(habit, 'not_this_weekday', {
+        at: habit.reminder_time, days: parseReminderDays(habit.reminder_days),
+      });
+      continue;
+    }
 
     const late = clock.minutes - at;
     if (late < 0) { skip(habit, 'not_yet', { at: habit.reminder_time, in_minutes: -late }); continue; }

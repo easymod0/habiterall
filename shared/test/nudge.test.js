@@ -1,8 +1,9 @@
 /**
  * The browser's own reminder: the rule, the watermark and the call site.
  *
- * `ui/nudge.js` is importable here because it has no imports of its own —
- * deliberately, exactly as `ui/toggle.js` is, since the absolute `/shared/...`
+ * `ui/nudge.js` is importable here because the only specifier it carries is a
+ * RELATIVE one to an import-free sibling — deliberately, exactly as
+ * `ui/toggle.js` is dependency-free, since the absolute `/shared/...`
  * specifiers the rest of `public/ui` uses do not resolve under Node. That is
  * what makes this file able to run the whole thing rather than only the
  * extracted predicate.
@@ -262,6 +263,54 @@ test('the entries map is asked whether it HOLDS the day', () => {
 
   limit.entries = { [TODAY]: 0 };
   assert.deepEqual(ask([limit], '09:00'), [], 'a stated "none today" is an answer');
+});
+
+test('a habit whose mask does not name today says nothing', () => {
+  // 2026-08-17 is a Monday. None of these masks is 127: every weekday is a
+  // fixed point under the default, so a case built on it passes against a guard
+  // that was never wired up.
+  assert.equal(new Date(`${TODAY}T00:00:00Z`).getUTCDay(), 1, 'the fixture day is a Monday');
+
+  assert.deepEqual(ask([due({ reminder_days: 62 })], '09:00'), [1], 'Mon–Fri names it');
+  assert.deepEqual(ask([due({ reminder_days: 2 })], '09:00'), [1], 'and Monday alone does');
+  assert.deepEqual(ask([due({ reminder_days: 64 })], '09:00'), [], 'Saturday alone does not');
+
+  // 0 is a legal answer meaning no day, and needs no special case here either.
+  assert.deepEqual(ask([due({ reminder_days: 0 })], '09:00'), []);
+
+  // A habit written before the mask existed carries none and still speaks.
+  assert.deepEqual(ask([due()], '09:00'), [1]);
+  assert.deepEqual(ask([due({ reminder_days: 127 })], '09:00'), [1]);
+});
+
+test('the mask is read against the day it was handed, never a fresh clock', () => {
+  // The browser's half of the rule `dueReminders` states in the account's zone:
+  // this module is pure and is GIVEN the device's own day, so nothing here may
+  // resolve a weekday from `new Date()`. Seven consecutive days, each with a
+  // habit masked to that day alone — one fires on its own day and on none of
+  // the other six. A guard reading a fresh clock answers the same thing on all
+  // seven, so at least six of these forty-nine assertions fail whatever day the
+  // suite is run on, rather than only on one day in seven.
+  const WEEK = [
+    ['2026-08-16', 1],    // Sunday
+    ['2026-08-17', 2],    // Monday
+    ['2026-08-18', 4],    // Tuesday
+    ['2026-08-19', 8],    // Wednesday
+    ['2026-08-20', 16],   // Thursday
+    ['2026-08-21', 32],   // Friday
+    ['2026-08-22', 64],   // Saturday
+  ];
+  const week = { start: '2026-08-16', end: '2026-08-22' };
+
+  for (const [named, mask] of WEEK) {
+    for (const [date] of WEEK) {
+      const fired = outstanding([due({ reminder_days: mask })], {
+        date, minutes: at('09:00'), loaded: week,
+      }).map((h) => h.id);
+      assert.deepEqual(fired, date === named ? [1] : [],
+        `mask ${mask} (${named}) on ${date}`);
+    }
+  }
 });
 
 test('a habit already nudged about today is not raised again', () => {

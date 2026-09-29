@@ -1,5 +1,6 @@
 /**
- * The reminder picker: two dropdowns and a text box, over one value.
+ * The reminder picker: two dropdowns and a text box over one time, and seven
+ * checkboxes over the weekday mask beside it.
  *
  * All three edit the same string, and the text box is the one that is actually
  * submitted (it carries `name="reminder_time"`), so there is a single source of
@@ -14,9 +15,11 @@
  * Owns the `#reminder-*` controls inside the habit dialog.
  */
 
+import { weekdayNames } from '/shared/ui/dates.js';
+import * as settings from '/shared/ui/settings.js';
 import {
-  COMMON_TIMES, describe as describeTime, hourOptions, minuteOptions,
-  parseTimeInput, split as splitTime,
+  COMMON_TIMES, describe as describeTime, describeReminderDays, hourOptions,
+  minuteOptions, parseReminderDays, parseTimeInput, split as splitTime,
 } from '/shared/ui/time.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -125,6 +128,109 @@ function createTimeField(els) {
   };
 }
 
+/* ---------- which weekdays the reminder fires on ---------- */
+
+/**
+ * The seven weekdays, in the order this account reads a week in.
+ *
+ * **Display only.** The bit positions the mask stores are absolute — bit N is
+ * `getDay()` N, whatever the account's `weekStart` says — and `ALL_DAYS` in
+ * `ui/time.js` has the whole argument for why. This decides the order the
+ * boxes are appended in and nothing about what a tick is worth, which is why
+ * it is read here at open time rather than anywhere near `parseReminderDays`.
+ *
+ * A rotation rather than the pair of literal arrays `charts.js`'s own
+ * `weekOrder` holds: seven quoted items under `shared/public/` is what
+ * `dates.test.js`'s source guard refuses, and while a list of NUMBERS would
+ * slip past it, restating the same seven in a second module is the drift that
+ * guard exists about.
+ */
+function displayOrder() {
+  const first = settings.get('weekStart') === 'sunday' ? 0 : 1;
+  return Array.from({ length: 7 }, (_, i) => (i + first) % 7);
+}
+
+/**
+ * The weekday picker: seven checkboxes over one integer mask.
+ *
+ * A SIBLING of the time field rather than a widening of it. `createTimeField`
+ * is an abstraction over one string with one submitted input; this is seven
+ * controls over a number, and the two reach the server as two fields. They
+ * share a fieldset because to a reader they are one question — when does this
+ * remind me — and for no other reason.
+ *
+ * The boxes are created ONCE and re-appended in `displayOrder()` on every
+ * `set()`: appending an already-attached node moves it, so the listeners
+ * survive the reorder, and a `weekStart` changed in another tab is picked up
+ * the next time the dialog opens. The captions are re-read then too, because
+ * `weekdayNames` drops its memo when the device's UTC offset moves.
+ */
+function createDaysField(els) {
+  /** The seven rows, indexed by `getDay()` — bit N of the mask is `rows[N]`. */
+  const rows = Array.from({ length: 7 }, () => {
+    const label = document.createElement('label');
+    label.className = 'checkbox';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    const caption = document.createElement('span');
+    label.append(input, caption);
+    input.addEventListener('change', () => hint(value()));
+    return { label, input, caption };
+  });
+
+  /** The mask the boxes currently describe. */
+  function value() {
+    return rows.reduce(
+      (mask, row, weekday) => mask | (row.input.checked ? 1 << weekday : 0), 0);
+  }
+
+  /**
+   * Say what the mask means, in the account's own locale.
+   *
+   * `describeReminderDays` lists in BIT order (Sunday first) whatever order the
+   * boxes are in — its own comment says so, and the alternative is a second
+   * sentence-builder here that could disagree with the one the rest of the app
+   * uses. A mask of 0 gets the Clear button's own wording beside it: it is
+   * legal, it is stored as it stands, and it is never quietly repaired to every
+   * day. Loop's own dialog does repair it, and that remains available as a
+   * PICKER affordance — but it would be one here and a validator rule nowhere,
+   * so saying plainly that nothing will be sent is the honest half of keeping
+   * those two apart (see `parseReminderDays`).
+   */
+  function hint(mask) {
+    const days = parseReminderDays(mask);
+    const said = describeReminderDays(days, weekdayNames('short'));
+    els.hint.textContent = days === 0
+      ? `${said} — nothing will be sent for this habit.`
+      : `Reminds on: ${said}.`;
+  }
+
+  function set(raw) {
+    const days = parseReminderDays(raw);
+    const short = weekdayNames('short');
+    const long = weekdayNames('long');
+    for (const weekday of displayOrder()) {
+      const row = rows[weekday];
+      row.input.checked = ((days >> weekday) & 1) === 1;
+      row.caption.textContent = short[weekday];
+      // The wrapping label already names the box from its caption; the long
+      // name is what a screen reader should hear, since `Wed` and `Sat` are
+      // abbreviations a grid has room for and a spoken list does not.
+      row.input.setAttribute('aria-label', long[weekday]);
+      // The first open appends; every later one MOVES the same node, which is
+      // what keeps the listener taken above alive across a reorder.
+      els.boxes.append(row.label);
+    }
+    hint(days);
+  }
+
+  return {
+    set,
+    /** The mask, 0..127, bit N = `getDay()` N. Always a number. */
+    value,
+  };
+}
+
 /**
  * There is exactly one habit dialog, so exactly one of these. Built at import
  * rather than on first open: the option lists are static, and rebuilding them
@@ -137,4 +243,10 @@ export const reminderField = createTimeField({
   clear: $('#reminder-clear'),
   presets: $('#reminder-presets'),
   hint: $('#reminder-hint'),
+});
+
+/** Its sibling, over the same habit's `reminder_days`. */
+export const reminderDaysField = createDaysField({
+  boxes: $('#reminder-days'),
+  hint: $('#reminder-days-hint'),
 });

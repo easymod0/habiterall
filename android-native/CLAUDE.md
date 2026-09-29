@@ -12,6 +12,19 @@ default. Each runs where there may be no network. Everything else is
 server-authoritative — the phone submits and renders whatever comes back,
 including the error.
 
+**`reminder_days` (#72) is a rule inside two existing mirrors, not a sixth.**
+`ReminderTime` gains `ALL_DAYS`, `parseReminderDays`, `weekdayOf` and `remindsOn`
+against `shared/public/ui/time.js`, and `needsReminder` asks them. The mask is a
+new FIELD on the offline reminder cache (`Settings.kt`), which is a cache and not
+a mirror. `Reminders.nextAllowedOccurrence` is what earns the offline copy:
+arming tomorrow's alarm cannot wait on the server.
+
+**`describeReminderDays` is deliberately NOT mirrored.** No surface here names a
+weekday. The mask reaches `Api.kt` as carry-through only (`Habit` -> `toInput()`
+-> `HabitInput`, and `Draft` -> `toInput()`); both bridges must send it, or a
+browser-set mask is widened back to every day. If a weekday control is ever
+added here, the localised names become this client's problem then.
+
 ## The grid
 
 **It runs whichever way `dayOrder` says, and only one direction is free.** With
@@ -214,6 +227,24 @@ records nothing. Two rules in it:
   asking `LocalDate.now()` silently changed the subject while the 16th went
   unanswered. Yes / No / Skip on that same stale notification write to the date
   it names; refusing costs nothing.
+
+**`nextAllowedOccurrence` LAYERS on `nextOccurrence`; do not fold it in.** It
+asks `nextOccurrence` for each candidate day and takes the first the mask names,
+using the instant just returned as the next cursor, so `nextOccurrence`'s two DST
+guarantees hold. The search is bounded to **seven** candidates (seven consecutive
+days name every weekday). A mask of `0` is legal and arms NOTHING: it answers
+null and `schedule` cancels through the archived-habit branch. Read the weekday
+off the local date the alarm would FIRE on, never off `now`.
+
+**The offline branch of `ReminderReceiver` goes through `needsReminder` with an
+empty entry list,** so it is under every gate the online branch has. It asks
+`remindsOn` itself first, ahead of the answered check, and reports it as its own
+reason. The mask is field **9** of the reminder cache, **appended, never
+inserted**: the reader indexes by position and tolerates a short line, so an
+upgraded phone keeps arming until the next sync. `reminderCacheLine` /
+`reminderFromCacheLine` are `internal` and `Context`-free; test the decoder with a
+SHORT line nothing in this version wrote, since a round trip passes against a
+mid-line insertion too.
 
 **The manifest declares BOTH exact-alarm permissions, and that reverses a
 decision this file used to state the other way.** `USE_EXACT_ALARM` uncapped

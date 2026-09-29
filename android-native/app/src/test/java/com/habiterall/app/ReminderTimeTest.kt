@@ -155,4 +155,137 @@ class ReminderTimeTest {
             assertEquals(value, ReminderTime.parse(value))
         }
     }
+
+    /* ---------- which weekdays a reminder fires on ---------- */
+
+    /*
+     * The same fixtures as `shared/test/time.test.js`, down to the dates, and
+     * for the same reason as everything above: one habit's `reminder_days` is
+     * read by both clients, so a mask read the other way round here fires a
+     * Monday-only reminder on Sunday with nothing on any screen saying so.
+     *
+     * Every number below is a LITERAL and, wherever it can be, neither 127 nor
+     * 0 — those two are the fixed points of the rotation into Loop's own
+     * Saturday-based mask, and a suite written entirely in them passes against
+     * a mask read backwards. That is exactly how Loop's bit order went
+     * unverified for as long as it did.
+     *
+     *   Mon-Fri  = 62   (bits 1..5)
+     *   Sat only = 64   (bit 6)
+     *   Sun only = 1    (bit 0)
+     *
+     * The dates are a real, consecutive week: 2026-09-13 is a Sunday and
+     * 2026-09-19 is the Saturday after it.
+     */
+    private val sunday = "2026-09-13"
+    private val monday = "2026-09-14"
+    private val friday = "2026-09-18"
+    private val saturday = "2026-09-19"
+
+    @Test
+    fun `the default is every day, written as the literal 127`() {
+        // Asserted as a number rather than against the constant: a test that
+        // imports the value it checks pins the name and nothing else, and this
+        // default is what every habit created before the field existed means.
+        assertEquals(127, ReminderTime.parseReminderDays(null))
+        assertEquals(127, ReminderTime.ALL_DAYS)
+    }
+
+    @Test
+    fun `a mask of 0 is legal and is never repaired to every day`() {
+        // The bug #78 refused to ship: a Loop reminder mask of 0 became a daily
+        // reminder. 0 means the habit reminds on no day, and the alarm is
+        // simply never armed.
+        assertEquals(0, ReminderTime.parseReminderDays(0))
+        for (date in listOf(sunday, monday, friday, saturday)) {
+            assertFalse("0 must fire on no day, failed on $date", ReminderTime.remindsOn(0, date))
+        }
+    }
+
+    @Test
+    fun `a real mask is kept exactly`() {
+        assertEquals(62, ReminderTime.parseReminderDays(62))
+        assertEquals(64, ReminderTime.parseReminderDays(64))
+        assertEquals(1, ReminderTime.parseReminderDays(1))
+        assertEquals(127, ReminderTime.parseReminderDays(127))
+    }
+
+    @Test
+    fun `anything that is not a mask lands on every day`() {
+        // The junk the JS side has to refuse — a string, a float — cannot be
+        // spelled here, so what is left is the range and the null: an older
+        // server's response, and a cache line written before the field existed.
+        for (junk in listOf(null, -1, 128, Int.MIN_VALUE, Int.MAX_VALUE)) {
+            assertEquals("failed on $junk", 127, ReminderTime.parseReminderDays(junk))
+        }
+    }
+
+    @Test
+    fun `bit 0 is Sunday and bit 6 is Saturday, both ends asserted`() {
+        assertEquals(0, ReminderTime.weekdayOf(sunday))
+        assertEquals(1, ReminderTime.weekdayOf(monday))
+        assertEquals(5, ReminderTime.weekdayOf(friday))
+        assertEquals(6, ReminderTime.weekdayOf(saturday))
+    }
+
+    @Test
+    fun `weekdayOf reads the string and never a clock`() {
+        // The caller has already decided whose day this is. Nothing here may
+        // consult the phone's clock, so the answer is the same in any zone.
+        assertEquals(4, ReminderTime.weekdayOf("2026-01-01"))
+        assertEquals(4, ReminderTime.weekdayOf("2026-12-31"))
+        assertNull(ReminderTime.weekdayOf(""))
+        assertNull("the padding is not cosmetic", ReminderTime.weekdayOf("2026-9-13"))
+        assertNull(ReminderTime.weekdayOf(null))
+    }
+
+    @Test
+    fun `a two-digit year is that year, not nineteen hundred and something`() {
+        // The JS side's own trap, asserted here to the same two answers: the
+        // year 99 opens on a Thursday while 1999 opens on a Friday, so these
+        // two literals are what say the two implementations agree about a date
+        // an import can genuinely carry.
+        assertEquals(4, ReminderTime.weekdayOf("0099-01-01"))
+        assertEquals(0, ReminderTime.weekdayOf("0001-03-04"))
+    }
+
+    @Test
+    fun `Mon-Fri is 62, and it is off at both weekend ends`() {
+        assertTrue(ReminderTime.remindsOn(62, monday))
+        assertTrue(ReminderTime.remindsOn(62, friday))
+        assertFalse(ReminderTime.remindsOn(62, sunday))
+        assertFalse(ReminderTime.remindsOn(62, saturday))
+    }
+
+    @Test
+    fun `Saturday only is 64 and Sunday only is 1, not the other way round`() {
+        // The one pair that catches a mask read against Loop's own
+        // Saturday-based bit order, where these two numbers are 1 and 2.
+        assertTrue(ReminderTime.remindsOn(64, saturday))
+        assertFalse(ReminderTime.remindsOn(64, sunday))
+        assertTrue(ReminderTime.remindsOn(1, sunday))
+        assertFalse(ReminderTime.remindsOn(1, saturday))
+    }
+
+    @Test
+    fun `every day fires on every day of a real week`() {
+        val week = listOf(
+            sunday, monday, "2026-09-15", "2026-09-16", "2026-09-17", friday, saturday,
+        )
+        for (date in week) {
+            assertTrue("failed on $date", ReminderTime.remindsOn(127, date))
+        }
+        // And a null mask — an older server, a pre-upgrade cache line — is the
+        // same answer, because it is the same default.
+        for (date in week) {
+            assertTrue("failed on $date", ReminderTime.remindsOn(null, date))
+        }
+    }
+
+    @Test
+    fun `an unreadable date is on no mask`() {
+        assertFalse(ReminderTime.remindsOn(127, "not-a-date"))
+        assertFalse(ReminderTime.remindsOn(127, ""))
+        assertFalse(ReminderTime.remindsOn(127, null))
+    }
 }
