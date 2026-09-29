@@ -195,7 +195,29 @@ class HabitWidget : AppWidgetProvider() {
         internal const val SLIP = 0xFFDC2626.toInt()
 
         /**
-         * The launcher's live ids, split by which of the TWO providers drew
+         * The launcher's live ids, one set per provider.
+         *
+         * A named type rather than the `Pair` this was, because the two call
+         * sites destructured it POSITIONALLY: a fourth provider would grow a
+         * third component, shift what each name binds to, and compile
+         * everywhere. Named fields make the same change a compile error at
+         * every site that has not been extended.
+         */
+        internal data class LiveIds(
+            val checkmark: Set<Int>,
+            val stats: Set<Int>,
+            val overview: Set<Int>,
+        ) {
+            /**
+             * Whether the launcher holds a widget of ANY kind — the one
+             * question [armMidnight] asks, phrased once so that adding a
+             * provider to [liveIds] answers it without a second edit.
+             */
+            val any get() = checkmark.isNotEmpty() || stats.isNotEmpty() || overview.isNotEmpty()
+        }
+
+        /**
+         * The launcher's live ids, split by which of the THREE providers drew
          * them.
          *
          * Both [redraw] and [armMidnight] used to ask only for
@@ -207,12 +229,27 @@ class HabitWidget : AppWidgetProvider() {
          * that, because "wanted" asked the same hard-coded question. One
          * helper, used by both, so the two cannot drift apart on which
          * providers count again.
+         *
+         * This KDoc used to end by predicting that a third provider would hit
+         * the same trap. It has: [OverviewWidget] is the third, and it walked
+         * into the sharper of the two failure modes for a reason particular to
+         * it — it draws a GRID of dates, so at midnight every column moves and
+         * not merely the newest cell, and an `armMidnight` that did not count
+         * overview ids would have CANCELLED the one alarm that redraws it. The
+         * `Pair` became [LiveIds] in the same change, so a fourth provider is
+         * one field and three compile errors rather than a silently
+         * re-bound destructuring.
+         *
+         * `WidgetSync.refreshFrom` is the third reader, and asks only for
+         * [LiveIds.overview]: reconciling an overview widget's rows against
+         * the served habits needs to know which ids are overviews, and that
+         * question has exactly one right answer in this app.
          */
-        private fun liveIds(app: Context, manager: AppWidgetManager): Pair<Set<Int>, Set<Int>> {
-            val checkmark = manager.getAppWidgetIds(ComponentName(app, HabitWidget::class.java)).toSet()
-            val stats = manager.getAppWidgetIds(ComponentName(app, StatsWidget::class.java)).toSet()
-            return checkmark to stats
-        }
+        internal fun liveIds(app: Context, manager: AppWidgetManager) = LiveIds(
+            checkmark = manager.getAppWidgetIds(ComponentName(app, HabitWidget::class.java)).toSet(),
+            stats = manager.getAppWidgetIds(ComponentName(app, StatsWidget::class.java)).toSet(),
+            overview = manager.getAppWidgetIds(ComponentName(app, OverviewWidget::class.java)).toSet(),
+        )
 
         /**
          * Redraw every widget from the cache, and arm the next midnight.
@@ -220,48 +257,98 @@ class HabitWidget : AppWidgetProvider() {
          * Only the ids the launcher still has: a record can outlive its widget
          * if the process died between the deletion and [onDeleted], and
          * updating an id nobody holds throws. Each id is drawn with the
-         * renderer for the provider that actually holds it — crossing the two
+         * renderer for the provider that actually holds it — crossing them
          * would draw a stats layout over a checkmark id or the reverse, which
          * is the obvious failure mode of merging this loop and is exactly what
          * a test here asserts against.
+         *
+         * The loop groups by WIDGET ID before it dispatches, where it used to
+         * walk the records one at a time. That is not a tidy-up: an overview
+         * widget's frame is drawn from its whole set of records at once, so
+         * dispatching per record would call `OverviewWidget.render` N times
+         * with one row each and leave the launcher holding whichever single
+         * row was drawn last. The two single-habit providers take the group's
+         * FIRST record, which is the same answer `Settings.cachedWidget`'s own
+         * `firstOrNull` gives them everywhere else.
+         *
+         * It dispatches the UNION of the grouped ids and the live OVERVIEW
+         * ids, and that asymmetry is the whole of it: an id holding no records
+         * produces no group, so a `groupBy` alone never draws it. For a
+         * checkmark or a stats id that is right — no record means an
+         * unconfigured widget, which must stay on its `initialLayout`. For an
+         * overview id it is a different thing: `Settings.putWidgetSet(id,
+         * emptyList())` is the legitimate purge for an account whose habits
+         * have all been archived or deleted, so the id is CONFIGURED and has
+         * something to say, which is what `R.string.overview_empty` is. Left
+         * out of the loop, the launcher goes on showing the last frame it was
+         * handed — the archived habits, their old cells, and no note — and
+         * neither the midnight alarm nor the 30-minute backstop can recover it,
+         * because both come back through here.
          *
          * The alarm is armed HERE rather than at each of the places that can
          * create a widget, because every one of them redraws and an alarm that
          * re-arms from the drawing cannot drift out of step with what is on the
          * screen. With no widgets left it is given back instead of renewed —
          * which is why `armMidnight` is called BEFORE the early return below
-         * rather than after it: with no widgets of either kind, this is the
-         * only place the alarm is given back at all.
+         * rather than after it: with no widgets of any kind, this is the only
+         * place the alarm is given back at all.
          */
         suspend fun redraw(context: Context) {
             val app = context.applicationContext
             val manager = AppWidgetManager.getInstance(app)
-            val (checkmarkIds, statsIds) = liveIds(app, manager)
+            val live = liveIds(app, manager)
             armMidnight(app)
-            if (checkmarkIds.isEmpty() && statsIds.isEmpty()) return
+            if (!live.any) return
 
             val settings = Settings(app)
             val questionMarks = settings.cachedQuestionMarks()
             val today = LocalDate.now().toString()
-            settings.cachedWidgets().forEach { record ->
-                when (record.widgetId) {
-                    in checkmarkIds -> manager.updateAppWidget(
-                        record.widgetId,
-                        render(app, record, today, questionMarks),
-                    )
-                    in statsIds -> manager.updateAppWidget(
-                        record.widgetId,
-                        StatsWidget.render(
-                            app,
-                            record,
-                            today,
-                            StatsWidget.columnsFor(manager.getAppWidgetOptions(record.widgetId)),
-                        ),
-                    )
+            val held = settings.cachedWidgets().groupBy { it.widgetId }
+            (held.keys + live.overview).forEach { widgetId ->
+                val group = held[widgetId].orEmpty()
+                when (widgetId) {
+                    // `firstOrNull`, not `first`: only an overview id reaches
+                    // this loop with an empty group today, but the two
+                    // single-habit arms stay total so that widening the union
+                    // later is a wrong frame at worst rather than a throw that
+                    // takes every other widget on the home screen with it.
+                    in live.checkmark -> group.firstOrNull()?.let { record ->
+                        manager.updateAppWidget(
+                            widgetId,
+                            render(app, record, today, questionMarks),
+                        )
+                    }
+                    in live.stats -> group.firstOrNull()?.let { record ->
+                        manager.updateAppWidget(
+                            widgetId,
+                            StatsWidget.render(
+                                app,
+                                record,
+                                today,
+                                StatsWidget.columnsFor(manager.getAppWidgetOptions(widgetId)),
+                            ),
+                        )
+                    }
+                    in live.overview -> {
+                        // Both dimensions, unlike the stats widget's width
+                        // alone: the height decides how many habits are listed
+                        // and the width how many days are drawn across each.
+                        val options = manager.getAppWidgetOptions(widgetId)
+                        manager.updateAppWidget(
+                            widgetId,
+                            OverviewWidget.render(
+                                app,
+                                group,
+                                today,
+                                rows = OverviewWidget.rowsFor(options),
+                                columns = OverviewWidget.columnsFor(options),
+                            ),
+                        )
+                    }
                     // A record can outlive its widget — see the KDoc above —
-                    // and an id in neither set is exactly that case: nothing to
-                    // draw, and `onDeleted` will drop the record in its own
-                    // time.
+                    // and an id in none of the three sets is exactly that case:
+                    // nothing to draw, and `onDeleted` will drop the record in
+                    // its own time.
                 }
             }
         }
@@ -298,13 +385,16 @@ class HabitWidget : AppWidgetProvider() {
             val manager = app.getSystemService(Context.ALARM_SERVICE) as AlarmManager
             // Asked here rather than passed in, so that every caller — a
             // redraw, a boot, the exact-alarm permission changing — is one line
-            // and none of them has to know how to answer it. EITHER provider:
-            // a stats widget's strip shifts at midnight exactly as the
-            // checkmark cell does, and asking only about `HabitWidget` here —
-            // the bug this method used to have — cancelled the one alarm that
-            // would ever redraw a home screen holding only a stats widget.
-            val (checkmarkIds, statsIds) = liveIds(app, AppWidgetManager.getInstance(app))
-            val wanted = checkmarkIds.isNotEmpty() || statsIds.isNotEmpty()
+            // and none of them has to know how to answer it. ANY provider: a
+            // stats widget's strip shifts at midnight exactly as the checkmark
+            // cell does, and an overview widget's whole GRID does — every
+            // column moves, not merely the newest. Asking only about
+            // `HabitWidget` here was the bug this method used to have, and it
+            // cancelled the one alarm that would ever redraw a home screen
+            // holding only a stats widget; leaving `OverviewWidget` out of
+            // `LiveIds.any` would be the identical bug with the third provider
+            // in the place of the second.
+            val wanted = liveIds(app, AppWidgetManager.getInstance(app)).any
             val intent = Intent(app, HabitWidget::class.java).apply {
                 action = ACTION_MIDNIGHT
                 data = android.net.Uri.parse("habiterall://widget/midnight")

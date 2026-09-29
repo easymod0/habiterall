@@ -78,8 +78,11 @@ class Settings(private val context: Context) {
     private val questionMarksKey = booleanPreferencesKey("question_marks")
 
     /**
-     * One line per home-screen widget: which habit it shows, and the day it
-     * last knew about. See [Widgets.encode] for the shape and why it is flat.
+     * One line per home-screen widget AND habit: which habit it shows, and the
+     * day it last knew about. A single-habit widget has one line; a widget
+     * showing several — the overview — has one per habit, which is why the
+     * writers below key on the pair. See [Widgets.encode] for the shape and
+     * why it is flat.
      */
     private val widgetCacheKey = stringPreferencesKey("widget_cache")
 
@@ -162,11 +165,27 @@ class Settings(private val context: Context) {
     suspend fun cachedWidgets(): List<Widgets.Record> =
         Widgets.decodeAll(context.dataStore.data.first()[widgetCacheKey] ?: "")
 
+    /**
+     * The one record for a SINGLE-HABIT widget — the checkmark and the stats
+     * providers, whose widget is one habit and always will be. A widget that
+     * holds several (see [cachedWidgetSet]) must not be read through this.
+     */
     suspend fun cachedWidget(widgetId: Int): Widgets.Record? =
         cachedWidgets().firstOrNull { it.widgetId == widgetId }
 
+    /** Every record for one widget id, in the order they were written. */
+    suspend fun cachedWidgetSet(widgetId: Int): List<Widgets.Record> =
+        cachedWidgets().filter { it.widgetId == widgetId }
+
     /**
-     * Write these records, replacing any with the same widget id.
+     * Write these records, replacing any with the same widget id AND habit id.
+     *
+     * The key is the PAIR, because one widget id can name several records: the
+     * overview widget holds one per habit. Keyed on the widget id alone — as
+     * this was — N records for one id silently collapsed to whichever came
+     * last, so every row of an overview but one disappeared on the first
+     * refresh. What the pair costs is that this can no longer say "these are
+     * the widget's records now", which is [putWidgetSet]'s job.
      *
      * Read and write inside one `edit`, because two widgets can be tapped in
      * the same second and DataStore only serialises the transform — a
@@ -176,10 +195,37 @@ class Settings(private val context: Context) {
         if (records.isEmpty()) return
         context.dataStore.edit { prefs ->
             val byId = Widgets.decodeAll(prefs[widgetCacheKey] ?: "")
-                .associateBy { it.widgetId }
+                .associateBy { it.widgetId to it.habitId }
                 .toMutableMap()
-            records.forEach { byId[it.widgetId] = it }
+            records.forEach { byId[it.widgetId to it.habitId] = it }
             prefs[widgetCacheKey] = Widgets.encodeAll(byId.values.toList())
+        }
+    }
+
+    /**
+     * Replace one widget's WHOLE set of records — purge, then write, in one
+     * `edit`.
+     *
+     * [putWidgets] merges, which is the right answer for an answer about one
+     * day and the wrong one for "these are this widget's habits now": a habit
+     * the new set does not name would survive the merge and go on being drawn.
+     *
+     * It is also what keeps a RECONFIGURE honest, and that is not
+     * hypothetical. Pointing a single-habit widget at another habit used to
+     * REPLACE its record because the merge key was the widget id; under the
+     * pair key above the merge would leave BOTH, and [cachedWidget]'s
+     * `firstOrNull` could then answer the habit the launcher no longer shows —
+     * the home screen showing habit B while a tap records habit A, which is
+     * `Widgets.remap`'s "12 twice" bug reached by a second road.
+     *
+     * An empty [records] is a legitimate call and purges the id: an overview
+     * widget on an account with no habits left holds no records at all.
+     */
+    suspend fun putWidgetSet(widgetId: Int, records: List<Widgets.Record>) {
+        context.dataStore.edit { prefs ->
+            val kept = Widgets.decodeAll(prefs[widgetCacheKey] ?: "")
+                .filterNot { it.widgetId == widgetId }
+            prefs[widgetCacheKey] = Widgets.encodeAll(kept + records)
         }
     }
 
