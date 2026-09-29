@@ -155,7 +155,7 @@ the literal host rather than re-deriving it from the same constant.
 `app.habiterall.ca` is a different thing entirely: the hosted cloud edition,
 which this site links to and does not serve.
 
-`hostedSignups` in `config.js` is `false` while `app.habiterall.ca` is not open
-to registration. Flipping it changes the hero, the header and the footer from
+`hostedSignups` in `config.js` says whether `app.habiterall.ca` is open to
+registration, and is `true` since it opened (2026-09-28). Flipping it changes the hero, the header and the footer from
 "Sign in" to "Create a free account" and removes the coming-soon note. Both
 states are asserted against the rendered HTML, not against the flag.
