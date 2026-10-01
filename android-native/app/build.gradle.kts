@@ -101,7 +101,7 @@ android {
 // plugin.
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2026.08.00")
+    val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
     implementation(composeBom)
     androidTestImplementation(composeBom)
     // The same BOM for the JVM tests, so a composable is rendered by exactly the
@@ -117,7 +117,7 @@ dependencies {
     // version 37 or later". Compiling against 37 only changes which APIs are
     // available to compile against; `targetSdk` is the opt-in to new RUNTIME
     // behaviour, and that is a separate decision with its own testing.
-    implementation("androidx.core:core-ktx:1.19.0")
+    implementation("androidx.core:core-ktx:1.19.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     // LocalLifecycleOwner and repeatOnLifecycle from a composable. The
     // -ktx artifact above does not provide them; Compose UI has its own
@@ -136,7 +136,7 @@ dependencies {
     implementation("androidx.browser:browser:1.10.0")
 
     // Retries a queued check-off when connectivity returns.
-    implementation("androidx.work:work-runtime-ktx:2.10.0")
+    implementation("androidx.work:work-runtime-ktx:2.12.0")
 
     // Preferences: server URL and the last sync.
     implementation("androidx.datastore:datastore-preferences:1.1.1")
@@ -161,10 +161,10 @@ dependencies {
     // and its effect is where every bug in this package has been, and a pure
     // function cannot reach it: `alarmUri` returning the right string does not
     // prove the snooze intent uses it.
-    testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation("org.robolectric:robolectric:4.17")
     // Lets a test ask what work a receiver enqueued, which is the only way to
     // see the difference between a snoozed delivery and a daily one.
-    testImplementation("androidx.work:work-testing:2.10.0")
+    testImplementation("androidx.work:work-testing:2.12.0")
     // Renders a composable on the JVM, under Robolectric. Every rule that lives
     // in a @Composable was otherwise verified by a person on an emulator once
     // and never again — see issue #110. Version from the BOM above.
