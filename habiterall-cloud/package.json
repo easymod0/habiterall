@@ -33,7 +33,7 @@
   },
   "dependencies": {
     "express": "^5.2.1",
-    "pg": "^8.13.1",
+    "pg": "^8.23.1",
     "openid-client": "^6.8.8",
     "express-session": "^1.18.1",
     "connect-pg-simple": "^10.0.0",
