@@ -101,7 +101,7 @@ android {
 // plugin.
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2026.08.00")
+    val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
     implementation(composeBom)
     androidTestImplementation(composeBom)
     // The same BOM for the JVM tests, so a composable is rendered by exactly the
@@ -117,7 +117,7 @@ dependencies {
     // version 37 or later". Compiling against 37 only changes which APIs are
     // available to compile against; `targetSdk` is the opt-in to new RUNTIME
     // behaviour, and that is a separate decision with its own testing.
-    implementation("androidx.core:core-ktx:1.19.0")
+    implementation("androidx.core:core-ktx:1.19.1")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     // LocalLifecycleOwner and repeatOnLifecycle from a composable. The
     // -ktx artifact above does not provide them; Compose UI has its own
@@ -136,12 +136,12 @@ dependencies {
     implementation("androidx.browser:browser:1.10.0")
 
     // Retries a queued check-off when connectivity returns.
-    implementation("androidx.work:work-runtime-ktx:2.10.0")
+    implementation("androidx.work:work-runtime-ktx:2.12.0")
 
     // Preferences: server URL and the last sync.
-    implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation("androidx.datastore:datastore-preferences:1.3.0")
 
-    implementation("com.squareup.okhttp3:okhttp:5.5.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.1")
     // This was pinned at 1.9.0 against a ceiling that turns out not to exist,
     // and the correction is worth keeping because the reasoning sounded right.
     // A class compiled by a later Kotlin cannot be read by an earlier compiler,
@@ -152,8 +152,8 @@ dependencies {
     // does the compiling. So the ceiling moves with the plugin version, not with
     // AGP — and measured both ways before this line changed, 1.11.0 compiles
     // under 2.4.10 and under 2.2.10 alike.
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.12.0")
 
     testImplementation("junit:junit:4.13.2")
     // Real Intents, real PendingIntents, a real AlarmManager and a real
@@ -161,10 +161,10 @@ dependencies {
     // and its effect is where every bug in this package has been, and a pure
     // function cannot reach it: `alarmUri` returning the right string does not
     // prove the snooze intent uses it.
-    testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation("org.robolectric:robolectric:4.17")
     // Lets a test ask what work a receiver enqueued, which is the only way to
     // see the difference between a snoozed delivery and a daily one.
-    testImplementation("androidx.work:work-testing:2.10.0")
+    testImplementation("androidx.work:work-testing:2.12.0")
     // Renders a composable on the JVM, under Robolectric. Every rule that lives
     // in a @Composable was otherwise verified by a person on an emulator once
     // and never again — see issue #110. Version from the BOM above.
@@ -176,10 +176,10 @@ dependencies {
     // MANIFEST entry, and only the app variant's manifest is merged into what
     // the unit tests inflate.
     debugImplementation("androidx.compose.ui:ui-test-manifest")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.12.0")
     // A real local server for `WidgetSync.refreshFromServer` to hit, so the
     // request it makes can be read back (the query string) rather than
     // trusted from the call site. Pinned to the same version as the `okhttp`
     // implementation dependency above, which is what it embeds a client for.
-    testImplementation("com.squareup.okhttp3:mockwebserver:5.5.0")
+    testImplementation("com.squareup.okhttp3:mockwebserver:5.5.1")
 }
