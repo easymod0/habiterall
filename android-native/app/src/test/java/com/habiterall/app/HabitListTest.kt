@@ -19,6 +19,8 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.getBoundsInRoot
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasContentDescription
@@ -1146,6 +1148,41 @@ class HabitListTest {
         compose.onNodeWithContentDescription("Confirm").assertIsDisplayed()
         val fieldRight = compose.onNode(hasSetTextAction()).getUnclippedBoundsInRoot().right
         assertTrue(fieldRight >= 355.dp)
+    }
+
+    /**
+     * The field grows out of the search icon, so part-way through the expand
+     * its VISIBLE part must already reach the bar's right edge while its left
+     * edge has not yet arrived. Two wrong layouts pass the settled test above
+     * and fail this one: an AnimatedVisibility start-aligned by the title slot
+     * (the visible part grows rightward from 16dp, so its right edge is short
+     * of 355dp mid-way), and one given `fillMaxWidth()` itself (no animation:
+     * the left edge is already at 16dp). `getBoundsInRoot` is the clipped
+     * bounds, which is what the eye sees during the expand.
+     */
+    @Config(qualifiers = "w360dp-h800dp")
+    @Test
+    fun `the search field expands out of the icon, from the bar's right edge`() {
+        val habits = listOf(water, reading)
+        show(habits = habits, rows = habits)
+
+        // The semantics action, not `performClick`: an injected touch needs
+        // the clock running to deliver its up event, and with it paused the
+        // click never lands.
+        compose.mainClock.autoAdvance = false
+        compose.onNodeWithContentDescription("Search").performSemanticsAction(SemanticsActions.OnClick)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        compose.mainClock.advanceTimeByFrame()
+        compose.mainClock.advanceTimeBy(100)
+
+        val mid = compose.onNode(hasSetTextAction()).getBoundsInRoot()
+        assertTrue("right edge mid-expand: ${mid.right}", mid.right >= 355.dp)
+        assertTrue("left edge mid-expand: ${mid.left}", mid.left >= 60.dp)
+
+        compose.mainClock.autoAdvance = true
+        settleAnimation()
+        val done = compose.onNode(hasSetTextAction()).getBoundsInRoot()
+        assertTrue("left edge settled: ${done.left}", done.left <= 20.dp)
     }
 
     /**
