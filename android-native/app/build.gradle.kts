@@ -101,7 +101,7 @@ android {
 // plugin.
 
 dependencies {
-    val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
+    val composeBom = platform("androidx.compose:compose-bom:2026.08.00")
     implementation(composeBom)
     androidTestImplementation(composeBom)
     // The same BOM for the JVM tests, so a composable is rendered by exactly the
@@ -153,7 +153,7 @@ dependencies {
     // AGP — and measured both ways before this line changed, 1.11.0 compiles
     // under 2.4.10 and under 2.2.10 alike.
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.12.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.12.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
     testImplementation("junit:junit:4.13.2")
     // Real Intents, real PendingIntents, a real AlarmManager and a real
@@ -161,7 +161,7 @@ dependencies {
     // and its effect is where every bug in this package has been, and a pure
     // function cannot reach it: `alarmUri` returning the right string does not
     // prove the snooze intent uses it.
-    testImplementation("org.robolectric:robolectric:4.17")
+    testImplementation("org.robolectric:robolectric:4.16.1")
     // Lets a test ask what work a receiver enqueued, which is the only way to
     // see the difference between a snoozed delivery and a daily one.
     testImplementation("androidx.work:work-testing:2.12.0")
@@ -176,7 +176,7 @@ dependencies {
     // MANIFEST entry, and only the app variant's manifest is merged into what
     // the unit tests inflate.
     debugImplementation("androidx.compose.ui:ui-test-manifest")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.12.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
     // A real local server for `WidgetSync.refreshFromServer` to hit, so the
     // request it makes can be read back (the query string) rather than
     // trusted from the call site. Pinned to the same version as the `okhttp`
