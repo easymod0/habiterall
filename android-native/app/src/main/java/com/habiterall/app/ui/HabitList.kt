@@ -305,87 +305,99 @@ fun HabitList(
                     // the overflow give way below. The animation is what makes
                     // the icon and the field read as one control rather than
                     // one replacing the other with no relationship shown.
-                    AnimatedVisibility(
-                        visible = searchOpen,
-                        enter = expandHorizontally(expandFrom = Alignment.End),
-                        exit = shrinkHorizontally(shrinkTowards = Alignment.End),
-                    ) {
-                        TextField(
-                            value = query,
-                            onValueChange = onQueryChange,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .focusRequester(searchFocusRequester)
-                                .focusGroup()
-                                .onFocusChanged {
-                                    // The GROUP's focus, not the field's own:
-                                    // pressing Clear or Confirm moves focus to
-                                    // that button first, and an `isFocused`
-                                    // check on just the field would read that
-                                    // as focus having left and auto-confirm
-                                    // out from under the press.
-                                    //
-                                    // Gated on `everFocused`: this callback
-                                    // also fires once on composition, before
-                                    // `requestFocus()` below has run, reporting
-                                    // `hasFocus = false` for a group nothing
-                                    // has touched yet — treating that as a
-                                    // loss confirmed the field shut on the same
-                                    // frame it opened.
-                                    if (it.hasFocus) {
-                                        everFocused = true
-                                    } else if (searchOpen && everFocused) {
-                                        confirmSearch()
-                                    }
-                                },
-                            singleLine = true,
-                            // Explicit, because this field is in the TITLE
-                            // slot: `TopAppBar` wraps that slot in
-                            // `ProvideTextStyle(titleTextStyle)`, and
-                            // `TextField`'s `textStyle` defaults to
-                            // `LocalTextStyle.current` — so a query typed here
-                            // renders at the bar's 22sp/28sp headline rather
-                            // than the 16sp every other field in this app
-                            // uses, roughly a third fewer characters visible
-                            // on a 360dp bar before it scrolls under the
-                            // caret. Nothing chose 22sp; it was inherited.
-                            textStyle = MaterialTheme.typography.bodyLarge,
-                            placeholder = { Text("Find a habit") },
-                            colors = TextFieldDefaults.colors(
-                                focusedContainerColor = Color.Transparent,
-                                unfocusedContainerColor = Color.Transparent,
-                                focusedIndicatorColor = Color.Transparent,
-                                unfocusedIndicatorColor = Color.Transparent,
-                            ),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                            keyboardActions = KeyboardActions(onSearch = { confirmSearch() }),
-                            trailingIcon = {
-                                Row {
-                                    // Absent on an empty query, where it would
-                                    // mean the same thing as Confirm beside it.
-                                    if (query.isNotEmpty()) {
+                    //
+                    // The full-width Box, end-aligned, is what anchors the
+                    // growing field at the bar's RIGHT edge, where the search
+                    // icon was. Without it the title slot start-aligns the
+                    // AnimatedVisibility, so `expandFrom = End` only aligned
+                    // the field inside a box that itself grew from the LEFT —
+                    // and from Compose ui/animation 1.12.1 the bare form also
+                    // ends the animation with the field shifted its own width
+                    // off-screen (right edge at 16dp of 360), which is what
+                    // `the bar fits at 360dp` caught on the BOM bump.
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                        AnimatedVisibility(
+                            visible = searchOpen,
+                            enter = expandHorizontally(expandFrom = Alignment.End),
+                            exit = shrinkHorizontally(shrinkTowards = Alignment.End),
+                        ) {
+                            TextField(
+                                value = query,
+                                onValueChange = onQueryChange,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .focusRequester(searchFocusRequester)
+                                    .focusGroup()
+                                    .onFocusChanged {
+                                        // The GROUP's focus, not the field's own:
+                                        // pressing Clear or Confirm moves focus to
+                                        // that button first, and an `isFocused`
+                                        // check on just the field would read that
+                                        // as focus having left and auto-confirm
+                                        // out from under the press.
+                                        //
+                                        // Gated on `everFocused`: this callback
+                                        // also fires once on composition, before
+                                        // `requestFocus()` below has run, reporting
+                                        // `hasFocus = false` for a group nothing
+                                        // has touched yet — treating that as a
+                                        // loss confirmed the field shut on the same
+                                        // frame it opened.
+                                        if (it.hasFocus) {
+                                            everFocused = true
+                                        } else if (searchOpen && everFocused) {
+                                            confirmSearch()
+                                        }
+                                    },
+                                singleLine = true,
+                                // Explicit, because this field is in the TITLE
+                                // slot: `TopAppBar` wraps that slot in
+                                // `ProvideTextStyle(titleTextStyle)`, and
+                                // `TextField`'s `textStyle` defaults to
+                                // `LocalTextStyle.current` — so a query typed here
+                                // renders at the bar's 22sp/28sp headline rather
+                                // than the 16sp every other field in this app
+                                // uses, roughly a third fewer characters visible
+                                // on a 360dp bar before it scrolls under the
+                                // caret. Nothing chose 22sp; it was inherited.
+                                textStyle = MaterialTheme.typography.bodyLarge,
+                                placeholder = { Text("Find a habit") },
+                                colors = TextFieldDefaults.colors(
+                                    focusedContainerColor = Color.Transparent,
+                                    unfocusedContainerColor = Color.Transparent,
+                                    focusedIndicatorColor = Color.Transparent,
+                                    unfocusedIndicatorColor = Color.Transparent,
+                                ),
+                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                keyboardActions = KeyboardActions(onSearch = { confirmSearch() }),
+                                trailingIcon = {
+                                    Row {
+                                        // Absent on an empty query, where it would
+                                        // mean the same thing as Confirm beside it.
+                                        if (query.isNotEmpty()) {
+                                            TooltipBox(
+                                                positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                                                tooltip = { PlainTooltip { Text("Clear") } },
+                                                state = rememberTooltipState(),
+                                            ) {
+                                                IconButton(onClick = { onQueryChange("") }) {
+                                                    Icon(Icons.Default.Clear, contentDescription = "Clear")
+                                                }
+                                            }
+                                        }
                                         TooltipBox(
                                             positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
-                                            tooltip = { PlainTooltip { Text("Clear") } },
+                                            tooltip = { PlainTooltip { Text("Confirm") } },
                                             state = rememberTooltipState(),
                                         ) {
-                                            IconButton(onClick = { onQueryChange("") }) {
-                                                Icon(Icons.Default.Clear, contentDescription = "Clear")
+                                            IconButton(onClick = { confirmSearch() }) {
+                                                Icon(Icons.Default.Check, contentDescription = "Confirm")
                                             }
                                         }
                                     }
-                                    TooltipBox(
-                                        positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
-                                        tooltip = { PlainTooltip { Text("Confirm") } },
-                                        state = rememberTooltipState(),
-                                    ) {
-                                        IconButton(onClick = { confirmSearch() }) {
-                                            Icon(Icons.Default.Check, contentDescription = "Confirm")
-                                        }
-                                    }
-                                }
-                            },
-                        )
+                                },
+                            )
+                        }
                     }
                 },
                 actions = {
