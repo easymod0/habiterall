@@ -154,7 +154,7 @@ class RemindersTest {
         // `nextOccurrence` alone answers.
         val sundayMorning = at(2026, 9, 13, 6, 0)
         val fired = firesOn(
-            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 62, sundayMorning)!!
+            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 62, sundayMorning, "00:00")!!
         )
         assertEquals(14, fired.dayOfMonth)
         assertEquals(8, fired.hour)
@@ -167,7 +167,7 @@ class RemindersTest {
         // search advances rather than checking tomorrow and giving up.
         val mondayMorning = at(2026, 9, 14, 6, 0)
         val fired = firesOn(
-            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 64, mondayMorning)!!
+            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 64, mondayMorning, "00:00")!!
         )
         assertEquals(19, fired.dayOfMonth)
         assertEquals(8, fired.hour)
@@ -177,7 +177,7 @@ class RemindersTest {
         // are needed for this one and no more are ever needed.
         val saturdayEvening = at(2026, 9, 19, 20, 0)
         val nextWeek = firesOn(
-            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 64, saturdayEvening)!!
+            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 64, saturdayEvening, "00:00")!!
         )
         assertEquals(26, nextWeek.dayOfMonth)
         assertEquals(8, nextWeek.hour)
@@ -191,7 +191,7 @@ class RemindersTest {
         repeat(7) {
             assertNull(
                 "a mask of 0 must arm nothing, failed on ${cursor.toLocalDate()}",
-                Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 0, cursor),
+                Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 0, cursor, "00:00"),
             )
             cursor = cursor.plusDays(1)
         }
@@ -209,7 +209,7 @@ class RemindersTest {
             assertEquals(
                 "127 must be the identity, failed at $cursor",
                 Reminders.nextOccurrence(LocalTime.of(8, 30), cursor),
-                Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 127, cursor),
+                Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 127, cursor, "00:00"),
             )
             cursor = cursor.plusDays(1)
         }
@@ -224,7 +224,7 @@ class RemindersTest {
         // rather than folded into it.
         val fridayBefore = at(2026, 3, 6, 9, 0)
         val fired = firesOn(
-            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 62, fridayBefore)!!
+            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 62, fridayBefore, "00:00")!!
         )
         assertEquals(9, fired.dayOfMonth)
         assertEquals(8, fired.hour)
@@ -236,9 +236,84 @@ class RemindersTest {
         // The ordinary case, stated so a walk that always advanced a day would
         // fail: Monday at 06:00 on a Mon-Fri habit is Monday at 08:30.
         val fired = firesOn(
-            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 62, at(2026, 9, 14, 6, 0))!!
+            Reminders.nextAllowedOccurrence(LocalTime.of(8, 30), 62, at(2026, 9, 14, 6, 0), "00:00")!!
         )
         assertEquals(14, fired.dayOfMonth)
+    }
+
+    /* ---------- a day that ends after midnight (#76) ---------- */
+
+    @Test
+    fun `a reminder before the boundary is about the day that is ending`() {
+        // 2026-09-14 is a Monday; mask 2 is Monday only. With the day ending at
+        // 03:00 a 01:00 reminder belongs to Monday and so fires TUESDAY 01:00:
+        // the walk reads the weekday off the day the reminder is about, not the
+        // date it fires on.
+        val mondayNoon = at(2026, 9, 14, 12, 0)
+        val fired = firesOn(
+            Reminders.nextAllowedOccurrence(LocalTime.of(1, 0), 2, mondayNoon, "03:00")!!
+        )
+        assertEquals(15, fired.dayOfMonth)
+        assertEquals(1, fired.hour)
+
+        // The control: at midnight the same reminder is about the date it fires
+        // on, so the next Monday 01:00 is the answer.
+        val atMidnight = firesOn(
+            Reminders.nextAllowedOccurrence(LocalTime.of(1, 0), 2, mondayNoon, "00:00")!!
+        )
+        assertEquals(21, atMidnight.dayOfMonth)
+        assertEquals(1, atMidnight.hour)
+    }
+
+    @Test
+    fun `a reminder at or after the boundary is about the date it fires on`() {
+        // 04:00 with the day ending at 03:00 is Monday's own morning.
+        val fired = firesOn(
+            Reminders.nextAllowedOccurrence(LocalTime.of(4, 0), 2, at(2026, 9, 14, 1, 0), "03:00")!!
+        )
+        assertEquals(14, fired.dayOfMonth)
+        assertEquals(4, fired.hour)
+
+        // And the boundary minute itself is not before it.
+        val atBoundary = firesOn(
+            Reminders.nextAllowedOccurrence(LocalTime.of(3, 0), 2, at(2026, 9, 14, 1, 0), "03:00")!!
+        )
+        assertEquals(14, atBoundary.dayOfMonth)
+    }
+
+    @Test
+    fun `a 02 30 reminder in a skipped hour keeps the night's owner date`() {
+        // Berlin springs forward on Sunday 2027-03-28: 02:30 does not exist and
+        // the fire time shifts to 03:30. Judged from the SHIFTED wall clock
+        // (03:30, not before the 03:00 boundary) the reminder would be about
+        // Sunday itself; judged from the nominal 02:30 it is about Saturday
+        // night, which is what a Saturday-only reminder means. Mask 64 is
+        // Saturday only.
+        val berlin = ZoneId.of("Europe/Berlin")
+        val saturdayNoon = ZonedDateTime.of(2027, 3, 27, 12, 0, 0, 0, berlin)
+        val at = Reminders.nextAllowedOccurrence(LocalTime.of(2, 30), 64, saturdayNoon, "03:00")!!
+        val fired = java.time.Instant.ofEpochMilli(at).atZone(berlin)
+        assertEquals(28, fired.dayOfMonth)
+        assertEquals("the hour that does not exist is shifted", 3, fired.hour)
+        assertEquals(30, fired.minute)
+    }
+
+    @Test
+    fun `a snooze is bounded by the account's day, not the calendar's`() {
+        // 23:30 on the 16th, day ending at 03:00: an hour on is 00:30 on the
+        // 17th, which is still the 16th's day.
+        assertEquals(
+            at(2026, 8, 17, 0, 30),
+            Reminders.snoozeUntil(at(2026, 8, 16, 23, 30), "2026-08-16", "03:00"),
+        )
+        // 02:30 + 1h = 03:30, the 17th's own morning: refused for the 16th.
+        assertNull(Reminders.snoozeUntil(at(2026, 8, 17, 2, 30), "2026-08-16", "03:00"))
+        // At midnight it is the calendar's answer, unchanged.
+        assertNull(Reminders.snoozeUntil(at(2026, 8, 16, 23, 30), "2026-08-16", "00:00"))
+        assertEquals(
+            at(2026, 8, 16, 23, 30),
+            Reminders.snoozeUntil(at(2026, 8, 16, 22, 30), "2026-08-16", "00:00"),
+        )
     }
 
     /* ---------- the offline cache, which is what arms all of the above ---------- */
@@ -292,14 +367,14 @@ class RemindersTest {
     /* ---------- ask me later ---------- */
 
     private fun snoozeGap(now: ZonedDateTime, date: String): Long? =
-        Reminders.snoozeUntil(now, date)?.let {
+        Reminders.snoozeUntil(now, date, "00:00")?.let {
             it.toInstant().toEpochMilli() - now.toInstant().toEpochMilli()
         }
 
     @Test
     fun `a snooze fires an hour later on the same day`() {
         val now = at(2026, 3, 10, 8, 0)
-        assertEquals(at(2026, 3, 10, 9, 0), Reminders.snoozeUntil(now, "2026-03-10"))
+        assertEquals(at(2026, 3, 10, 9, 0), Reminders.snoozeUntil(now, "2026-03-10", "00:00"))
     }
 
     @Test
@@ -308,14 +383,14 @@ class RemindersTest {
         // posted at 00:30 would ask about a day the user has not lived while
         // the day it was about goes unasked. `dueReminders` drops a straddling
         // reminder for the same reason.
-        assertNull(Reminders.snoozeUntil(at(2026, 3, 10, 23, 30), "2026-03-10"))
+        assertNull(Reminders.snoozeUntil(at(2026, 3, 10, 23, 30), "2026-03-10", "00:00"))
         // Exactly midnight is already tomorrow, which is the boundary every
         // "is it still today?" test gets wrong in the same direction.
-        assertNull(Reminders.snoozeUntil(at(2026, 3, 10, 23, 0), "2026-03-10"))
+        assertNull(Reminders.snoozeUntil(at(2026, 3, 10, 23, 0), "2026-03-10", "00:00"))
         // One minute of room is still room.
         assertEquals(
             at(2026, 3, 10, 23, 59),
-            Reminders.snoozeUntil(at(2026, 3, 10, 22, 59), "2026-03-10"),
+            Reminders.snoozeUntil(at(2026, 3, 10, 22, 59), "2026-03-10", "00:00"),
         )
     }
 
@@ -328,13 +403,13 @@ class RemindersTest {
         // why the press-only question armed one — and the re-post reads
         // `LocalDate.now()`, so it would have asked about the 17th while the
         // 16th left the shade unanswered.
-        assertNull(Reminders.snoozeUntil(at(2026, 8, 17, 0, 30), "2026-08-16"))
+        assertNull(Reminders.snoozeUntil(at(2026, 8, 17, 0, 30), "2026-08-16", "00:00"))
         // Hours later on the wrong day is the same answer, not a nearer miss.
-        assertNull(Reminders.snoozeUntil(at(2026, 8, 17, 9, 0), "2026-08-16"))
+        assertNull(Reminders.snoozeUntil(at(2026, 8, 17, 9, 0), "2026-08-16", "00:00"))
         // And the same day is unaffected: this is one question, not two guards.
         assertEquals(
             at(2026, 8, 17, 10, 0),
-            Reminders.snoozeUntil(at(2026, 8, 17, 9, 0), "2026-08-17"),
+            Reminders.snoozeUntil(at(2026, 8, 17, 9, 0), "2026-08-17", "00:00"),
         )
     }
 
@@ -366,13 +441,13 @@ class RemindersTest {
         assertEquals(3_600_000L, snoozeGap(at(2026, 11, 1, 1, 30), "2026-11-01"))
         assertEquals(
             1,
-            Reminders.snoozeUntil(at(2026, 11, 1, 1, 30), "2026-11-01")!!.dayOfMonth,
+            Reminders.snoozeUntil(at(2026, 11, 1, 1, 30), "2026-11-01", "00:00")!!.dayOfMonth,
         )
 
         // And springs forward on 2026-03-08: 01:30 plus an hour is 03:30,
         // because 02:30 does not exist that day.
         assertEquals(3_600_000L, snoozeGap(at(2026, 3, 8, 1, 30), "2026-03-08"))
-        assertEquals(3, Reminders.snoozeUntil(at(2026, 3, 8, 1, 30), "2026-03-08")!!.hour)
+        assertEquals(3, Reminders.snoozeUntil(at(2026, 3, 8, 1, 30), "2026-03-08", "00:00")!!.hour)
     }
 
     @Test
@@ -382,13 +457,13 @@ class RemindersTest {
         // or 25 hours long — and the only one that holds where the transition
         // is at midnight itself, as it is in America/Santiago, where "before
         // 24:00" is not even a time that exists.
-        assertNull(Reminders.snoozeUntil(at(2026, 3, 8, 23, 30), "2026-03-08"))
-        assertNull(Reminders.snoozeUntil(at(2026, 11, 1, 23, 30), "2026-11-01"))
+        assertNull(Reminders.snoozeUntil(at(2026, 3, 8, 23, 30), "2026-03-08", "00:00"))
+        assertNull(Reminders.snoozeUntil(at(2026, 11, 1, 23, 30), "2026-11-01", "00:00"))
 
         val santiago = ZoneId.of("America/Santiago")
         // 2026-09-06 has no 00:00 in Santiago: the clocks go straight to 01:00.
         val eve = ZonedDateTime.of(2026, 9, 5, 23, 30, 0, 0, santiago)
-        assertNull(Reminders.snoozeUntil(eve, "2026-09-05"))
+        assertNull(Reminders.snoozeUntil(eve, "2026-09-05", "00:00"))
     }
 
     /* ---------- the plumbing, which unit tests cannot reach through Android ---------- */

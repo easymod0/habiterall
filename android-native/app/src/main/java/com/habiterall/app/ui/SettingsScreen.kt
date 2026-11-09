@@ -318,6 +318,20 @@ fun SettingsScreen(
                 onPick = { put("dayOrder", "the day order", JsonPrimitive(it)) },
             )
             ChoiceRow(
+                title = "My day ends at",
+                options = listOf("00:00" to "Midnight") +
+                    (1..6).map { "%02d:00".format(it).let { hour -> hour to hour } },
+                selected = settings.dayEndsAtOrDefault,
+                enabled = !busy,
+                onPick = { put("dayEndsAt", "when your day ends", JsonPrimitive(it)) },
+            )
+            Text(
+                "For a day that runs past midnight: a check-off made before this hour " +
+                    "counts for the previous day. Entries already recorded do not move.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            ChoiceRow(
                 title = "Week starts on",
                 options = listOf("monday" to "Monday", "sunday" to "Sunday"),
                 selected = settings.weekStartOrDefault,

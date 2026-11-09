@@ -26,10 +26,10 @@ import java.util.Locale
  * not. Chasing an exact, character-for-character match is not worth what it
  * buys — `java.util.regex` has no `Diacritic` property at all, so it would
  * mean a hand-maintained codepoint table, and being wrong here costs a search
- * result rather than a wrong entry. See the sixth-mirror note below.
+ * result rather than a wrong entry. See the mirror note below.
  *
  * Pure, and pinned by [com.habiterall.app.HabitFilterTest]. It reaches no
- * storage and no request, which is also why it is not a sixth mirror: the five
+ * storage and no request, which is also why it is not another mirror: the six
  * hand-written ones exist so two clients agree about a value that ends up on
  * disk, and disagreeing here costs a search result, not a wrong entry.
  */

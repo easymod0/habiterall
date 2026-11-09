@@ -7,13 +7,13 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.Toast
 import com.habiterall.app.R
+import com.habiterall.app.data.DayEnd
 import com.habiterall.app.data.Outbox
 import com.habiterall.app.notify.Notifications
 import com.habiterall.app.widget.WidgetSync
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.time.LocalDate
 
 /**
  * Collects a number for a measurable habit.
@@ -33,7 +33,7 @@ class CountEntryActivity : Activity() {
         // flag rather than a missing date, because an absent field is not a
         // statement and inventing a day from one would be exactly that.
         val date = if (intent.getBooleanExtra(Notifications.EXTRA_TODAY, false)) {
-            LocalDate.now().toString()
+            DayEnd.today()
         } else {
             intent.getStringExtra(Notifications.EXTRA_DATE)
         }

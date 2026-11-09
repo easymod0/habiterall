@@ -357,7 +357,7 @@ class WidgetTest {
     @Test
     fun `the next midnight is the start of tomorrow, in the phone's own zone`() {
         val toronto = ZoneId.of("America/Toronto")
-        val at = Widgets.nextMidnight(ZonedDateTime.of(2026, 8, 16, 22, 30, 0, 0, toronto))
+        val at = Widgets.nextDayStart(ZonedDateTime.of(2026, 8, 16, 22, 30, 0, 0, toronto), "00:00")
         assertEquals(ZonedDateTime.of(2026, 8, 17, 0, 0, 0, 0, toronto), at)
     }
 
@@ -369,12 +369,42 @@ class WidgetTest {
         // and a zone that ever goes backward over midnight is why the two are
         // not the same function.
         val santiago = ZoneId.of("America/Santiago")
-        val at = Widgets.nextMidnight(ZonedDateTime.of(2026, 9, 5, 22, 0, 0, 0, santiago))
+        val at = Widgets.nextDayStart(ZonedDateTime.of(2026, 9, 5, 22, 0, 0, 0, santiago), "00:00")
         assertEquals(6, at.dayOfMonth)
         assertEquals(1, at.hour)
         assertTrue(at.toInstant().isAfter(
             ZonedDateTime.of(2026, 9, 5, 22, 0, 0, 0, santiago).toInstant()
         ))
+    }
+
+    @Test
+    fun `a day that ends at 03-00 starts at 03-00, today if it is still ahead`() {
+        val toronto = ZoneId.of("America/Toronto")
+        val at = Widgets.nextDayStart(ZonedDateTime.of(2026, 8, 17, 1, 0, 0, 0, toronto), "03:00")
+        assertEquals(ZonedDateTime.of(2026, 8, 17, 3, 0, 0, 0, toronto), at)
+    }
+
+    @Test
+    fun `at the boundary itself the next day start is tomorrow's`() {
+        val toronto = ZoneId.of("America/Toronto")
+        val at = Widgets.nextDayStart(ZonedDateTime.of(2026, 8, 17, 3, 0, 0, 0, toronto), "03:00")
+        assertEquals(ZonedDateTime.of(2026, 8, 18, 3, 0, 0, 0, toronto), at)
+    }
+
+    @Test
+    fun `at 23-00 the next day start is tomorrow at 03-00`() {
+        val toronto = ZoneId.of("America/Toronto")
+        val at = Widgets.nextDayStart(ZonedDateTime.of(2026, 8, 17, 23, 0, 0, 0, toronto), "03:00")
+        assertEquals(ZonedDateTime.of(2026, 8, 18, 3, 0, 0, 0, toronto), at)
+    }
+
+    @Test
+    fun `a boundary inside a spring-forward gap resolves to the first instant after it`() {
+        // Berlin 2027-03-28: 02:00 does not exist, the clock goes 01:59 -> 03:00.
+        val berlin = ZoneId.of("Europe/Berlin")
+        val at = Widgets.nextDayStart(ZonedDateTime.of(2027, 3, 28, 0, 30, 0, 0, berlin), "02:00")
+        assertEquals(ZonedDateTime.of(2027, 3, 28, 3, 0, 0, 0, berlin), at)
+        assertEquals(3, at.hour)
     }
 
     @Test

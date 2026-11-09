@@ -4,6 +4,7 @@ import android.app.AlarmManager
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import com.habiterall.app.data.DayEnd
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.Settings
 import com.habiterall.app.notify.Notifications
@@ -22,6 +23,7 @@ import androidx.work.workDataOf
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import org.junit.After
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -31,6 +33,8 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowAlarmManager
 import org.robolectric.shadows.ShadowLog
+import java.time.Clock
+import java.time.Instant
 import java.time.ZoneId
 import java.time.ZonedDateTime
 
@@ -73,6 +77,18 @@ class ReminderWiringTest {
     @Before
     fun forgetTheLastArm() {
         Reminders.lastArmWasExact = null
+    }
+
+    /**
+     * `DayEnd` is an `object` and outlives this class, so a test that adopts a
+     * boundary or moves the clock puts both back, or a later class silently runs
+     * at 03:00. `load` reads a preferences file `adopt` wrote, and Robolectric
+     * gives each test a fresh one.
+     */
+    @After
+    fun putTheDayBack() {
+        DayEnd.clock = null
+        DayEnd.load(app)
     }
 
     private val manager
@@ -245,6 +261,131 @@ class ReminderWiringTest {
             "an unmasked reminder is today's or tomorrow's, never further out",
             fires.toLocalDate() <= now.toLocalDate().plusDays(1),
         )
+    }
+
+    /* ---------- a day that ends after midnight (#76), reaching the platform ---------- */
+
+    private val toronto = ZoneId.of("America/Toronto")
+
+    /** 2026-08-17 is a Monday. */
+    private fun clockAt(y: Int, m: Int, d: Int, h: Int, min: Int): Clock =
+        Clock.fixed(ZonedDateTime.of(y, m, d, h, min, 0, 0, toronto).toInstant(), toronto)
+
+    @Test
+    fun `schedule arms a Monday-only 01 00 reminder on Tuesday when the day ends at 03 00`() {
+        runBlocking { DayEnd.adopt(app, "03:00") }
+        DayEnd.clock = clockAt(2026, 8, 17, 12, 0)
+
+        Reminders.schedule(
+            app,
+            habit("01:00").copy(reminderDays = 2),
+            androidEnabled = true,
+        )
+
+        val fires = Instant.ofEpochMilli(alarms().single().triggerAtTime).atZone(toronto)
+        assertEquals(
+            "about Monday, so it fires Tuesday 01:00",
+            ZonedDateTime.of(2026, 8, 18, 1, 0, 0, 0, toronto),
+            fires,
+        )
+    }
+
+    @Test
+    fun `at midnight the same reminder waits for the next Monday`() {
+        DayEnd.clock = clockAt(2026, 8, 17, 12, 0)
+
+        Reminders.schedule(
+            app,
+            habit("01:00").copy(reminderDays = 2),
+            androidEnabled = true,
+        )
+
+        val fires = Instant.ofEpochMilli(alarms().single().triggerAtTime).atZone(toronto)
+        assertEquals(ZonedDateTime.of(2026, 8, 24, 1, 0, 0, 0, toronto), fires)
+    }
+
+    @Test
+    fun `a notification built at 00 30 under a 03 00 boundary names yesterday`() {
+        runBlocking { DayEnd.adopt(app, "03:00") }
+        DayEnd.clock = clockAt(2026, 8, 17, 0, 30)
+        shadowOf(app).grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+        val server = MockWebServer()
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """[{"id":$delivered,"name":"Meditate","reminder_time":"01:00"}]""",
+            ),
+        )
+        server.enqueue(MockResponse().setResponseCode(200).setBody("[]"))
+        server.start()
+        try {
+            runBlocking { Settings(app).setServerUrl(server.url("/").toString()) }
+
+            deliverDailyAlarm()
+
+            val posted = shadowOf(
+                app.getSystemService(Context.NOTIFICATION_SERVICE)
+                    as android.app.NotificationManager
+            ).allNotifications.single()
+            val dates = posted.actions.orEmpty().map {
+                shadowOf(it.actionIntent).savedIntent.getStringExtra(Notifications.EXTRA_DATE)
+            }
+            assertTrue("the notification has buttons", dates.isNotEmpty())
+            assertEquals(
+                "every button names the day that is ending, not the calendar's",
+                setOf("2026-08-16"),
+                dates.toSet(),
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    /**
+     * The six-hourly sync is the one path that learns a changed boundary when
+     * nobody opened the app, so it has to ADOPT it, and adopt it BEFORE it arms:
+     * `schedule` decides which night owns a 01:00 reminder against whatever
+     * boundary is held when it runs.
+     *
+     * Both halves in one run, because either alone passes with the other
+     * broken — an adopt moved after the `schedule` calls still ends with
+     * `DayEnd.current` at 03:00, and only the armed time shows it was too late.
+     */
+    @Test
+    fun `the sync worker adopts the server's boundary before it arms anything`() {
+        DayEnd.clock = clockAt(2026, 8, 17, 12, 0)
+        val server = MockWebServer()
+        server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+            override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                val body = when {
+                    path.startsWith("/api/habits") ->
+                        """[{"id":$delivered,"name":"Meditate","reminder_time":"01:00","reminder_days":2}]"""
+                    path.startsWith("/api/settings") -> """{"dayEndsAt":"03:00"}"""
+                    else -> return MockResponse().setResponseCode(404).setBody("{}")
+                }
+                return MockResponse().setResponseCode(200).setBody(body)
+            }
+        }
+        server.start()
+        try {
+            runBlocking { Settings(app).setServerUrl(server.url("/").toString()) }
+            assertEquals("starts at midnight", "00:00", DayEnd.current)
+
+            runBlocking {
+                val worker = TestListenableWorkerBuilder<Reminders.ScheduleWorker>(app).build()
+                assertEquals(ListenableWorker.Result.success(), worker.doWork())
+            }
+
+            assertEquals("03:00", DayEnd.current)
+            val fires = Instant.ofEpochMilli(alarms().single().triggerAtTime).atZone(toronto)
+            assertEquals(
+                "a Monday-only 01:00 reminder under 03:00 is about Monday and fires Tuesday",
+                ZonedDateTime.of(2026, 8, 18, 1, 0, 0, 0, toronto),
+                fires,
+            )
+        } finally {
+            server.shutdown()
+        }
     }
 
     /* ---------- soft, not loud: an inexact arm still arms, and says so ---------- */

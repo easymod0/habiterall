@@ -5,14 +5,14 @@ reasoning behind everything here — what was measured on an emulator, which wro
 version shipped — is `docs/decisions/android.md` and `routing.md`.
 
 Read the root `CLAUDE.md` first for the offline-mirror rule and the four day
-states. This client holds **five** hand-written mirrors of shared logic and no
+states. This client holds **six** hand-written mirrors of shared logic and no
 more: the tap cycle (`Grid.nextState`), reminder-time parsing (`ReminderTime`),
-`needsReminder`, the entry encoding (`Grid.valueForState`), and the channel
-default. Each runs where there may be no network. Everything else is
+`needsReminder`, the entry encoding (`Grid.valueForState`), the channel
+default, and the day boundary (`ReminderTime.effectiveDay`, #76). Each runs where there may be no network. Everything else is
 server-authoritative — the phone submits and renders whatever comes back,
 including the error.
 
-**`reminder_days` (#72) is a rule inside two existing mirrors, not a sixth.**
+**`reminder_days` (#72) is a rule inside two existing mirrors, not another.**
 `ReminderTime` gains `ALL_DAYS`, `parseReminderDays`, `weekdayOf` and `remindsOn`
 against `shared/public/ui/time.js`, and `needsReminder` asks them. The mask is a
 new FIELD on the offline reminder cache (`Settings.kt`), which is a cache and not
@@ -115,7 +115,7 @@ of — only two different "is this control worth its space" answers to two
 budgets that are not comparable.
 
 **The client now HAS a picker and a grouped list, and `groupByCategory` is
-still not a sixth mirror.** Issue #65's Android half added `CategoryPicker`
+still not another mirror.** Issue #65's Android half added `CategoryPicker`
 (`ui/HabitFormScreen.kt`) and the grouped `LazyColumn` (`ui/HabitList.kt`,
 `ui/HabitSections.kt`), so "there is no picker: setting a category is a web
 action" is no longer true — picking one is now a native action, same as
@@ -180,7 +180,7 @@ constant, `FreshnessTest` and its half of `AppSettingsDefaultsTest` are all gone
 with it. `habiterall-cloud/CLAUDE.md` has the server's half and
 `docs/decisions/caching.md` has the argument.
 
-**`HabitFilter` is not a sixth mirror.** A mirror exists so two clients agree
+**`HabitFilter` is not another mirror.** A mirror exists so two clients agree
 about a value that reaches storage; this predicate reaches none. The two
 clients disagreeing about diacritic folding costs a search result, not a wrong
 entry. The two folds are near-identical, not equal — Java's `\p{Mn}` and JS's
@@ -334,9 +334,66 @@ Nothing here touches `notify_log`, which is why a snooze on a server-sent channe
 is out of scope — the watermark is written after a send, so it would already be
 filed as delivered.
 
+## The day boundary
+
+**The rule is `ReminderTime`, and every "today" is `DayEnd.today()`.** A day may
+end up to 06:00 (`dayEndsAt`, #76), so `LocalDate.now()`, `LocalTime.now()` and
+`ZonedDateTime.now()` are wrong anywhere that asks which day the USER is on. The
+sixth mirror is `ReminderTime.effectiveDay` / `effectiveReminderMinutes` /
+`dayEndMinutes`, against `shared/public/ui/time.js`, with the same literals in
+`ReminderTimeTest` as `shared/test/notify.test.js`. `DayEndTest` walks
+`app/src/main` and fails on a bare clock read outside `data/DayEnd.kt`, and
+asserts how many `DayEnd.today(` sites it saw, so a guard pointed at the wrong
+directory fails instead of reading clean. The record is
+`docs/decisions/day-boundary.md`.
+
+**The holder is SharedPreferences, not `Settings.kt`'s DataStore, on purpose.**
+DataStore is asynchronous, and four readers have no suspend path to it: the
+OkHttp interceptor that stamps `X-Habiterall-Day-End` on every request, the
+first composition of the list (which must not paint a frame on the wrong day and
+then correct it), `dayLabel`, and `ActionReceiver`'s snooze. A blocking read from
+any of them is an ANR on a slow disk. Do not "fix" this to DataStore.
+`HabiterallApp.onCreate` calls `DayEnd.load` first, before `rescheduleAll`.
+
+**`DayEnd.adopt` is the single entry, and it redraws.** Three paths learn the
+server's value: the list's fetch, the settings patch, and the six-hourly worker
+(which may be the only one to ever see a change, with nobody in the app). Each
+calls `adopt` BEFORE anything that decides against the boundary — the overview
+request, `Reminders.rescheduleAll`, the `schedule` calls — and
+`MainActivityWiringTest` and `ReminderWiringTest` pin that order, because a
+changed boundary with the old one in force arms every alarm on the wrong night.
+It redraws because the widgets paint a date and the alarm is aimed AT the
+boundary: a new value with the old frame on the screen shows the wrong day until
+the next redraw, which was itself aimed at the old boundary. Unchanged returns
+false and does nothing; every fetch calls it.
+
+**A reminder's owner date comes from the NOMINAL time.**
+`nextAllowedOccurrence` takes the weekday from `firesOn.toLocalDate()` minus one
+day when the habit's `time` is before the boundary — decided from `time`, never
+from `firesOn`'s wall clock, because on a DST gap `firesOn` has been shifted
+forward and would read as after the boundary. A Monday-only 01:00 reminder under
+03:00 fires Tuesday 01:00 and asks about Monday. `snoozeUntil` compares the
+effective date of the snooze's fire time with the date the notification is about.
+
+**`DayEnd.now()` asks for the zone on every call, and that must not become a
+stored system clock.** `Clock.systemDefaultZone()` captures the zone when it is
+BUILT, once, at class load; a phone that changes zone with the process alive (a
+flight — `TIMEZONE_CHANGED` redraws but the process lives) would keep the old
+zone for `today()` and for every alarm it arms. `ZoneId.systemDefault()` is read
+each call. `DayEnd.clock` is null in production and exists only so a test can be
+at 00:30, since Robolectric does not instrument `java.time`; a test that sets it
+restores `null` in `@After` and calls `DayEnd.load(app)`, because `DayEnd` is an
+`object` that outlives the class and a later class would otherwise run at 03:00.
+Every suite runs under `@Config(application = Application::class)`, so
+`HabiterallApp.onCreate` never calls `load` there.
+
+**`armMidnight` and `ACTION_MIDNIGHT` keep their names** (comments across this
+file cite them) but aim at the start of the NEXT DAY, which is the boundary:
+`Widgets.nextDayStart`, local-calendar arithmetic only, never `now + 24h`.
+
 ## The widget
 
-**It is a CACHE, not a sixth mirror.** One habit, today, tap to cycle.
+**It is a CACHE, not another mirror.** One habit, today, tap to cycle.
 Everything it decides was already written down; what is new is `Widgets.Record`,
 the habit's SHAPE and one day's answer on disk, because a tap on a home screen
 happens with no network.
@@ -426,7 +483,7 @@ lived.
 
 **The figures are cached ANSWERS, and mirroring them is the refused option.**
 `score` and `currentStreak` come from `/api/overview`, which already returns
-both per habit, so this widget added no sixth mirror and no `Api.stats()`. What
+both per habit, so this widget added no further mirror and no `Api.stats()`. What
 it does NOT do is recompute either: the decay behind `score` is Loop's
 `0.5^(sqrt(frequency)/13)`, the most intricate arithmetic in the project, and a
 second implementation would drift from the first invisibly. "Make the strip
@@ -684,7 +741,7 @@ the browser.
 ## Known gap
 
 **A typed amount has one reader, `parseAmount` in `ui/Amount.kt`, and it is a
-DEVICE-TIER decision rather than a sixth mirror.** Before #157 this client had
+DEVICE-TIER decision rather than another mirror.** Before #157 this client had
 three — `HabitFormScreen.parseAmount` and a bare `toDoubleOrNull` in both
 `CountEntryActivity`'s number pad and `MainActivity`'s `CountDialog` — which
 disagreed with each other about `8,5` before they could disagree with the web.

@@ -345,6 +345,14 @@ data class AppSettings(
      * `Settings.kt` alongside the reminder mirrors.
      */
     @SerialName("groupByCategory") val groupByCategory: Boolean? = null,
+    /**
+     * Where the account's day ends (#76): '00:00' through '06:00'. Null means
+     * untouched, which is midnight — `SETTINGS.dayEndsAt.default` in
+     * shared/public/ui/settings.js. Unlike the display settings above, this one
+     * is held on-device by [DayEnd], because a tap and an alarm both ask it with
+     * no network.
+     */
+    @SerialName("dayEndsAt") val dayEndsAt: String? = null,
 ) {
     val androidRemindersEnabled: Boolean
         get() = notifyChannels?.contains(CHANNEL_ANDROID) ?: true
@@ -407,6 +415,8 @@ data class AppSettings(
     val groupByCategoryEnabled: Boolean
         get() = groupByCategory ?: DEFAULT_GROUP_BY_CATEGORY
 
+    val dayEndsAtOrDefault: String get() = dayEndsAt ?: DEFAULT_DAY_ENDS_AT
+
     companion object {
         const val CHANNEL_ANDROID = "android"
 
@@ -443,6 +453,9 @@ data class AppSettings(
 
         /** `SETTINGS.groupByCategory.default` in shared/public/ui/settings.js. */
         const val DEFAULT_GROUP_BY_CATEGORY = false
+
+        /** `SETTINGS.dayEndsAt.default` — midnight, the calendar day. */
+        const val DEFAULT_DAY_ENDS_AT = "00:00"
     }
 }
 
@@ -526,7 +539,7 @@ data class Overview(
      * it is a reorder-menu gate rather than a per-row handle because this
      * client's reorder is a separate full-screen list, not an in-place drag.
      *
-     * This is NOT a sixth logic mirror: nothing about HOW to sort is copied
+     * This is NOT another logic mirror: nothing about HOW to sort is copied
      * here, and never will be — the phone renders whatever `/overview`
      * returns, in that order, exactly as it always has. What the phone must
      * know is only WHETHER reordering is meaningful right now, read straight
@@ -583,6 +596,16 @@ class ApiException(val status: Int, message: String) : Exception(message) {
  */
 private const val DEVICE_ZONE_HEADER = "X-Habiterall-Timezone"
 
+/**
+ * Mirrors `DAY_END_HEADER` in shared/src/notify.js: where this account's day
+ * ends, so the server's read anchors (`/overview`, `/stats`, `/awards`) ask
+ * about the same day the phone is showing. Sent on EVERY request, `00:00`
+ * included — the server has no other way to learn it before it computes the
+ * day, and a client that sent it only when it was not the default would leave
+ * a changed-back boundary unreported.
+ */
+internal const val DAY_END_HEADER = "X-Habiterall-Day-End"
+
 class Api(
     private val baseUrl: String,
     private val onUnauthorized: (() -> Unit)? = null,
@@ -623,11 +646,12 @@ class Api(
         // are already on this clock by construction.
         .addInterceptor { chain ->
             val zone = runCatching { TimeZone.getDefault().id }.getOrNull()
-            val req = chain.request()
-            chain.proceed(
-                if (zone.isNullOrBlank()) req
-                else req.newBuilder().header(DEVICE_ZONE_HEADER, zone).build()
-            )
+            val builder = chain.request().newBuilder()
+            if (!zone.isNullOrBlank()) builder.header(DEVICE_ZONE_HEADER, zone)
+            // Outside the zone's `if`: it comes from memory, and not being able
+            // to read the ZONE is no reason for the server to assume midnight.
+            builder.header(DAY_END_HEADER, DayEnd.current)
+            chain.proceed(builder.build())
         }
         .build()
 

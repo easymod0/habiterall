@@ -124,7 +124,7 @@ A backend rewrite is not a backend rewrite here.
 `shared/src/` is not server code. `stats.js`, `validate.js` and `awards.js` run
 **in the browser too** — `shared/public/` imports them directly, with no build
 step — and parts are already hand-mirrored in Kotlin under the deliberate rule in
-`CLAUDE.md` ("a client mirrors a rule only if it must work offline", five copies,
+`CLAUDE.md` ("a client mirrors a rule only if it must work offline", six copies,
 each justified). Moving the backend to C# or Rust means the completion rule, the
 four day-states and the scoring model either become a **third** independent
 implementation, or the frontend loses them and every figure needs a round trip.

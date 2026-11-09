@@ -16,6 +16,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.habiterall.app.data.DayEnd
 import com.habiterall.app.data.Entry
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.Sentinels
@@ -28,7 +29,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.LocalTime
-import java.time.ZoneId
 import java.util.concurrent.TimeUnit
 
 /** `adb logcat -s habiterall.notify` is the whole point of this being one tag. */
@@ -90,7 +90,7 @@ object Reminders {
      * user who has revoked "Alarms & reminders", since `USE_EXACT_ALARM` covers
      * 33+ unconditionally and nothing below 31 needs a permission — and an
      * inexact alarm set for 23:52 can be delivered at 00:03, after which
-     * `LocalDate.now()` names a day the reminder was never about. The worker
+     * today's date names a day the reminder was never about. The worker
      * checks it against its own today; see [stillAboutToday]. Above 32 that
      * check is belt and braces and stays anyway: it costs one string in an
      * extra, and an exact alarm is a promise about when the system WAKES, not
@@ -171,20 +171,29 @@ object Reminders {
      * inside it, and a mask of **0** must arm nothing rather than search
      * forever. [schedule] cancels on the null.
      *
-     * The weekday is read off the LOCAL DATE the alarm would fire on, in the
-     * zone the phone is in — not off `now` — or a reminder set for 00:30 would
-     * be judged against the day before it fires.
+     * The weekday is the day the reminder is ABOUT, which is the LOCAL DATE the
+     * alarm would fire on — not `now`'s — except that a [time] before the day's
+     * end ([dayEnd], #76) belongs to the day that is ending, so it is the date
+     * BEFORE the fire date: with a 03:00 boundary a Monday-only 01:00 reminder
+     * fires Tuesday 01:00 and asks about Monday. That is decided from the
+     * nominal [time], never from `firesOn`'s wall clock, because on a DST gap
+     * `firesOn` is shifted into a different hour. No default on [dayEnd]: a
+     * caller that forgot it would silently keep the calendar day.
      */
     fun nextAllowedOccurrence(
         time: LocalTime,
         days: Int,
         now: java.time.ZonedDateTime,
+        dayEnd: String,
     ): Long? {
+        val belongsToPreviousDay =
+            time.hour * 60 + time.minute < ReminderTime.dayEndMinutes(dayEnd)
         var cursor = now
         repeat(7) {
             val at = nextOccurrence(time, cursor)
             val firesOn = java.time.Instant.ofEpochMilli(at).atZone(now.zone)
-            if (ReminderTime.remindsOn(days, firesOn.toLocalDate().toString())) return at
+            val about = firesOn.toLocalDate().let { if (belongsToPreviousDay) it.minusDays(1) else it }
+            if (ReminderTime.remindsOn(days, about.toString())) return at
             cursor = firesOn
         }
         return null
@@ -255,7 +264,8 @@ object Reminders {
             nextAllowedOccurrence(
                 time,
                 ReminderTime.parseReminderDays(habit.reminderDays),
-                java.time.ZonedDateTime.now(ZoneId.systemDefault()),
+                DayEnd.now(),
+                DayEnd.current,
             )
         }
         if (at == null) {
@@ -403,7 +413,7 @@ object Reminders {
      * moment it matters. A notification is not removed by pressing an action
      * and has no timeout, so yesterday's can be sitting in the shade at 00:30;
      * asking "does an hour fit inside today?" happily armed one, and the
-     * re-post — which reads `LocalDate.now()` — then asked about a day nobody
+     * re-post — which reads the account's today — then asked about a day nobody
      * had lived while the day it was about left the shade unanswered. Yes / No
      * / Skip on that same notification write to the day it names, so snooze was
      * the one action that silently changed the subject.
@@ -412,9 +422,18 @@ object Reminders {
      * again at its own time, and the notification stays in the shade with its
      * answers still correct for the day it names.
      */
-    fun snoozeUntil(now: java.time.ZonedDateTime, date: String): java.time.ZonedDateTime? {
+    fun snoozeUntil(
+        now: java.time.ZonedDateTime,
+        date: String,
+        dayEnd: String,
+    ): java.time.ZonedDateTime? {
         val at = now.plusMinutes(SNOOZE_MINUTES)
-        return if (at.toLocalDate().toString() == date) at else null
+        // The ACCOUNT's date for that instant (#76): at 00:30 under a 03:00
+        // boundary an hour on is 01:30, still the day before. No default on
+        // [dayEnd], so a caller cannot forget it.
+        val atMinutes = at.hour * 60 + at.minute
+        val on = ReminderTime.effectiveDay(at.toLocalDate(), atMinutes, dayEnd).date
+        return if (on.toString() == date) at else null
     }
 
     /**
@@ -461,9 +480,9 @@ object Reminders {
         context: Context,
         habitId: Long,
         date: String,
-        now: java.time.ZonedDateTime = java.time.ZonedDateTime.now(ZoneId.systemDefault()),
+        now: java.time.ZonedDateTime = DayEnd.now(),
     ): Boolean {
-        val at = snoozeUntil(now, date) ?: return false
+        val at = snoozeUntil(now, date, DayEnd.current) ?: return false
         val intent = snoozePendingIntent(
             context,
             habitId,
@@ -716,6 +735,11 @@ object Reminders {
                 // home-screen widget — which cycles a day with no network at
                 // all and must walk the same four states the app's grid does.
                 runCatching { settings.cacheQuestionMarks(fresh.questionMarksEnabled) }
+                // Where the account's day ends. Before anything below arms an
+                // alarm, because `schedule` decides which night owns a reminder
+                // against it — and this path runs when nobody opened the app,
+                // so it may be the only one to ever learn a changed boundary.
+                runCatching { DayEnd.adopt(applicationContext, fresh.dayEndsAtOrDefault) }
                 fresh.androidRemindersEnabled
             } catch (e: Exception) {
                 settings.cachedAndroidReminders()

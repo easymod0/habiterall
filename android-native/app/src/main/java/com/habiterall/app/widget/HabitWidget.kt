@@ -10,6 +10,7 @@ import android.content.Intent
 import android.widget.RemoteViews
 import androidx.core.content.ContextCompat
 import com.habiterall.app.R
+import com.habiterall.app.data.DayEnd
 import com.habiterall.app.data.Grid
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.Outbox
@@ -22,9 +23,6 @@ import com.habiterall.app.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.time.LocalDate
-import java.time.ZoneId
-import java.time.ZonedDateTime
 
 /**
  * One habit, today, tap to record — without opening anything.
@@ -33,7 +31,7 @@ import java.time.ZonedDateTime
  * reminder fires. This is the same idea with the habit sitting on the home
  * screen instead, and it is built out of what already exists: the cycle is
  * `Grid.nextState`, the encoding `Grid.valueForState`, the write [Outbox], and
- * the offline record [Widgets.Record] — which is a cache, not a sixth mirror.
+ * the offline record [Widgets.Record] — which is a cache, not another mirror.
  *
  * Three things about it are not obvious and each has a comment where it lives:
  * which day a tap is about (resolved when the tap arrives, never when the
@@ -149,7 +147,12 @@ class HabitWidget : AppWidgetProvider() {
         }
     }
 
-    private suspend fun tap(context: Context, widgetId: Int) {
+    /**
+     * `internal` so a test can hand it a widget id without going through
+     * `onReceive`, whose `goAsync` has no pending result to hold outside a
+     * real broadcast dispatch.
+     */
+    internal suspend fun tap(context: Context, widgetId: Int) {
         val app = context.applicationContext
         val settings = Settings(app)
         val record = settings.cachedWidget(widgetId) ?: return
@@ -158,7 +161,7 @@ class HabitWidget : AppWidgetProvider() {
         // was drawn. A home screen can sit untouched across midnight, and a
         // date baked into the click intent would record the tap against
         // yesterday, which is the one mistake a widget is uniquely able to make.
-        val today = LocalDate.now().toString()
+        val today = DayEnd.today()
         // Null for a habit that has left the account: the click intent is
         // already gone, but a PendingIntent the launcher took a copy of
         // outlives the drawing it came with, so the rule is asked again here.
@@ -302,7 +305,7 @@ class HabitWidget : AppWidgetProvider() {
 
             val settings = Settings(app)
             val questionMarks = settings.cachedQuestionMarks()
-            val today = LocalDate.now().toString()
+            val today = DayEnd.today()
             val held = settings.cachedWidgets().groupBy { it.widgetId }
             (held.keys + live.overview).forEach { widgetId ->
                 val group = held[widgetId].orEmpty()
@@ -354,8 +357,12 @@ class HabitWidget : AppWidgetProvider() {
         }
 
         /**
-         * Arm — or give back — the alarm that redraws at the next local
-         * midnight.
+         * Arm — or give back — the alarm that redraws when the next day starts.
+         *
+         * The name is from before #76 and many comments cite it. The next day
+         * starts at the account's boundary — [DayEnd.current], midnight until
+         * they say otherwise — so this aims at 03:00 for an account whose day
+         * ends then, through [Widgets.nextDayStart].
          *
          * A widget's day goes stale at midnight and nothing tells it. The
          * platform's `ACTION_DATE_CHANGED` looks like the answer and is not:
@@ -408,7 +415,7 @@ class HabitWidget : AppWidgetProvider() {
                 )?.let { manager.cancel(it) }
                 return
             }
-            val at = Widgets.nextMidnight(ZonedDateTime.now(ZoneId.systemDefault()))
+            val at = Widgets.nextDayStart(DayEnd.now(), DayEnd.current)
             Reminders.setAlarm(
                 app,
                 at.toInstant().toEpochMilli(),

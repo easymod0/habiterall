@@ -122,6 +122,24 @@ class AppSettingsDefaultsTest {
     }
 
     @Test
+    fun `the day-boundary default and its seven options match the registry`() {
+        // Through the accessor, which is what the app calls.
+        assertEquals(default("dayEndsAt"), AppSettings().dayEndsAtOrDefault)
+        assertEquals(default("dayEndsAt"), AppSettings.DEFAULT_DAY_ENDS_AT)
+        assertEquals("03:00", AppSettings(dayEndsAt = "03:00").dayEndsAtOrDefault)
+
+        // The options are a list the phone checks a value against, so it is read
+        // out of the registry too: a seventh hour added there and not in
+        // `ReminderTime.DAY_END_TIMES` would read as midnight on the phone.
+        val start = registry.indexOf("\n  dayEndsAt: {")
+        assertTrue("dayEndsAt is not in SETTINGS", start >= 0)
+        val block = registry.substring(start, registry.indexOf("\n  },", start))
+        val options = Regex("""value: '([^']+)'""").findAll(block).map { it.groupValues[1] }.toList()
+        assertEquals(listOf("00:00", "01:00", "02:00", "03:00", "04:00", "05:00", "06:00"), options)
+        assertEquals(options, com.habiterall.app.notify.ReminderTime.DAY_END_TIMES)
+    }
+
+    @Test
     fun `an untouched account is a phone that reminds`() {
         // `notifyChannels` defaults to the on-device alarm alone — the one
         // destination that needs no setup and the only one that fires with no
@@ -177,7 +195,7 @@ class AppSettingsDefaultsTest {
     private val mirrored = setOf(
         "dayOrder", "weekStart", "calendarZoom", "skipDays", "questionMarks",
         "atMostUnlogged", "scoreGranularity", "historyGranularity", "historyMode",
-        "notifyChannels", "confirmDelete", "groupByCategory",
+        "notifyChannels", "confirmDelete", "groupByCategory", "dayEndsAt",
     )
 
     private val notMirrored = mapOf(
@@ -197,10 +215,6 @@ class AppSettingsDefaultsTest {
         // (cache the colour the WebView last painted) and not a copy of the
         // setting — the distinction `notifyTimezone` already draws.
         "theme" to "the WebView paints it; native chrome follows Android",
-        // Where the account's day ends (#76). The web client and the server's
-        // reminders honour it; this client's own grid and alarms still use the
-        // calendar day until its half of the change lands.
-        "dayEndsAt" to "the phone's own client support arrives in the next PR; until then it keeps the calendar day",
         // How many day columns the WEB dashboard draws. This client's grid does
         // not page a fixed window at all — it starts at `Grid.INITIAL_DAYS`,
         // grows by `PAGE_DAYS` as you scroll toward the edge up to `MAX_DAYS`,
@@ -453,8 +467,10 @@ class AppSettingsDefaultsTest {
         // quietly go back to the server's clock.
         //
         // Read from the source because the interceptor is built into a private
-        // OkHttpClient at construction; standing an HTTP server up in a unit
-        // test to observe one header is a lot of machinery for a line.
+        // OkHttpClient at construction. `DayEndTest` has since put a
+        // MockWebServer behind the sibling header and observes it on a real
+        // request, so a server is no longer the machinery this once judged it;
+        // this one is left as the source read it was.
         assertTrue(
             "Api.kt declares DEVICE_ZONE_HEADER but no interceptor sends it",
             Regex("""addInterceptor[\s\S]{0,900}?DEVICE_ZONE_HEADER""").containsMatchIn(kotlin),
@@ -463,5 +479,30 @@ class AppSettingsDefaultsTest {
             "the interceptor should read the phone's own zone",
             Regex("""TimeZone\.getDefault\(\)\.id""").containsMatchIn(kotlin),
         )
+    }
+
+    /**
+     * The day-boundary header, spelled the same on both sides. The SENDING is
+     * pinned behaviourally by `DayEndTest`, over a real request; this is the
+     * name only, for the reason the zone header's test above gives.
+     */
+    @Test
+    fun `the day-end header is spelled the same on both sides`() {
+        fun find(relative: String): String {
+            var dir: java.io.File? = java.io.File("").absoluteFile
+            while (dir != null) {
+                val candidate = java.io.File(dir, relative)
+                if (candidate.isFile) return candidate.readText()
+                dir = dir.parentFile
+            }
+            throw AssertionError("$relative not found above ${java.io.File("").absolutePath}")
+        }
+        val declared = Regex("""DAY_END_HEADER\s*=\s*'([^']+)'""")
+            .find(find("shared/src/notify.js"))?.groupValues?.get(1)
+        assertTrue("DAY_END_HEADER is not declared in shared/src/notify.js", declared != null)
+        val mine = Regex("""DAY_END_HEADER\s*=\s*"([^"]+)"""")
+            .find(find("android-native/app/src/main/java/com/habiterall/app/data/Api.kt"))
+            ?.groupValues?.get(1)
+        assertEquals(declared, mine)
     }
 }

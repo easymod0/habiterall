@@ -11,11 +11,11 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.habiterall.app.R
+import com.habiterall.app.data.DayEnd
 import com.habiterall.app.data.Grid
 import com.habiterall.app.data.Habit
 import com.habiterall.app.ui.CountEntryActivity
 import com.habiterall.app.ui.MainActivity
-import java.time.ZoneId
 import java.time.ZonedDateTime
 
 /**
@@ -235,7 +235,7 @@ object Notifications {
         habit: Habit,
         date: String,
         skipEnabled: Boolean = false,
-        now: ZonedDateTime = ZonedDateTime.now(ZoneId.systemDefault()),
+        now: ZonedDateTime = DayEnd.now(),
     ): Notification {
         // A custom prompt leads, because "Did you exercise today?" is a question
         // where the habit's name is a label. The name then becomes the second
@@ -282,7 +282,7 @@ object Notifications {
         val actions = reminderActions(
             habit,
             skipEnabled,
-            snoozeAvailable = Reminders.snoozeUntil(now, date) != null,
+            snoozeAvailable = Reminders.snoozeUntil(now, date, DayEnd.current) != null,
         )
 
         actions.forEach { action ->

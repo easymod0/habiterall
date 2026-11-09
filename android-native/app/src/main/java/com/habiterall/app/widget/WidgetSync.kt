@@ -3,6 +3,7 @@ package com.habiterall.app.widget
 import android.appwidget.AppWidgetManager
 import android.content.Context
 import com.habiterall.app.data.Api
+import com.habiterall.app.data.DayEnd
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.Outbox
 import com.habiterall.app.data.Settings
@@ -10,7 +11,6 @@ import com.habiterall.app.data.Widgets
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
-import java.time.LocalDate
 
 /**
  * Keeps the home screen in step with the account.
@@ -57,7 +57,7 @@ object WidgetSync {
                 val overviewIds =
                     HabitWidget.liveIds(app, AppWidgetManager.getInstance(app)).overview
                 if (records.isEmpty() && overviewIds.isEmpty()) return@runCatching
-                val today = LocalDate.now().toString()
+                val today = DayEnd.today()
 
                 val updated = records.filterNot { it.widgetId in overviewIds }.mapNotNull { record ->
                     val habit = habits.firstOrNull { it.id == record.habitId }

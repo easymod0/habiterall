@@ -251,11 +251,11 @@ The rules that decide it:
   notifier's storage adapter and the API routes are per-edition — and a
   behaviour that lands in one edition's routes almost always has to land in the
   other's too, or the two disagree about the same request.
-- **A client mirrors a rule only if it must work OFFLINE.** The phone has five
+- **A client mirrors a rule only if it must work OFFLINE.** The phone has six
   hand-written copies (tap cycle, reminder-time parsing, `needsReminder`, the
   entry encoding, the channel default) and each runs with no network. Everything
   else is server-authoritative: the phone submits and renders whatever comes
-  back, including the error. **A sixth mirror is a real cost and a sixth server
+  back, including the error. **Another mirror is a real cost and another server
   call is not** — if you are adding one, justify it in the plan or drop it.
 - **A new file under `shared/public/` must join `sw.js`'s `SHELL` and bump
   `CACHE_VERSION`**, which costs every installed client its data cache. Ask
