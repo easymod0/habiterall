@@ -5,9 +5,15 @@ import android.app.Application
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
 import android.content.Context
+import android.widget.TextView
 import com.habiterall.app.data.Api
 import com.habiterall.app.data.DayEnd
+import com.habiterall.app.data.Sentinels
+import com.habiterall.app.data.Settings
+import com.habiterall.app.data.Widgets
 import com.habiterall.app.widget.HabitWidget
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -202,6 +208,54 @@ class DayEndTest {
                 alarmAt(),
             )
         }
+
+    /**
+     * `adopt` commits `held` and the preferences before it redraws, so a failure
+     * or a cancellation after that point would leave every later `adopt` seeing
+     * no change, and nothing would ever redraw. The fetch effect that calls it
+     * restarts, so being cancelled mid-way is ordinary.
+     *
+     * The alarm is re-aimed by `armMidnight`, which is not a suspend call and so
+     * survives a cancelled caller either way; it is the DRAW, which reads the
+     * cache through DataStore, that a cancelled coroutine never reaches. So the
+     * frame is what proves the redraw ran: the same record, painted at midnight
+     * first as unanswered (its date is the day before) and then, once the
+     * boundary has moved, as the day still being lived.
+     */
+    @Test
+    fun `a cancelled adopt still redraws and re-aims`() = runBlocking<Unit> {
+        DayEnd.clock = at("2026-08-12T22:30:00Z")
+        val widgetId = 78
+        shadowOf(AppWidgetManager.getInstance(app))
+            .bindAppWidgetId(widgetId, ComponentName(app, HabitWidget::class.java))
+        Settings(app).putWidgets(
+            listOf(
+                Widgets.Record(
+                    widgetId = widgetId, habitId = 1, name = "Meditate", type = "boolean",
+                    targetValue = 1.0, targetType = "at-least", showAs = "check",
+                    color = "blue", unit = "", date = "2026-08-12", value = Sentinels.YES,
+                    skip = false,
+                )
+            )
+        )
+        fun mark() = shadowOf(AppWidgetManager.getInstance(app)).getViewFor(widgetId)
+            .findViewById<TextView>(R.id.widget_mark).text.toString()
+        HabitWidget.redraw(app)
+        assertEquals("at midnight the 12th is yesterday's", "", mark())
+
+        launch {
+            cancel()
+            DayEnd.adopt(app, "03:00")
+        }.join()
+
+        assertEquals("03:00", DayEnd.current)
+        assertEquals("the 12th is still the day being lived, and was answered", "✓", mark())
+        assertEquals(
+            "and the alarm is at today's 03:00",
+            ZonedDateTime.of(2026, 8, 13, 3, 0, 0, 0, berlin),
+            alarmAt(),
+        )
+    }
 
     /* ---------- no other reader of the calendar ---------- */
 

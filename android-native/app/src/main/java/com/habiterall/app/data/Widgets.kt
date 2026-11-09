@@ -695,9 +695,12 @@ object Widgets {
      * The record after the day moved BACKWARDS under it (#76): the account's day
      * now ends later, so [today] is earlier than the date the record holds.
      *
-     * Nothing else produces this — [refreshed] and [answered] only move a date
-     * forward — but a boundary change does, at 00:45 with the day end going
-     * from 00:00 to 03:00. Left alone, [stateOn] answers UNKNOWN for a record
+     * [refreshed] and [answered] only move a date forward, but three things
+     * take the day backwards under a record: a later boundary adopted at 00:45
+     * (00:00 to 03:00), a write made under the old boundary and delivered after
+     * the change (its date is the newer one, so [answered] advances the record
+     * past today again), and a phone changing zone westward. `redraw` calls this
+     * on every pass, so all three end here. Left alone, [stateOn] answers UNKNOWN for a record
      * dated after [today], a tap cycles from that and can overwrite a stored
      * answer for [today], and [answered] ignores the record's date as "older"
      * so the cell never advances; it heals at the next refresh, which offline

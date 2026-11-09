@@ -3,6 +3,8 @@ package com.habiterall.app.data
 import android.content.Context
 import com.habiterall.app.notify.ReminderTime
 import com.habiterall.app.widget.HabitWidget
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import java.time.Clock
 import java.time.ZoneId
 import java.time.ZonedDateTime
@@ -115,11 +117,11 @@ object DayEnd {
         val app = context.applicationContext
         app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, next).apply()
         held = next
-        // The day may have moved BACKWARDS (a later boundary at 00:45), which
-        // no other path does: a record dated past the new today is rewound
-        // before it is drawn, or it reads unknown and swallows the next tap.
-        Settings(app).updateWidgets { all -> all.map { Widgets.rewound(it, today()) } }
-        HabitWidget.redraw(app)
+        // The prefs and `held` are committed, so a later `adopt` sees no change
+        // and would never redraw or re-arm: this has to finish even when the
+        // collector that called it is cancelled, which a restarting fetch
+        // effect makes ordinary.
+        withContext(NonCancellable) { runCatching { HabitWidget.redraw(app) } }
         return true
     }
 }

@@ -306,6 +306,13 @@ class HabitWidget : AppWidgetProvider() {
             val settings = Settings(app)
             val questionMarks = settings.cachedQuestionMarks()
             val today = DayEnd.today()
+            // The day can move BACKWARDS under a record, three ways: a later
+            // boundary adopted at 00:45, a queued write from before it
+            // delivered by the outbox worker (`answered` moves the date
+            // forward again), and a phone changing zone westward. All end here.
+            if (settings.cachedWidgets().any { it.date > today }) {
+                settings.updateWidgets { all -> all.map { Widgets.rewound(it, today) } }
+            }
             val held = settings.cachedWidgets().groupBy { it.widgetId }
             (held.keys + live.overview).forEach { widgetId ->
                 val group = held[widgetId].orEmpty()

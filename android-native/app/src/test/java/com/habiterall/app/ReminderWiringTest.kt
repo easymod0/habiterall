@@ -77,17 +77,13 @@ class ReminderWiringTest {
     @Before
     fun forgetTheLastArm() {
         Reminders.lastArmWasExact = null
-        // The previous test's `@After` reloads from the file ITS adopt wrote, so
-        // a class that ran a 03:00 test last starts the next one at 03:00 —
-        // and an adopt of "03:00" then changes nothing and returns false.
-        DayEnd.load(app)
     }
 
     /**
      * `DayEnd` is an `object` and outlives this class, so a test that adopts a
      * boundary or moves the clock puts both back, or a later class silently runs
-     * at 03:00. `load` reads a preferences file `adopt` wrote, and Robolectric
-     * gives each test a fresh one.
+     * at 03:00. `reset` clears the preferences file as well as the held value,
+     * so the next test's `adopt` of "03:00" is a change.
      */
     @After
     fun putTheDayBack() {

@@ -167,10 +167,19 @@ boundary can drop a reminder once, as it could at midnight. A sign-out or a serv
 change leaves the old boundary in force until the first settings fetch, as the
 other mirrors do.
 
-**A later boundary can take today backwards**, at 00:45 with `00:00` going to
-`03:00`, so `adopt` rewinds any widget record dated past the new today to that
-day's answer from its own history, and the worker, if the boundary moved, re-arms
-every habit rather than the one it was asked about.
+**Today can go backwards, and `redraw` is where that is mended.** Three things do
+it: a later boundary adopted at 00:45 (`00:00` going to `03:00`), a write made
+under the old boundary and delivered after the change (its date is the newer one,
+so `answered` moves the record past today again), and a phone changing zone
+westward. A first version rewound in `adopt` alone, which covered the first and
+left the other two producing the same record: dated past today, read as unknown,
+drawn blank and swallowing the next tap. Every path ends in `redraw`, so the
+rewind to the day's answer from the record's own history lives there, and writes
+only when a record is actually dated past today. `adopt` also finishes its redraw
+under `NonCancellable`: it commits the new value first, so a cancelled fetch
+effect that skipped the redraw would leave every later `adopt` seeing no change.
+The worker, if the boundary moved, re-arms every habit rather than the one it
+was asked about.
 
 ## Edges left open
 

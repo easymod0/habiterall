@@ -236,6 +236,11 @@ class SettingsScreenTest {
         compose.onNodeWithText("03:00").performClick()
         compose.waitUntil { sent.isNotEmpty() }
         assertEquals(listOf("dayEndsAt=03:00"), sent)
+        // The one option whose label is not its value: the stored 03:00 is a
+        // non-default boundary, and going back to midnight must send "00:00".
+        compose.onNodeWithText("Midnight").performClick()
+        compose.waitUntil { sent.size == 2 }
+        assertEquals(listOf("dayEndsAt=03:00", "dayEndsAt=00:00"), sent)
         // All seven are reachable, midnight first and 06:00 last.
         for (hour in listOf("Midnight", "01:00", "04:00", "05:00", "06:00")) {
             compose.onNodeWithText(hour).assertIsDisplayed()

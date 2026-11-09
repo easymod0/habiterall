@@ -382,19 +382,27 @@ flight — `TIMEZONE_CHANGED` redraws but the process lives) would keep the old
 zone for `today()` and for every alarm it arms. `ZoneId.systemDefault()` is read
 each call. `DayEnd.clock` is null in production and exists only so a test can be
 at 00:30, since Robolectric does not instrument `java.time`; a test that sets it
-restores `null` in `@After` and calls `DayEnd.load(app)`, because `DayEnd` is an
+calls `DayEnd.reset` in `@After` (a plain `load` re-reads the file the test just
+wrote), because `DayEnd` is an
 `object` that outlives the class and a later class would otherwise run at 03:00.
 Every suite runs under `@Config(application = Application::class)`, so
 `HabiterallApp.onCreate` never calls `load` there.
 
-**A change of boundary rewinds a widget record dated past the new today, and the
-worker re-arms everything when the boundary moved.** A later boundary at 00:45
-takes "today" BACKWARDS, which no other path does: `DayEnd.adopt` runs
-`Widgets.rewound` over every record (its day's answer comes from the record's own
-history, unanswered when that holds nothing) before it redraws, or the cell reads
-unknown and the next tap overwrites a stored answer. `ScheduleWorker` asked about
-one habit takes its single-habit branch only when `adopt` returned false; a moved
-boundary changes the night every other reminder belongs to.
+**A day that moves BACKWARDS rewinds a widget record dated past it, in `redraw`,
+and the worker re-arms everything when the boundary moved.** Three things take
+"today" backwards under a record: a later boundary adopted at 00:45, a write made
+under the old boundary and delivered after the change (`WidgetSync.noteAnswer`
+dates the record by the write, so `Widgets.answered` moves it forward past today
+again), and a phone changing zone westward. All of them end in
+`HabitWidget.redraw`, which runs `Widgets.rewound` over any record dated past
+today before it reads them to draw (its day's answer comes from the record's own
+history, unanswered when that holds nothing), or the cell reads unknown and the
+next tap overwrites a stored answer. `DayEnd.adopt` finishes its redraw under
+`NonCancellable`, because it commits the new value before it redraws and a
+restarted fetch effect would otherwise leave every later `adopt` seeing no change.
+`ScheduleWorker` asked about one habit takes its single-habit branch only when
+`adopt` returned false; a moved boundary changes the night every other reminder
+belongs to.
 
 **`armMidnight` and `ACTION_MIDNIGHT` keep their names** (comments across this
 file cite them) but aim at the start of the NEXT DAY, which is the boundary:

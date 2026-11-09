@@ -258,6 +258,49 @@ class WidgetDayEndTest {
             assertFalse(Outbox.isPending(context, 1, tuesday))
         }
 
+    /**
+     * Not only `adopt`: `redraw` is where every path ends, so a record dated
+     * past today is rewound there whoever put it there.
+     */
+    @Test
+    fun `redraw rewinds a record dated past today`(): Unit = runBlocking {
+        DayEnd.clock = clockAt(ZonedDateTime.of(2026, 8, 17, 12, 0, 0, 0, toronto))
+        bind(58)
+        val settings = Settings(context)
+        settings.putWidgets(
+            listOf(
+                record(habit(), 58, date = "2026-08-18").copy(history = "$monday:${Sentinels.YES}")
+            )
+        )
+
+        HabitWidget.redraw(context)
+
+        val after = settings.cachedWidget(58)!!
+        assertEquals(monday, after.date)
+        assertEquals(Sentinels.YES, after.value)
+        assertEquals("✓", markDrawnFor(58))
+    }
+
+    /**
+     * A write made under the old boundary and delivered after the change: its
+     * date is Tuesday's, so `answered` moves the record forward past today, and
+     * the redraw it ends in has to bring it back.
+     */
+    @Test
+    fun `a late delivery of a write dated past today leaves the record on today`(): Unit =
+        runBlocking {
+            val tuesday = "2026-08-18"
+            DayEnd.clock = clockAt(ZonedDateTime.of(2026, 8, 18, 0, 45, 0, 0, toronto))
+            bind(59)
+            val settings = Settings(context)
+            settings.putWidgets(listOf(record(habit(), 59, date = monday, value = 0.0)))
+            assertTrue(DayEnd.adopt(context, "03:00"))
+
+            WidgetSync.noteAnswer(context, 1, tuesday, Sentinels.YES, false)
+
+            assertEquals(monday, settings.cachedWidget(59)!!.date)
+        }
+
     @Test
     fun `rewound takes the day's answer from the history, and unanswered when there is none`() {
         val base = record(habit(), 56, date = "2026-08-18", value = Sentinels.YES)
