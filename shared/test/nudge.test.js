@@ -20,6 +20,7 @@ const {
 } = await import('../public/ui/nudge.js');
 
 const { browserNudgeProblems } = await import('../public/ui/settings.js');
+const { setDayEnd, todayISO } = await import('../public/ui/dates.js');
 
 const { answeredIds, CHANNELS, CHANNEL_IDS, DEFAULT_CHANNELS,
   channelConfigured, needsServerDelivery, serverChannels, unreachableChannels } =
@@ -831,5 +832,66 @@ test('check before init does nothing rather than throwing', async () => {
     const { said } = wire({ habits: [{ /* junk */ }, null, due()] });
     await assert.doesNotReject(check({ now: new Date(2026, 7, 17, 9, 0) }));
     assert.equal(said.length, 1, 'a malformed habit must not silence the rest');
+  });
+});
+
+/* ---------- a day that ends after midnight ---------- */
+
+/*
+ * Literal table, as the server's `dueReminders` cases are: boundary 03:00, a
+ * habit reminding at 01:00. That reminder belongs to the day that is ENDING, so
+ * it is due at 01:00 on the wall clock of the NEXT calendar date, about the
+ * date before — and not at 00:30, which is the same day's earlier minute.
+ * `minutes` is the extended clock `effectiveMinutes` produces: 00:30 is 1470.
+ */
+test('a reminder before the boundary is due at that hour on the NEXT wall clock', () => {
+  const monday = { start: '2026-08-04', end: '2026-08-17' };
+  const ask01 = (minutes, dayEnd) => outstanding(
+    [due({ reminder_time: '01:00' })],
+    { date: '2026-08-17', minutes, dayEnd, loaded: monday }).map((h) => h.id);
+
+  assert.deepEqual(ask01(1470, '03:00'), [], '00:30 on the next wall clock: not yet');
+  assert.deepEqual(ask01(1499, '03:00'), [], '00:59');
+  assert.deepEqual(ask01(1500, '03:00'), [1], '01:00 on the next wall clock: due');
+  assert.deepEqual(ask01(1619, '03:00'), [1], '02:59, still the same day');
+
+  // The same habit on the same minutes with no boundary is the calendar day, and
+  // 1500 is simply past it — so the SHIFT is what withholds the earlier ones.
+  assert.deepEqual(ask01(1470, '00:00'), [1]);
+  assert.deepEqual(ask01(1470, undefined), [1], 'an absent dayEnd is midnight');
+
+  // A reminder AT or after the boundary is not shifted: 03:00 against 03:00.
+  const threeAm = (minutes) => outstanding(
+    [due({ reminder_time: '03:00' })],
+    { date: '2026-08-17', minutes, dayEnd: '03:00', loaded: monday }).map((h) => h.id);
+  assert.deepEqual(threeAm(179), []);
+  assert.deepEqual(threeAm(180), [1]);
+});
+
+test('check() reads the device clock through the boundary, for the date and the minute', async () => {
+  // The call site, because `check` is where `todayISO`, `effectiveMinutes` and
+  // `currentDayEnd` have to agree: a correct predicate fed the calendar date, or
+  // the unshifted minute, answers wrongly with every unit test green.
+  await withGlobals({ localStorage: fakeStorage() }, async () => {
+    setDayEnd('03:00');
+    try {
+      // Tuesday 00:30 local, so the day is still Monday 2026-08-17.
+      const tuesdayEarly = new Date(2026, 7, 18, 0, 30);
+      assert.equal(todayISO(tuesdayEarly), '2026-08-17');
+
+      const habits = [due({ reminder_time: '01:00' }),
+        due({ id: 2, name: 'Water', reminder_time: '23:00' })];
+      const { said } = wire({ habits, today: todayISO(tuesdayEarly) });
+
+      // The 23:00 one has come round on Monday's clock; the 01:00 one has not.
+      assert.deepEqual((await check({ now: tuesdayEarly })).map((h) => h.id), [2]);
+      assert.match(said[0], /Water/);
+
+      // And at 01:00 it has — about Monday, so the same window serves it.
+      const tuesdayLater = new Date(2026, 7, 18, 1, 0);
+      assert.deepEqual((await check({ now: tuesdayLater })).map((h) => h.id), [1]);
+    } finally {
+      setDayEnd('00:00');
+    }
   });
 });

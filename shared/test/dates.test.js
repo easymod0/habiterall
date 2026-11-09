@@ -5,9 +5,9 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const {
-  addDaysISO, estimateTextWidth, formatDateLong, formatDateShort, formatStamp, fromISOLocal,
+  addDaysISO, currentDayEnd, effectiveMinutes, estimateTextWidth, formatDateLong, formatDateShort, formatStamp, fromISOLocal,
   formatDayNumber, formatDayRange, formatMonthShort, formatYear, gutterFor, iso, targetLabel,
-  weekdayLetters, weekdayNames, WIDTH_SAFETY,
+  nextDayStart, setDayEnd, todayISO, weekdayLetters, weekdayNames, WIDTH_SAFETY,
 } = await import('../public/ui/dates.js');
 // The app's own amount formatter, imported rather than restated: the property
 // under test is that a target is spelled the way every other amount is, and a
@@ -964,4 +964,88 @@ test('a formatter does not outlive the zone it was built for', () => {
     if (had === null) delete process.env.TZ;
     else process.env.TZ = had;
   }
+});
+
+/* ---------- where the day ends ---------- */
+
+/*
+ * Literal values, never the constants: a table that imported `DAY_END_TIMES`
+ * would pin the name and nothing else. Every row is a LOCAL Date, because
+ * `todayISO` reads the device's own clock (`new Date(y, m, d, h, min)`).
+ * Always reset, or the next test in this file reads a boundary it never set.
+ */
+const withDayEnd = (value, body) => {
+  setDayEnd(value);
+  try { return body(); } finally { setDayEnd('00:00'); }
+};
+
+test('todayISO is the previous date until the day ends', () => {
+  withDayEnd('03:00', () => {
+    assert.equal(todayISO(new Date(2026, 2, 1, 2, 59)), '2026-02-28');
+    assert.equal(todayISO(new Date(2026, 2, 1, 3, 0)), '2026-03-01',
+      'the boundary minute itself belongs to the new day');
+    assert.equal(todayISO(new Date(2026, 2, 1, 0, 0)), '2026-02-28');
+    assert.equal(todayISO(new Date(2026, 2, 1, 23, 59)), '2026-03-01');
+  });
+  withDayEnd('01:00', () => {
+    assert.equal(todayISO(new Date(2026, 2, 1, 0, 30)), '2026-02-28');
+    assert.equal(todayISO(new Date(2027, 0, 1, 0, 30)), '2026-12-31', 'across a year');
+    assert.equal(todayISO(new Date(2028, 2, 1, 0, 30)), '2028-02-29', 'a leap February');
+  });
+  withDayEnd('06:00', () => {
+    assert.equal(todayISO(new Date(2026, 7, 18, 5, 59)), '2026-08-17');
+    assert.equal(todayISO(new Date(2026, 7, 18, 6, 0)), '2026-08-18');
+  });
+});
+
+test('the default boundary never moves the date, and junk is the default', () => {
+  assert.equal(currentDayEnd(), '00:00');
+  assert.equal(todayISO(new Date(2026, 2, 1, 0, 0)), '2026-03-01');
+  assert.equal(todayISO(new Date(2026, 2, 1, 0, 30)), '2026-03-01');
+
+  for (const junk of ['07:00', '03:30', '3:00', '', 'abc', null, undefined, 3, '03:00 ']) {
+    withDayEnd(junk, () => {
+      assert.equal(currentDayEnd(), '00:00', `${JSON.stringify(junk)} is not a boundary`);
+      assert.equal(todayISO(new Date(2026, 2, 1, 0, 30)), '2026-03-01');
+    });
+  }
+  withDayEnd('04:00', () => assert.equal(currentDayEnd(), '04:00'));
+});
+
+test('todayISO is safe as a bare callback', () => {
+  // `app.js` hands it to the nudge as `today: todayISO` and it is called with no
+  // arguments, so the clock has to default rather than arrive.
+  const bare = todayISO;
+  assert.match(bare(), /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test('effectiveMinutes runs past 1440 before the boundary', () => {
+  withDayEnd('03:00', () => {
+    assert.equal(effectiveMinutes(new Date(2026, 2, 1, 0, 30)), 1470);
+    assert.equal(effectiveMinutes(new Date(2026, 2, 1, 2, 59)), 1619);
+    assert.equal(effectiveMinutes(new Date(2026, 2, 1, 3, 0)), 180);
+    assert.equal(effectiveMinutes(new Date(2026, 2, 1, 23, 59)), 1439);
+  });
+  assert.equal(effectiveMinutes(new Date(2026, 2, 1, 0, 30)), 30, 'the default is wall clock');
+});
+
+test('nextDayStart is the next instant at the boundary hour', () => {
+  const parts = (d) => [d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(),
+    d.getMinutes(), d.getSeconds()];
+
+  assert.deepEqual(parts(nextDayStart(new Date(2026, 5, 10, 14, 0))),
+    [2026, 5, 11, 0, 0, 0], 'at midnight it is the next midnight, as setHours(24) was');
+  assert.deepEqual(parts(nextDayStart(new Date(2026, 5, 30, 23, 59))),
+    [2026, 6, 1, 0, 0, 0], 'across a month');
+
+  withDayEnd('03:00', () => {
+    assert.deepEqual(parts(nextDayStart(new Date(2026, 5, 10, 2, 0))),
+      [2026, 5, 10, 3, 0, 0], 'still ahead today');
+    assert.deepEqual(parts(nextDayStart(new Date(2026, 5, 10, 3, 0))),
+      [2026, 5, 11, 3, 0, 0], 'not strictly after now: tomorrow');
+    assert.deepEqual(parts(nextDayStart(new Date(2026, 5, 10, 14, 0))),
+      [2026, 5, 11, 3, 0, 0]);
+    assert.deepEqual(parts(nextDayStart(new Date(2026, 11, 31, 14, 0))),
+      [2027, 0, 1, 3, 0, 0], 'across a year');
+  });
 });

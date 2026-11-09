@@ -6,6 +6,14 @@
  * date for anyone west of Greenwich.
  */
 
+// Relative, and the one import in this file: `ui/time.js` has none of its own,
+// so this module still loads under Node (`dates.test.js`, the fake-DOM suites).
+// The RULE for which date a wall-clock moment belongs to lives there, once,
+// beside `shared/src/notify.js`'s use of it — this file only supplies the
+// device's clock and the account's setting. `test/label-widths.mjs` reads this
+// file's source and evaluates it with the import line stripped.
+import { DAY_END_TIMES, DEFAULT_DAY_END, dayEndMinutes, effectiveDay } from './time.js';
+
 /**
  * The canonical spelling of a day, and the same one `toISO` in
  * `shared/src/stats.js` produces: four-digit year, two-digit month, two-digit
@@ -110,8 +118,70 @@ export function targetLabel(h, showAmount = String) {
   return `${dir} ${showAmount(h.target_value)}${h.unit ? ' ' + h.unit : ''}`;
 }
 
-/** Today, as a local 'YYYY-MM-DD'. */
-export const todayISO = () => iso(new Date());
+/* ---------- where the day ends ---------- */
+
+/**
+ * The account's `dayEndsAt`, as this module's one piece of state. Set at boot
+ * and on every settings change by `app.js` (`setDayEnd`), and read by
+ * `todayISO`, `effectiveMinutes`, `nextDayStart` and the `X-Habiterall-Day-End`
+ * header (`offline.js`) — so there is one answer on the page to "when does the
+ * day end", not one per reader.
+ */
+let dayEnd = DEFAULT_DAY_END;
+
+/**
+ * @param {unknown} value one of `DAY_END_TIMES`; anything else is the default,
+ *   because a value out of storage is not a reason to stop painting.
+ */
+export function setDayEnd(value) {
+  dayEnd = DAY_END_TIMES.includes(/** @type {string} */ (value))
+    ? /** @type {string} */ (value) : DEFAULT_DAY_END;
+}
+
+/** @returns {string} 'HH:MM' */
+export const currentDayEnd = () => dayEnd;
+
+const wallMinutes = (d) => d.getHours() * 60 + d.getMinutes();
+
+/**
+ * Minutes since the start of the day THIS DEVICE is on, which runs past 1440
+ * before the boundary: 00:30 is 1470 of the day that has not ended yet. The
+ * same arithmetic, on the same rule, as `effectiveDay` makes of an account's
+ * clock on the server.
+ */
+export const effectiveMinutes = (now = new Date()) =>
+  effectiveDay(iso(now), wallMinutes(now), dayEnd).minutes;
+
+/**
+ * The next instant the day rolls over: the boundary hour, today if it is still
+ * ahead and tomorrow otherwise. `setHours` on the LOCAL date, so a 23- or
+ * 25-hour calendar day gets the right instant where `+ 86400000` would be an
+ * hour out twice a year. At the default this is `setHours(24, 0, 0, 0)`.
+ *
+ * @param {Date} [now]
+ * @returns {Date}
+ */
+export function nextDayStart(now = new Date()) {
+  const next = new Date(now);
+  next.setHours(dayEndMinutes(dayEnd) / 60, 0, 0, 0);
+  if (next.getTime() <= now.getTime()) {
+    next.setDate(next.getDate() + 1);
+    next.setHours(dayEndMinutes(dayEnd) / 60, 0, 0, 0);
+  }
+  return next;
+}
+
+/**
+ * The date the app treats as today, as a local 'YYYY-MM-DD': the calendar date,
+ * or the day before while the clock is short of `dayEndsAt`.
+ *
+ * Safe as a bare callback — `app.js` hands it to the nudge as `today: todayISO`
+ * and it is called with no arguments, which is why `now` defaults.
+ *
+ * @param {Date} [now]
+ */
+export const todayISO = (now = new Date()) =>
+  effectiveDay(iso(now), wallMinutes(now), dayEnd).date;
 
 /** Shift a 'YYYY-MM-DD' by n days, staying in local time. */
 export function addDaysISO(isoDate, n) {

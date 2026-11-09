@@ -197,6 +197,49 @@ test('a replayed write says which clock the device is on', async () => {
     'and still says what it is sending');
 });
 
+test('a replayed write says where the account\'s day ends, even at midnight', async () => {
+  // The read anchors judge "today" by `X-Habiterall-Day-End`, and `sw.js` forbids
+  // a route varying on a header the page sends only SOMETIMES — so it is on
+  // every request, `'00:00'` included, and a replay is a request.
+  const { setDayEnd } = await import('../public/ui/dates.js');
+  /** @type {any[]} */
+  const seen = [];
+  globalThis.fetch = async (_url, init) => {
+    seen.push(init.headers);
+    return { ok: true, status: 200 };
+  };
+
+  try {
+    for (const end of ['00:00', '06:00']) {
+      setDayEnd(end);
+      await clearAll();
+      await enqueue({ url: '/api/habits/1/entries/2026-08-17', method: 'PUT', body: '{}' });
+      await flush();
+    }
+  } finally {
+    setDayEnd('00:00');
+  }
+
+  assert.equal(seen[0]['X-Habiterall-Day-End'], '00:00', 'sent at the default too');
+  assert.equal(seen[1]['X-Habiterall-Day-End'], '06:00',
+    'a replayed write carries the boundary, or the server anchors it on the calendar day');
+});
+
+test('a zone that will not resolve still sends the day-end header', async () => {
+  const { setDayEnd } = await import('../public/ui/dates.js');
+  const { deviceClockHeader } = await import('../public/offline.js');
+  const real = Intl.DateTimeFormat;
+  setDayEnd('04:00');
+  try {
+    // @ts-ignore — a runtime that cannot name its zone
+    Intl.DateTimeFormat = function () { throw new Error('no zone'); };
+    assert.deepEqual(deviceClockHeader(), { 'X-Habiterall-Day-End': '04:00' });
+  } finally {
+    Intl.DateTimeFormat = real;
+    setDayEnd('00:00');
+  }
+});
+
 test('a queued record that states its own headers keeps them', async () => {
   // The zone is added underneath what the record carries, never over it. No
   // caller stores headers today — which is exactly why this is worth pinning,

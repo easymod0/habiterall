@@ -2997,6 +2997,98 @@ ck('a caller may record the day it is on', ownDay.status === 200,
 ck('...and may not record a day it has not reached', unreached.status === 400,
   `HTTP ${unreached.status} for ${eastToday}`);
 
+/* ---------- ...and where its own day ENDS (#76) ---------- */
+
+// `X-Habiterall-Day-End` moves the READ anchors and nothing else. The write
+// guard stays on the calendar day, so a client that has not fetched the
+// setting yet is not refused for tapping the column it can see, and the route
+// reads no settings for any of it.
+//
+// A zone is FOUND at run time, because "it is 02:00 somewhere" holds at every
+// hour of the day and a fixed zone is only right for one of them. Fixed-offset
+// Etc/ zones: no DST, so the hour cannot move under the scan. Hours 1-4 rather
+// than 1-5 keeps a 06:00 boundary an hour clear of the edge while this runs.
+const localHourIn = (zone) => Number(new Intl.DateTimeFormat('en-GB', {
+  timeZone: zone, hour: '2-digit', hourCycle: 'h23',
+}).format(new Date()));
+const dayShiftedIn = (zone, days) => {
+  const d = new Date(`${dayIn(zone)}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+const EARLY_ZONE = [
+  'Etc/GMT+12', 'Etc/GMT+11', 'Etc/GMT+10', 'Etc/GMT+9', 'Etc/GMT+8', 'Etc/GMT+7',
+  'Etc/GMT+6', 'Etc/GMT+5', 'Etc/GMT+4', 'Etc/GMT+3', 'Etc/GMT+2', 'Etc/GMT+1',
+  'Etc/GMT', 'Etc/GMT-1', 'Etc/GMT-2', 'Etc/GMT-3', 'Etc/GMT-4', 'Etc/GMT-5',
+  'Etc/GMT-6', 'Etc/GMT-7', 'Etc/GMT-8', 'Etc/GMT-9', 'Etc/GMT-10', 'Etc/GMT-11',
+  'Etc/GMT-12', 'Etc/GMT-13', 'Etc/GMT-14',
+].find((z) => localHourIn(z) >= 1 && localHourIn(z) <= 4);
+ck('a zone where it is between 01:00 and 04:59 was found', EARLY_ZONE !== undefined,
+  String(EARLY_ZONE));
+
+if (EARLY_ZONE) {
+  const earlyToday = dayIn(EARLY_ZONE);
+  const earlyYesterday = dayShiftedIn(EARLY_ZONE, -1);
+  const earlyTomorrow = dayShiftedIn(EARLY_ZONE, 1);
+  const early = (dayEnd) => (path, init = {}) => fetch(`${overviewBase}${path}`, {
+    ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Habiterall-Timezone': EARLY_ZONE,
+      ...(dayEnd === undefined ? {} : { 'X-Habiterall-Day-End': dayEnd }),
+    },
+  });
+  const anchoredAt = async (dayEnd) =>
+    (await early(dayEnd)('/api/overview?days=7').then((r) => r.json())).end;
+
+  const endLate = await anchoredAt('06:00');
+  ck('/overview: before the boundary, the anchor is the PREVIOUS local date',
+    endLate === earlyYesterday, `end=${endLate}, wanted ${earlyYesterday} (calendar ${earlyToday})`);
+  ck('/overview: a day-end of 00:00 anchors on the calendar date',
+    await anchoredAt('00:00') === earlyToday, `wanted ${earlyToday}`);
+  ck('/overview: a junk day-end anchors on the calendar date',
+    await anchoredAt('7:30') === earlyToday, `wanted ${earlyToday}`);
+  ck('/overview: no day-end header anchors on the calendar date',
+    await anchoredAt(undefined) === earlyToday, `wanted ${earlyToday}`);
+
+  const owl = await postHabit({ name: 'Night owl', type: 'boolean' });
+  const statsFrom = (start, dayEnd) =>
+    early(dayEnd)(`/api/habits/${owl.id}/stats?start=${start}&granularity=day`);
+  const statsOnEffective = await statsFrom(earlyYesterday, '06:00');
+  ck('/stats: a range starting on the effective day is computed',
+    statsOnEffective.status === 200, `HTTP ${statsOnEffective.status}`);
+  const statsOnCalendar = await statsFrom(earlyToday, '06:00');
+  ck('/stats: a range starting on the calendar day is past the anchor',
+    statsOnCalendar.status === 400, `HTTP ${statsOnCalendar.status}`);
+
+  // BEFORE the writes below, and the order is load bearing. `/overview` is
+  // memoised on `data_version`, and the 06:00 read here lands on the same key as
+  // a plain read from this process's own zone; the writes after it are what
+  // bump the version and retire that entry. Read it after them and the awards
+  // block's direct `UPDATE ... skip` (which bumps nothing) is answered from this
+  // memo, and a figure it pinned to the literal comes back stale.
+  const vary = (await early('06:00')('/api/overview?days=7')).headers.get('vary') ?? '';
+  ck('the response varies on the zone', /x-habiterall-timezone/i.test(vary), vary);
+  ck('...and does NOT vary on the day-end header, whose value changes while the worker holds entries',
+    !/x-habiterall-day-end/i.test(vary), vary);
+
+  const putEarly = (date) => early('06:00')(`/api/habits/${owl.id}/entries/${date}`,
+    { method: 'PUT', body: JSON.stringify({ value: 2 }) });
+  const calendarToday = await putEarly(earlyToday);
+  ck('a PUT of calendar-today is accepted even though the anchor is yesterday',
+    calendarToday.status === 200, `HTTP ${calendarToday.status} for ${earlyToday}`);
+  const calendarTomorrow = await putEarly(earlyTomorrow);
+  ck('a PUT of calendar-tomorrow is still refused',
+    calendarTomorrow.status === 400, `HTTP ${calendarTomorrow.status} for ${earlyTomorrow}`);
+
+  // Not left behind: the import-isolation checks further down count every
+  // entry and habit alice has.
+  await withUser(alice, async (db) => {
+    await db.query(`DELETE FROM entries WHERE habit_id = $1`, [owl.id]);
+    await db.query(`DELETE FROM habits WHERE id = $1`, [owl.id]);
+  });
+}
+
 /* ---------- what the awards read out of the settings blob ---------- */
 
 console.log('\n--- awards ---');

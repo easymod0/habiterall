@@ -6,14 +6,16 @@ import { dirname, join } from 'node:path';
 
 const {
   CHANNELS, CHANNEL_IDS, CATCH_UP_MINUTES, DEFAULT_CHANNELS,
-  answeredIds, callerDay, channelConfigured, channelInteractive, discordPayload,
+  accountDay, answeredIds, callerDay, callerEffectiveDay, channelConfigured, channelInteractive, discordPayload,
   dueReminders, enabledChannels,
   minutesOfDay, needsServerDelivery, ntfyAllowlist, ntfyAllowlistProblems,
   ntfyPayload, ntfyTarget,
   parseChannelList, parseDiscordWebhook, parseNtfyToken, parseNtfyUrl,
   parseTimeZone, reminderMessage, reportedZone, resolveTimeZone, serverChannels,
-  zonedClock, AUTO_ZONE, DEVICE_ZONE_HEADER,
+  zonedClock, AUTO_ZONE, DAY_END_HEADER, DEVICE_ZONE_HEADER,
 } = await import('../src/notify.js');
+
+const { effectiveDay, effectiveReminderMinutes } = await import('../public/ui/time.js');
 
 const {
   deliverAccount, mapWithLimit, postWebhook, resetSaid, runTick, sendToChannel, startNotifier,
@@ -998,6 +1000,122 @@ test('minutesOfDay only accepts a real HH:MM', () => {
 });
 
 /* ---------- what is due ---------- */
+
+/* ---------- where the day ends ---------- */
+
+test('effectiveDay: before the boundary it is still the previous date', () => {
+  // Literal values throughout — a test importing DAY_END_TIMES would pin the
+  // name and nothing else.
+  assert.deepEqual(effectiveDay('2026-08-13', 179, '03:00'),
+    { date: '2026-08-12', minutes: 179 + 1440 }, '02:59 is still yesterday');
+  assert.deepEqual(effectiveDay('2026-08-13', 180, '03:00'),
+    { date: '2026-08-13', minutes: 180 }, '03:00 on the dot is today');
+  assert.deepEqual(effectiveDay('2026-08-13', 0, '03:00'),
+    { date: '2026-08-12', minutes: 1440 });
+  assert.deepEqual(effectiveDay('2026-08-13', 359, '06:00'),
+    { date: '2026-08-12', minutes: 359 + 1440 });
+  assert.deepEqual(effectiveDay('2026-08-13', 360, '06:00'),
+    { date: '2026-08-13', minutes: 360 });
+
+  // The previous date is worked out on the parts, so a month and a year roll.
+  assert.equal(effectiveDay('2026-03-01', 30, '01:00').date, '2026-02-28');
+  assert.equal(effectiveDay('2028-03-01', 30, '01:00').date, '2028-02-29', 'a leap year');
+  assert.equal(effectiveDay('2027-01-01', 30, '01:00').date, '2026-12-31');
+});
+
+test('effectiveDay: the default and anything unrecognised never move the day', () => {
+  for (const end of ['00:00', undefined, null, '', '07:00', '03:30', '3:00', 3, 'junk']) {
+    assert.deepEqual(effectiveDay('2026-08-13', 30, end), { date: '2026-08-13', minutes: 30 },
+      `moved the day for ${JSON.stringify(end)}`);
+  }
+  // Midnight itself, at the default: the boundary minute is where `<` and `<=`
+  // part company, and at 00:00 the latter would move every default account.
+  assert.deepEqual(effectiveDay('2026-08-13', 0, '00:00'), { date: '2026-08-13', minutes: 0 });
+});
+
+test('effectiveReminderMinutes: a time before the boundary belongs to the ending day', () => {
+  assert.equal(effectiveReminderMinutes(60, '03:00'), 1500);
+  assert.equal(effectiveReminderMinutes(179, '03:00'), 179 + 1440);
+  assert.equal(effectiveReminderMinutes(180, '03:00'), 180);
+  assert.equal(effectiveReminderMinutes(1380, '03:00'), 1380);
+  assert.equal(effectiveReminderMinutes(60, '00:00'), 60);
+  assert.equal(effectiveReminderMinutes(60, 'junk'), 60);
+});
+
+test('the caller and the account each apply the boundary to their own zone', () => {
+  assert.equal(DAY_END_HEADER, 'X-Habiterall-Day-End');
+  // 2026-03-01 00:30 in Auckland is 2026-02-28 11:30 UTC.
+  const instant = Date.UTC(2026, 1, 28, 11, 30);
+  assert.equal(callerEffectiveDay('Pacific/Auckland', '03:00', instant), '2026-02-28');
+  assert.equal(callerEffectiveDay('Pacific/Auckland', '00:00', instant), '2026-03-01');
+  assert.equal(callerEffectiveDay('Pacific/Auckland', undefined, instant), '2026-03-01');
+  assert.equal(callerEffectiveDay('Pacific/Auckland', 'junk', instant), '2026-03-01');
+  // callerDay itself is deliberately untouched by the boundary.
+  assert.equal(callerDay('Pacific/Auckland', instant), '2026-03-01');
+
+  assert.deepEqual(accountDay(instant, 'Pacific/Auckland', { dayEndsAt: '03:00' }),
+    { date: '2026-02-28', minutes: 30 + 1440 });
+  assert.deepEqual(accountDay(instant, 'Pacific/Auckland', {}),
+    { date: '2026-03-01', minutes: 30 });
+  assert.deepEqual(accountDay(instant, 'Pacific/Auckland', undefined),
+    { date: '2026-03-01', minutes: 30 });
+});
+
+test('a reminder timed before the boundary fires the next morning, for the day that is ending', () => {
+  // Monday-only (bit 1 = 2). 2026-08-10 is a Monday, 08-11 a Tuesday.
+  const monday = { reminder_time: '01:00', reminder_days: 2 };
+  const seen = [];
+  const run = (iso, over = monday, args = {}) => dueReminders({
+    habits: [habit(over)], instant: new Date(iso), timeZone: 'UTC', dayEnd: '03:00',
+    onSkip: (h, reason, detail) => seen.push({ reason, ...detail }), ...args,
+  });
+
+  const due = run('2026-08-11T01:00:00Z');
+  assert.equal(due.length, 1, 'Tuesday 01:00 is the end of Monday');
+  assert.deepEqual({ date: due[0].date, time: due[0].time },
+    { date: '2026-08-10', time: '01:00' });
+
+  assert.equal(run('2026-08-10T01:00:00Z').length, 0, 'Monday 01:00 is logically Sunday');
+  assert.equal(seen.at(-1).reason, 'not_this_weekday');
+  assert.equal(seen.at(-1).date, '2026-08-09', 'the skip names the effective date');
+  assert.equal(seen.at(-1).now, '01:00', 'and the wall clock stays the wall clock');
+
+  // Without the boundary the same instant is Tuesday and is not Monday's.
+  assert.equal(dueReminders({
+    habits: [habit(monday)], instant: new Date('2026-08-11T01:00:00Z'), timeZone: 'UTC',
+  }).length, 0);
+
+  // Before its own time, on the right day: not yet, and by wall-clock minutes.
+  assert.equal(run('2026-08-11T00:45:00Z').length, 0);
+  assert.deepEqual(
+    { reason: seen.at(-1).reason, in_minutes: seen.at(-1).in_minutes },
+    { reason: 'not_yet', in_minutes: 15 });
+});
+
+test('an evening reminder is still asked about its own date after midnight', () => {
+  const asked = [];
+  const ask = (iso) => dueReminders({
+    habits: [habit({ reminder_time: '23:00', reminder_days: 2 })],
+    instant: new Date(iso), timeZone: 'UTC', dayEnd: '03:00',
+    alreadySent: (id, date) => { asked.push(date); return true; },
+  });
+  // Tuesday 00:30: Monday's 23:00 slot is 90 minutes ago and Monday's mask bit
+  // applies; the watermark is asked against MONDAY.
+  assert.equal(ask('2026-08-11T00:30:00Z').length, 0);
+  assert.deepEqual(asked, ['2026-08-10']);
+
+  // And it is outside the catch-up window, so unsent it reads as too late
+  // rather than being re-dated onto Tuesday.
+  const reasons = [];
+  dueReminders({
+    habits: [habit({ reminder_time: '23:00', reminder_days: 2 })],
+    instant: new Date('2026-08-11T00:30:00Z'), timeZone: 'UTC', dayEnd: '03:00',
+    onSkip: (h, reason, detail) => reasons.push({ reason, ...detail }),
+  });
+  assert.deepEqual(
+    { reason: reasons[0].reason, late: reasons[0].late_minutes },
+    { reason: 'too_late', late: 90 });
+});
 
 const dueAt = (isoUtc, over = {}, args = {}) => dueReminders({
   habits: [habit(over)],

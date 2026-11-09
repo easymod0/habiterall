@@ -26,7 +26,7 @@ import { DAY, valueForState } from '../public/ui/toggle.js';
 // mirrors: `ui/time.js` is DOM-free by its own header, so the weekday rule the
 // browser reads and the one the server enforces are ONE declaration rather than
 // two that have to be pinned against each other.
-import { parseReminderDays } from '../public/ui/time.js';
+import { DAY_END_TIMES, parseReminderDays } from '../public/ui/time.js';
 
 export const HABIT_TYPES = new Set(['boolean', 'numerical']);
 export const TARGET_TYPES = new Set(['at_least', 'at_most']);
@@ -859,6 +859,10 @@ export const SETTING_VALUES = {
   theme: ['system', 'light', 'dark'],
   dayOrder: ['newest-right', 'newest-left'],
   weekStart: ['monday', 'sunday'],
+  // Where the day ends, for a person whose evening runs past midnight. See
+  // `effectiveDay` in ui/time.js; the list is that module's, so the dialog and
+  // the server cannot disagree about it.
+  dayEndsAt: [...DAY_END_TIMES],
   confirmDelete: [true, false],
   // Whether the dashboard draws one section per category (plus a trailing
   // Uncategorised one) instead of a flat list. Off by default: a fresh
@@ -1025,6 +1029,9 @@ export const PORTABLE_SETTINGS = Object.freeze([
   'theme',
   'dayOrder',
   'weekStart',
+  // A display preference carrying no capability: it says which DATE a check-in
+  // made at 00:30 lands on, and moves no stored row and no figure.
+  'dayEndsAt',
   'confirmDelete',
   'calendarZoom',
   // A display preference carrying no capability, like `theme` — it decides

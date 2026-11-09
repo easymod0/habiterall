@@ -22,7 +22,7 @@ import {
 } from '/shared/ui/components.js';
 import {
   addDaysISO, datesEndingOn, formatDateLong, formatDateShort, formatStamp, freqLabel,
-  fromISOLocal, iso, targetLabel, todayISO,
+  fromISOLocal, iso, nextDayStart, targetLabel, todayISO,
 } from '/shared/ui/dates.js';
 import { isAvoided } from '/shared/ui/toggle.js';
 import { openDayDialog } from '/shared/ui/day-dialog.js';
@@ -636,13 +636,17 @@ function refreshIfDayChanged() {
 }
 
 /**
- * Ask again at the next local midnight — and on the way back to the tab.
+ * Ask again when the day ends — the next local midnight, or the account's
+ * `dayEndsAt` hour — and on the way back to the tab.
  *
- * **Not a poll.** One timer, armed for the next local midnight and re-armed
+ * **Not a poll.** One timer, armed for the next moment the day rolls over
+ * (`nextDayStart`: the boundary hour, local, today or tomorrow) and re-armed
  * from the clock each time it fires, so an open page costs one wake-up a day
- * and reads the clock once per wake. `setHours(24, 0, 0, 0)` is the start of
- * the next LOCAL day and so is DST-aware: a 23- or 25-hour calendar day gets
- * the right instant, where `+ 86400000` would be an hour out twice a year.
+ * and reads the clock once per wake. It is `setHours` on the local date and so
+ * is DST-aware: a 23- or 25-hour calendar day gets the right instant, where
+ * `+ 86400000` would be an hour out twice a year. A change of `dayEndsAt` moves
+ * that instant, so `init()` re-arms on every settings change and asks
+ * `refreshIfDayChanged` straight away.
  *
  * **Why the timer alone is not enough, and why the pair is.** A timer is a
  * promise about the running process: a background tab clamps it to roughly one
@@ -666,8 +670,7 @@ function refreshIfDayChanged() {
 let dayTimer = 0;
 function armDayWatch() {
   clearTimeout(dayTimer);
-  const next = new Date();
-  next.setHours(24, 0, 0, 0);
+  const next = nextDayStart();
   // A second past the boundary, so the handler cannot read `todayISO()` a
   // millisecond before the day it was armed for has actually ended.
   dayTimer = setTimeout(() => {
@@ -2112,6 +2115,14 @@ export function init() {
   armDayWatch();
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
+    refreshIfDayChanged();
+  });
+  // A change of `dayEndsAt` moves both the instant the timer was armed for and
+  // what today IS, so the page drawn for the old one is stale at once — see
+  // `ui/dashboard.js`'s matching applier for why this is `onApply` and not
+  // `onChange`, and why it runs after `app.js`'s one that sets the boundary.
+  settings.onApply(() => {
+    armDayWatch();
     refreshIfDayChanged();
   });
 }

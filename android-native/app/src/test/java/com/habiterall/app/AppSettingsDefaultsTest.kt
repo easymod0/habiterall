@@ -197,6 +197,10 @@ class AppSettingsDefaultsTest {
         // (cache the colour the WebView last painted) and not a copy of the
         // setting — the distinction `notifyTimezone` already draws.
         "theme" to "the WebView paints it; native chrome follows Android",
+        // Where the account's day ends (#76). The web client and the server's
+        // reminders honour it; this client's own grid and alarms still use the
+        // calendar day until its half of the change lands.
+        "dayEndsAt" to "the phone's own client support arrives in the next PR; until then it keeps the calendar day",
         // How many day columns the WEB dashboard draws. This client's grid does
         // not page a fixed window at all — it starts at `Grid.INITIAL_DAYS`,
         // grows by `PAGE_DAYS` as you scroll toward the edge up to `MAX_DAYS`,

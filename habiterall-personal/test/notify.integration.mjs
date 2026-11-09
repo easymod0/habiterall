@@ -688,6 +688,77 @@ try {
   ck('and nothing was written for the cross-origin attempt',
     afterForeignOrigin.body.length === 0, JSON.stringify(afterForeignOrigin.body));
 
+  // #76: a day that ends after midnight. `interactionAdapter().today` is what
+  // this route dates the press by, and with `dayEndsAt` set it answers the
+  // PREVIOUS date until that hour passes. Passing `{}` for the settings there
+  // — the boundary dropped — is invisible to every check above, because none of
+  // them sets one, and to the `collect` case further down, which never goes
+  // through this adapter.
+  //
+  // Wanted: a zone whose local hour is 1-4 right now, so a 06:00 boundary has
+  // not passed and neither edge of it (midnight, 06:00) is a minute away. Every
+  // offset from -12 to +14 is a fixed-offset `Etc/GMT` zone, so one of them is
+  // always in that window; scanned at runtime and asserted found.
+  {
+    const hourIn = (zone) => Number(new Intl.DateTimeFormat('en-GB', {
+      timeZone: zone, hour: '2-digit', hourCycle: 'h23',
+    }).format(new Date()));
+    const dateIn = (zone) => new Intl.DateTimeFormat('en-CA', {
+      timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date());
+    const nightZone = [...Array.from({ length: 14 }, (_, n) => `Etc/GMT-${n + 1}`),
+      'Etc/GMT', ...Array.from({ length: 12 }, (_, n) => `Etc/GMT+${n + 1}`)]
+      .find((z) => { const h = hourIn(z); return h >= 1 && h <= 4; });
+    ck('a zone whose local hour is between 01:00 and 04:59 exists to test with',
+      nightZone !== undefined, String(nightZone));
+
+    if (nightZone) {
+      const calendarToday = dateIn(nightZone);
+      const back = (n) => {
+        const d = new Date(`${calendarToday}T00:00:00Z`);
+        d.setUTCDate(d.getUTCDate() - n);
+        return d.toISOString().slice(0, 10);
+      };
+      await api('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ notifyTimezone: nightZone, dayEndsAt: '06:00' }),
+      });
+      const press = async (date, name) => {
+        const habitId = await freshHabit(name);
+        const res = await postNtfy(ntfyCode({ habitId, date, action: 'yes' }));
+        return { res, entries: (await api(`/api/habits/${habitId}/entries`)).body };
+      };
+
+      const yesterday = await press(back(1), 'ntfy late-day yesterday');
+      ck(`before the boundary (${nightZone}), yesterday's date is accepted`,
+        yesterday.res.status === 200, JSON.stringify(yesterday.res));
+      ck('and lands on yesterday, read back from storage',
+        yesterday.entries.some((e) => e.date === back(1) && e.value === 2),
+        JSON.stringify(yesterday.entries));
+
+      const todayCal = await press(calendarToday, 'ntfy late-day calendar today');
+      ck("the calendar's today is still in the future, refused 400",
+        todayCal.res.status === 400 && /future/i.test(todayCal.res.body?.error ?? ''),
+        JSON.stringify(todayCal.res));
+      ck('and nothing was written for it', todayCal.entries.length === 0);
+
+      // The far edge: three calendar days back is age 2 against yesterday, inside
+      // MAX_ANSWER_AGE_DAYS, and four is age 3, outside it.
+      const edge = await press(back(3), 'ntfy late-day age two');
+      ck("a date three calendar days back is age 2 against the account's day, so accepted",
+        edge.res.status === 200, JSON.stringify(edge.res));
+      const tooOld = await press(back(4), 'ntfy late-day age three');
+      ck('and four back is age 3, refused 410',
+        tooOld.res.status === 410, JSON.stringify(tooOld.res));
+
+      // Put back what the rest of the file was running at.
+      await api('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({ notifyTimezone: 'UTC', dayEndsAt: '00:00' }),
+      });
+    }
+  }
+
   // The limiter is written inline at the route rather than through the
   // switchable `limit()` helper, specifically so it still bites with
   // HABITERALL_RATE_LIMIT=off (set for this entire file) — proven behaviourally
@@ -833,6 +904,87 @@ try {
     !JSON.stringify(await (await fetch(`${base}/api/export`)).json())
       .includes('Asia/Tokyo'),
     'restoring a backup abroad must not move when reminders arrive');
+
+  /* ---------- an account whose day ends at 03:00 (#76) ---------- */
+  //
+  // `collect` asks `entriesOn` and `sentOn` about a DATE, and with `dayEndsAt`
+  // that date is the one before the calendar's until the hour passes. Reading
+  // `zonedClock(...).date` there — the day before this setting — passes every
+  // check above, because none of them set it. Literal dates throughout: Monday
+  // is 2026-08-10, so 00:30 on the 11th is still Monday's evening.
+  {
+    const { db: boundaryDb } = await import('../src/db.js');
+    const quiet = { debug: () => {}, info: () => {}, warn: () => {} };
+    await api('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({
+        notifyChannels: ['discord'],
+        discordWebhook: WEBHOOK,
+        discordChannelId: '',
+        notifyTimezone: 'UTC',
+        dayEndsAt: '03:00',
+      }),
+    });
+    const late = await api('/api/habits', {
+      method: 'POST', body: JSON.stringify({ name: 'Late evening', reminder_time: '23:00' }),
+    });
+    const small = await api('/api/habits', {
+      method: 'POST', body: JSON.stringify({ name: 'Small hours', reminder_time: '01:00' }),
+    });
+    // Only these two: the habits above this section would also be due, and
+    // their dates are not what is being asked.
+    const only = (account, ...ids) => ({
+      ...account, habits: account.habits.filter((h) => ids.includes(h.id)),
+    });
+    const run = async (instant, ...ids) => {
+      const fetchB = fakeFetch();
+      const out = await deliverAccount(only(notifier.collect(instant)[0], ...ids), {
+        instant, mark: notifier.mark, fetch: fetchB, log: quiet,
+      });
+      return { out, fetchB };
+    };
+    const logged = (id) => boundaryDb.prepare(
+      `SELECT date FROM notify_log WHERE habit_id = ? ORDER BY date`).all(id).map((r) => r.date);
+
+    const monday2300 = new Date(Date.UTC(2026, 7, 10, 23, 0));
+    const tuesday0030 = new Date(Date.UTC(2026, 7, 11, 0, 30));
+    const tuesday0100 = new Date(Date.UTC(2026, 7, 11, 1, 0));
+
+    const evening = await run(monday2300, late.body.id);
+    ck('a 23:00 reminder sends at 23:00 on Monday', evening.out.sent === 1, JSON.stringify(evening.out));
+    ck('...and its watermark is Monday', JSON.stringify(logged(late.body.id)) === '["2026-08-10"]',
+      JSON.stringify(logged(late.body.id)));
+
+    const after = await run(tuesday0030, late.body.id);
+    ck('at 00:30 on Tuesday the same reminder is not sent again',
+      after.out.sent === 0 && after.fetchB.calls.length === 0, JSON.stringify(after.out));
+    ck('...because Monday\'s watermark was the one asked about',
+      after.out.skipped?.already_sent === 1, JSON.stringify(after.out.skipped));
+
+    // An entry on MONDAY answers it: Tuesday 00:30 is still Monday's day.
+    await api(`/api/habits/${late.body.id}/entries/2026-08-10`, {
+      method: 'PUT', body: JSON.stringify({ value: 2 }),
+    });
+    ck('an entry dated Monday counts as answered at 00:30 on Tuesday',
+      notifier.collect(tuesday0030)[0].doneToday.has(late.body.id) === true);
+    ck('a habit with no Monday entry is unanswered at 00:30 on Tuesday',
+      notifier.collect(tuesday0030)[0].doneToday.has(small.body.id) === false);
+
+    // The reminder timed BEFORE the boundary belongs to the day that is ending.
+    const morning = await run(tuesday0100, small.body.id);
+    ck('a 01:00 reminder fires at 01:00 on Tuesday', morning.out.sent === 1, JSON.stringify(morning.out));
+    ck('...and is logged under Monday, the day it is about',
+      JSON.stringify(logged(small.body.id)) === '["2026-08-10"]', JSON.stringify(logged(small.body.id)));
+
+    // The other direction: an entry dated TUESDAY is tomorrow's, not this day's.
+    await api(`/api/habits/${small.body.id}/entries/2026-08-11`, {
+      method: 'PUT', body: JSON.stringify({ value: 2 }),
+    });
+    ck('an entry dated Tuesday does not answer Monday\'s day at 01:00 on Tuesday',
+      notifier.collect(tuesday0100)[0].doneToday.has(small.body.id) === false);
+
+    await api('/api/settings', { method: 'PUT', body: JSON.stringify({ dayEndsAt: '00:00' }) });
+  }
 
   /* ---------- housekeeping must not abandon the tick ---------- */
   //

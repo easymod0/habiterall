@@ -43,7 +43,7 @@ Postgres one.
 | `public/ui/api.js` | every request, and what to do when one cannot be made |
 | `public/ui/connectivity.js` | the offline banner, the outbox badge, reconnect handling |
 | `public/ui/toast.js` | the transient message strip |
-| `public/ui/nudge.js` | the browser's own reminder — what is still outstanding, when to say it and where. Loadable under Node (one `document` listener, handed in; one relative import, `./time.js`), mirroring `answeredIds` |
+| `public/ui/nudge.js` | the browser's own reminder — what is still outstanding, when to say it and where. Loadable under Node (one `document` listener, handed in; two relative imports, `./time.js` and `./dates.js`), mirroring `answeredIds` |
 | `public/ui/reminder-field.js` | the reminder controls inside the habit dialog: the time picker (`reminderField`) and, as a sibling export rather than a widening of it, the seven-box weekday picker over `reminder_days` (`reminderDaysField`) |
 | `public/ui/amount.js` | reading, stepping and formatting an amount, DOM-free so it is testable |
 | `public/ui/count-field.js` | the amount control over those rules, in the day editor and over the grid |
@@ -52,7 +52,7 @@ Postgres one.
 | `public/ui/window.js` | how many columns a chart fits, and which slice to show |
 | `public/ui/resample.js` | thins the daily score series for the strength chart |
 | `public/ui/dates.js` | browser-side date helpers, and the label-width estimator every chart reserves space with |
-| `public/ui/time.js` | parsing and formatting a reminder time, and which weekdays it fires on (`parseReminderDays`, `weekdayOf`, `remindsOn`). DOM-free so it is testable — and so `src/validate.js`, `src/notify.js` and `src/import.js` can import it rather than re-declare the rule. Mirrored in Kotlin |
+| `public/ui/time.js` | parsing and formatting a reminder time, and which weekdays it fires on (`parseReminderDays`, `weekdayOf`, `remindsOn`), and where a day ends (`effectiveDay`, `effectiveReminderMinutes`, `DAY_END_TIMES`). DOM-free so it is testable — and so `src/validate.js`, `src/notify.js` and `src/import.js` can import it rather than re-declare the rule. Mirrored in Kotlin |
 | `public/ui/toggle.js` | what the next tap on a day records — Loop's cycle, and what each state is WORTH for this habit. DOM-free, mirrored in Kotlin |
 | `public/ui/theme.js` | light / dark / follow-the-device, as a stored preference. No redraw callback — see `themed` in charts.js |
 | `public/ui/values.js` | `UNSET` / `YES` / `SKIP` for the browser, mirroring `src/constants.js` |
@@ -66,7 +66,7 @@ security.
 The frontend has its own file: **`shared/public/CLAUDE.md`**. Long-form
 reasoning for everything below is in `docs/decisions/` — `day-states.md`,
 `awards.md`, `import-and-loop.md`, `reminders.md`, `timezones.md`,
-`discord.md`, `outbound-urls.md`.
+`day-boundary.md`, `discord.md`, `outbound-urls.md`.
 
 ## Day states and habit shape
 
@@ -1147,6 +1147,21 @@ the root `CLAUDE.md`. What it is NOT is one day of slack: the spread is UTC−12
 UTC+14, and 26 hours is wide enough for **two** calendar days at once, so
 `today + 1` is both too narrow at the edges and too wide everywhere else.
 `shared/test/notify.test.js` asserts the two-day gap directly.
+
+**A day may end after midnight, and the rule is ONE function (#76).**
+`dayEndsAt` (`00:00`–`06:00`, whole hours) is applied by `effectiveDay` in
+`public/ui/time.js` — imported here as `remindsOn` is, never restated — once,
+to a WALL CLOCK after the zone is resolved: `minutes < end` means the previous
+date and `minutes + 1440`. Never subtract hours from an instant (DST). Two
+callers, two sources for the boundary, and mixing them up is the defect:
+`callerEffectiveDay` is for a ROUTE and reads the `X-Habiterall-Day-End`
+header, never settings; `accountDay` is for a path with no client (the
+notifier, Discord and ntfy buttons) and reads `settings.dayEndsAt`. A reminder
+whose time is before the boundary belongs to the day that is ENDING, so
+`dueReminders` compares it as `at + 1440` and asks `remindsOn`, `alreadySent`
+and the returned `date` of the effective date. **`assertNotFuture` stays on
+`callerDay`**, deliberately: a client that has not fetched the setting taps
+calendar-today at 00:30, and a 400 is dropped from its outbox as permanent.
 
 **A zone has to be a NAME.** `parseTimeZone` returns the canonical name and
 refuses offset zones. `Intl` accepts far more spellings than there are zones, and

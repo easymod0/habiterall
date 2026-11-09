@@ -42,7 +42,7 @@ import {
 } from '@habiterall/shared/export-loop.js';
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
 import {
-  DEVICE_ZONE_HEADER, callerDay, reportedZone,
+  DAY_END_HEADER, DEVICE_ZONE_HEADER, callerDay, callerEffectiveDay, reportedZone,
 } from '@habiterall/shared/notify.js';
 import { log } from '@habiterall/shared/log.js';
 
@@ -71,6 +71,10 @@ api.use((req, res, next) => {
   // direction to be wrong in, and the alternative is remembering to add it to
   // the fourth.
   res.vary(DEVICE_ZONE_HEADER);
+  // The zone varies and the boundary deliberately does not: its VALUE changes
+  // when the setting does, and a `Vary` on it would make every entry in the
+  // worker's data cache unmatchable offline until each URL was refetched.
+  // `/api` responses carry no freshness headers, so nothing else needs it.
 
   const zone = reportedZone(req.get(DEVICE_ZONE_HEADER));
   if (zone && zone !== lastReportedZone) {
@@ -100,7 +104,8 @@ api.use((req, res, next) => {
  * Read from the header rather than from the stored zone, for the reason
  * `callerDay` states: this is a fact about one device, not about the account.
  */
-const callerToday = (req) => callerDay(req.get(DEVICE_ZONE_HEADER));
+const callerToday = (req) =>
+  callerEffectiveDay(req.get(DEVICE_ZONE_HEADER), req.get(DAY_END_HEADER));
 
 /* ---------- statements ---------- */
 
@@ -683,7 +688,11 @@ api.put('/habits/:id/entries/:date', (req, res) => {
 
   if (!habit) throw httpError(404, 'habit not found');
   assertDate(date);
-  assertNotFuture(date, callerToday(req));
+  // The CALENDAR day, deliberately not `callerToday`: a client that has not yet
+  // fetched `dayEndsAt` taps calendar-today at 00:30, and a 400 here is dropped
+  // from its outbox as permanently inapplicable. The boundary moves what a
+  // client reads as "today", never what it may write.
+  assertNotFuture(date, callerDay(req.get(DEVICE_ZONE_HEADER)));
 
   const parsed = parseEntry(habit, req.body, { UNSET, YES, SKIP });
 

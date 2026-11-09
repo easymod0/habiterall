@@ -10,6 +10,12 @@
  * the page keeps one code path on every platform.
  */
 
+// Relative, and for the module-identity reason as much as the Node one: the page
+// imports this same file as `/shared/ui/dates.js`, so both resolve to ONE
+// module and one `dayEnd`. A second spelling of the URL would be a second copy
+// holding the default for ever.
+import { currentDayEnd } from './ui/dates.js';
+
 const DB_NAME = 'habiterall-offline';
 const DB_VERSION = 1;
 const STORE = 'outbox';
@@ -109,14 +115,25 @@ function remove(seq) {
  *
  * Silent on a runtime that will not answer: this is an optimisation of the
  * default, never a requirement.
+ *
+ * **It also says where this account's day ends** (`X-Habiterall-Day-End`), on
+ * EVERY request including at `'00:00'`, because the read anchors
+ * (`callerEffectiveDay`) need it on every request to judge "today" by. A
+ * replayed write carries it too; the write guard deliberately does not use it.
+ * The routes do NOT `Vary` on it — its value changes with the setting, which
+ * would strand every entry the worker has cached (`docs/decisions/day-boundary.md`).
+ * A zone that will not resolve still sends it: the two are independent, and a
+ * device that cannot name its zone has a boundary all the same.
  */
 export function deviceClockHeader() {
+  const headers = { 'X-Habiterall-Day-End': currentDayEnd() };
   try {
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    return zone ? { 'X-Habiterall-Timezone': zone } : {};
+    if (zone) headers['X-Habiterall-Timezone'] = zone;
   } catch {
-    return {};
+    // No zone is not no boundary.
   }
+  return headers;
 }
 
 /* ---------- replay ---------- */

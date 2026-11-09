@@ -1923,6 +1923,11 @@ A reminder has two halves, set in two places:
    and the field says so rather than quietly putting the ticks back. The boxes
    stay usable with no time set, because they are the second half of the answer
    and the time is the half that decides whether there is a reminder at all.
+
+   If you stay up past midnight, ⚙ → **My day ends at** (midnight to 06:00)
+   moves where a day stops: a check-off made before that hour counts for the
+   previous day, and a reminder timed before it asks about the day that is
+   ending. Entries already recorded do not move.
 2. **Where** — under ⚙ → **Notifications**, as a list of destinations. They are
    not exclusive; pick as many as you like.
 

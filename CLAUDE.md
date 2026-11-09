@@ -83,7 +83,7 @@ only defaults, and why `compileSdk` is 37 while `targetSdk` stays 36.
 | `android-native/` | `android-native/CLAUDE.md` | `android.md`, `routing.md`, `caching.md`, `android-stats-screen.md` |
 | `habiterall-personal/` | `habiterall-personal/CLAUDE.md` | `auth.md`, `caching.md` |
 | `habiterall-cloud/` | `habiterall-cloud/CLAUDE.md` | `auth.md`, `connectivity.md`, `caching.md`, `sharing-and-rls.md`, `cloud-backups.md` |
-| reminders, any channel | `shared/CLAUDE.md` | `reminders.md`, `discord.md`, `timezones.md`, `outbound-urls.md`, `icons.md` |
+| reminders, any channel | `shared/CLAUDE.md` | `reminders.md`, `discord.md`, `timezones.md`, `day-boundary.md`, `outbound-urls.md`, `icons.md` |
 | `site/`, habiterall.ca | `site/CLAUDE.md` | `site.md` |
 | `examples/`, compose, env | `examples/CLAUDE.md` | `compose-and-env.md` |
 | settings, client mirrors, and what may never be one | here, below | `settings-and-mirrors.md`, `must-stay-fixed.md`, `translations.md` |
@@ -208,7 +208,13 @@ other — never something a user's URL can ask for. See
 and nothing else — it is what a route judges "is this today?" by, for the write
 guard and for the `/overview` and `/stats` anchors. `resolveTimeZone` asks where
 an ACCOUNT is, so a reminder goes out at the right hour with nobody present. A
-caller reporting no zone gets the server's clock.
+caller reporting no zone gets the server's clock. **A day may end after
+midnight (`dayEndsAt`), and only the READ anchors apply it**: they take the
+caller's boundary from the `X-Habiterall-Day-End` header (`callerEffectiveDay`),
+never from a settings read, while the write guard stays on `callerDay` on
+purpose — a client that has not fetched the setting yet would otherwise be
+refused a tap on calendar-today and have it dropped from its outbox. Paths with
+no client read `settings.dayEndsAt` (`docs/decisions/day-boundary.md`).
 
 **Sign-in belongs in the app, not in the reverse proxy** — because of the Android
 client. `Api.kt` talks to `/api` directly, outside the WebView, so a proxy's login

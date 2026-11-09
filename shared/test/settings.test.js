@@ -948,3 +948,16 @@ test('every registry default is a value the SERVER accepts', () => {
       `${key}: the server normalised its own default to ${JSON.stringify(accepted[key])}`);
   }
 });
+
+test('dayEndsAt accepts whole hours to 06:00 and nothing between or beyond', () => {
+  for (const ok of ['00:00', '01:00', '03:00', '06:00']) {
+    assert.deepEqual(parseSettings({ dayEndsAt: ok }).accepted, { dayEndsAt: ok }, ok);
+  }
+  for (const bad of ['07:00', '03:30', '3:00', '24:00', 3, null, true, '']) {
+    assert.deepEqual(parseSettings({ dayEndsAt: bad }).accepted, {},
+      `accepted ${JSON.stringify(bad)}`);
+  }
+  assert.ok(PORTABLE_SETTINGS.includes('dayEndsAt'), 'it travels in a backup');
+  assert.deepEqual(portableSettings({ dayEndsAt: '03:00', ntfyToken: 'x' }),
+    { dayEndsAt: '03:00' });
+});

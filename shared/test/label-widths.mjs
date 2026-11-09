@@ -39,7 +39,7 @@
  *
  * ## What is measured
  *
- * `ui/dates.js` has no imports, so its source is read, `export` stripped,
+ * `ui/dates.js` has no imports that matter here, so its source is read, `export` stripped,
  * and evaluated in-page inside an IIFE that returns the functions this file
  * needs — a copy in the sense that the bytes are the same file's, not a
  * hand-maintained duplicate. The labels are the four shapes `charts.js`
@@ -171,8 +171,17 @@ const SIZES = [8, 8.5, 9.5, 10.5, 11, 11.5];
 const FONT_CSS =
   'font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0;';
 
-const datesSrc = readFileSync(join(here, '..', 'public', 'ui', 'dates.js'), 'utf8')
-  .replace(/^export (function|const)/gm, '$1');
+// `ui/dates.js` has ONE import since the day boundary (#76), of `./time.js` for
+// `todayISO` and friends. An IIFE body cannot hold an import, and nothing measured
+// here calls any of them — but `let dayEnd = DEFAULT_DAY_END` does read one name
+// at module scope, so the line is replaced by stand-ins for the four it names
+// rather than only dropped.
+const datesSrc =
+  'const DAY_END_TIMES = [], DEFAULT_DAY_END = "00:00", dayEndMinutes = () => 0,' +
+  ' effectiveDay = (date, minutes) => ({ date, minutes });\n' +
+  readFileSync(join(here, '..', 'public', 'ui', 'dates.js'), 'utf8')
+    .replace(/^import [^;]*;\n/gm, '')
+    .replace(/^export (function|const)/gm, '$1');
 
 /** Mid-month dates, one per month, so a Gregorian AND a non-Gregorian caption
  * both land inside the month they name. */

@@ -703,6 +703,7 @@ export async function deliverAccount(account, ctx) {
       // `too_late`. Resolved once, in `resolveTimeZone`, and carried.
       timeZone: account.timeZone ?? resolveTimeZone(settings),
       doneToday: account.doneToday,
+      dayEnd: settings.dayEndsAt,
       // Per channel: adding Discord to an account must not be silenced by the
       // fact that the phone already handled that habit this morning.
       alreadySent: (habitId, date) => account.alreadySent?.(habitId, channel, date),

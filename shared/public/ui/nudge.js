@@ -21,7 +21,7 @@
  * what lets `test/nudge.test.js` run the rule AND the call site with no browser
  * and no module resolution — the absolute `/shared/...` specifiers the rest of
  * `public/ui` uses do not resolve there. That is the property, and it is what
- * the one import below is measured against rather than a count of imports: a
+ * the imports below are measured against rather than a count of imports: a
  * RELATIVE specifier for a sibling that has no imports of its own resolves
  * under Node exactly as it does in the browser (`ui/calendar.js` and
  * `ui/resample.js` already reach `./dates.js` this way). Everything else this
@@ -43,7 +43,12 @@
 // reach. `ui/time.js` is a sibling this module can simply have, so there is one
 // declaration for the browser, the server (`shared/src/notify.js` imports the
 // same file) and `parseHabit`, with the phone as the only mirror.
-import { remindsOn } from './time.js';
+import { effectiveReminderMinutes, remindsOn } from './time.js';
+// The device's clock on the DAY's terms — `effectiveMinutes` runs past 1440
+// before the account's boundary, `currentDayEnd` is the boundary itself. Also
+// relative and also import-free beyond `./time.js`, so this still loads under
+// Node; `ui/dates.js` is where the app's one `iso()` and its one `dayEnd` live.
+import { currentDayEnd, effectiveMinutes } from './dates.js';
 
 /**
  * This destination's id, as `CHANNELS` in shared/src/notify.js spells it.
@@ -201,7 +206,12 @@ function minutesOfDay(hhmm) {
 }
 
 /**
- * Minutes since midnight on THIS DEVICE's clock.
+ * Minutes since the start of the day on THIS DEVICE's clock — which, once an
+ * account's day ends after midnight, is not minutes since midnight: before the
+ * boundary it runs past 1440 (`effectiveMinutes`), exactly as the server's
+ * `dueReminders` reads the account's own clock. A reminder at 01:00 against a
+ * 03:00 boundary is `at + 1440`, and 00:30 on the wall is 1470 of the day that
+ * has not ended, so the comparison below holds across midnight.
  *
  * The browser's own, and never `notifyTimezone` or `resolveTimeZone`. Those
  * answer where an ACCOUNT is, so that a reminder nobody is present for still
@@ -216,7 +226,7 @@ function minutesOfDay(hhmm) {
  * hand-built date string here would be the copy that file already deleted from
  * `charts.js` rather than exempted. It arrives through `init` instead.
  */
-const minutesNow = (now) => now.getHours() * 60 + now.getMinutes();
+const minutesNow = (now) => effectiveMinutes(now);
 
 /**
  * The habits this browser has something to say about.
@@ -232,14 +242,16 @@ const minutesNow = (now) => now.getHours() * 60 + now.getMinutes();
  * window here would mean opening the app at 08:31 and being told nothing.
  *
  * @param {any[]} habits as `/overview` returned them, entries and all
- * @param {{date: string, minutes: number, loaded?: {start: string, end: string}|null,
- *   already?: Set<number>|number[]}} clock
- *   `date` is the device's local day, `minutes` its local time, `loaded` the
- *   window those habits' entries actually came from, and `already` the habits
- *   this device has been told about on that day.
+ * @param {{date: string, minutes: number, dayEnd?: string,
+ *   loaded?: {start: string, end: string}|null, already?: Set<number>|number[]}} clock
+ *   `date` is the device's local day and `minutes` its local time ON THAT DAY's
+ *   clock (past 1440 before the boundary, see `minutesNow`), `dayEnd` the
+ *   account's `dayEndsAt` (default midnight), `loaded` the window those habits'
+ *   entries actually came from, and `already` the habits this device has been
+ *   told about on that day.
  * @returns {any[]} in the order they were given
  */
-export function outstanding(habits, { date, minutes, loaded = null, already = [] }) {
+export function outstanding(habits, { date, minutes, dayEnd = '00:00', loaded = null, already = [] }) {
   // Whole payload or nothing: if the window does not reach today then no
   // habit's entries can be read for it, so there is no per-habit answer to
   // give. See `covers`.
@@ -260,7 +272,10 @@ export function outstanding(habits, { date, minutes, loaded = null, already = []
     // one disagrees with the row it is about. Same gate, same place in the
     // order, as `dueReminders` (shared/src/notify.js).
     if (!remindsOn(habit.reminder_days, date)) return false;
-    if (minutes < at) return false;             // not yet, on this clock
+    // A reminder before the boundary belongs to the day that is ENDING, so it
+    // is compared as `at + 1440` against `minutes` on the same extended clock —
+    // the rule `dueReminders` applies, from the same `effectiveReminderMinutes`.
+    if (minutes < effectiveReminderMinutes(at, dayEnd)) return false;  // not yet
 
     return !isDayAnswered(habit, entryOn(habit, date));
   });
@@ -487,6 +502,7 @@ export async function check({ now = new Date() } = {}) {
     const due = outstanding(wiring.habits() ?? [], {
       date,
       minutes: minutesNow(now),
+      dayEnd: currentDayEnd(),
       loaded,
       already,
     });
