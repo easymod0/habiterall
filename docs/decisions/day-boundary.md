@@ -67,9 +67,7 @@ Tomorrow's calendar date is still refused, and the suites assert both.
 
 `X-Habiterall-Day-End` rides on every request, `00:00` included. Four read
 anchors use it through `callerEffectiveDay` (compare, `/habits/:id/stats`,
-`/awards`, `/overview`), and `res.vary(DAY_END_HEADER)` joins the zone's,
-because two clients in one zone with different boundaries ask one URL at 00:30
-and want different anchors.
+`/awards`, `/overview`).
 
 It is a header and not a settings read because cloud's `/overview` computes its
 day before it touches the database, and the memo key already carries the
@@ -78,11 +76,22 @@ would be a read on the hot path of every request for a value the client already
 holds.
 
 It is sent on every request, not only when the value is not the default,
-because `sw.js` forbids varying on a header sent only sometimes: the Cache API
-selects an entry by the stored response's `Vary`, so a conditionally-sent
-header turns one URL into two keys and the key an offline boot presents is the
-one without it (`caching.md`). `deviceClockHeader` returns both headers and a
-zone failure still returns the day-end one.
+because the read anchors need it every time. `deviceClockHeader` returns both
+headers and a zone failure still returns the day-end one.
+
+**The routes do NOT `Vary` on it, and the first version did.** The zone is in
+`Vary`; this header is not, and the reason is the Cache API. It selects a stored
+response by comparing the VALUES of the headers its `Vary` names, so every
+`/api/overview` and `/api/habits/*` entry in the worker's data cache is stored
+under the day-end value in force when it was fetched. Change `dayEndsAt` once,
+online, at an hour where `todayISO()` does not move, and nothing is refetched:
+every cached entry now misses for any request carrying the new value, and
+`caches.match` falls through to the synthetic 503. Detail pages stay stranded
+until each URL is individually refetched. The `Vary` bought nothing in return:
+`/api` responses carry no freshness headers, so no intermediary may reuse one
+without revalidating, the worker fetches with `cache: 'no-store'`, and cloud's
+memo key already carries the resulting day. `dayboundary.mjs` reloads offline
+after a change and asserts the dashboard still renders.
 
 Paths with NO client — the notifier's `collect`, `adapter.today` for the
 Discord and ntfy buttons — read `settings.dayEndsAt` through `accountDay`, with
@@ -145,6 +154,15 @@ ends works, and nothing is recorded wrongly; it is a refused tap, not a wrong
 one. Not fixed: widening the future check for buttons would loosen it for
 every press to cover a setting change, and the signed code already pins the
 date to one the server chose.
+
+**A reminder inside a skipped hour can be neither sent nor logged.** On a
+spring-forward night, a reminder timed inside the hour that does not exist, with
+`dayEndsAt` equal to the hour the gap ends at, never has a tick whose wall clock
+matches it: Europe/Berlin, 2027-03-28, reminder `02:30`, `dayEndsAt` `03:00`. The
+clock goes 01:59 to 03:00; the old day's clock never reaches 02:30, and at 03:00
+the new day has begun and the reminder (compared as `at + 1440`, the day that is
+ending) is not yet due. Once a year, one boundary value, one reminder. Accepted rather than
+special-cased.
 
 ## How the web client follows a change
 

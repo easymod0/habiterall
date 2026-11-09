@@ -117,10 +117,11 @@ function remove(seq) {
  * default, never a requirement.
  *
  * **It also says where this account's day ends** (`X-Habiterall-Day-End`), on
- * EVERY request including at `'00:00'` — `sw.js` forbids a route varying on a
- * header the page sends only sometimes, and the routes now `Vary` on this one.
- * It is what the read anchors (`callerEffectiveDay`) judge "today" by, so a
+ * EVERY request including at `'00:00'`, because the read anchors
+ * (`callerEffectiveDay`) need it on every request to judge "today" by. A
  * replayed write carries it too; the write guard deliberately does not use it.
+ * The routes do NOT `Vary` on it — its value changes with the setting, which
+ * would strand every entry the worker has cached (`docs/decisions/day-boundary.md`).
  * A zone that will not resolve still sends it: the two are independent, and a
  * device that cannot name its zone has a boundary all the same.
  */

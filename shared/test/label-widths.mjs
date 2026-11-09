@@ -174,7 +174,7 @@ const FONT_CSS =
 // `ui/dates.js` has ONE import since the day boundary (#76), of `./time.js` for
 // `todayISO` and friends. An IIFE body cannot hold an import, and nothing measured
 // here calls any of them — but `let dayEnd = DEFAULT_DAY_END` does read one name
-// at module scope, so the line is replaced by stand-ins for the five it names
+// at module scope, so the line is replaced by stand-ins for the four it names
 // rather than only dropped.
 const datesSrc =
   'const DAY_END_TIMES = [], DEFAULT_DAY_END = "00:00", dayEndMinutes = () => 0,' +

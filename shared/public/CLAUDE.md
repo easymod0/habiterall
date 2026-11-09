@@ -25,6 +25,10 @@ with `caches.match(request)`, and the Cache API selects an entry using the
 stored RESPONSE's `Vary` — so a conditionally-sent header turns one URL into
 two keys, and the key an offline boot presents is the one without it. That is
 not a stale answer, it is no answer.
+Nor on a header whose VALUE can change while cached entries remain:
+`X-Habiterall-Day-End` is the case. The Cache API compares header values, so
+changing the setting once, at an hour where `todayISO()` does not move and
+nothing is refetched, leaves every stored entry unmatchable for the new value.
 
 **The measurement is historical and the rule is not.** It was taken in Chrome
 against cloud's `X-Habiterall-Fresh`, a header #192 has since deleted — no
@@ -386,7 +390,9 @@ in registration order), or they re-arm against the old boundary. Any code that
 asks "what day is it" with `new Date()` is a second opinion — `calendarChart`'s
 `realToday` was one, and it decides which cells are still editable.
 And `deviceClockHeader` sends `X-Habiterall-Day-End` on EVERY request, `00:00`
-included, because `sw.js` forbids varying on a header sent only sometimes.
+included, because the read anchors need it every time — and the routes do NOT
+`Vary` on it, for the rule at the top of this file about a value that changes
+while entries remain cached.
 `docs/decisions/day-boundary.md` has the rest; `dayboundary.mjs` pins the
 wiring in a real browser.
 

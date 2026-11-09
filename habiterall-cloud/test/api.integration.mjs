@@ -3068,9 +3068,9 @@ if (EARLY_ZONE) {
   // block's direct `UPDATE ... skip` (which bumps nothing) is answered from this
   // memo, and a figure it pinned to the literal comes back stale.
   const vary = (await early('06:00')('/api/overview?days=7')).headers.get('vary') ?? '';
-  ck('the response says it varies on the day-end header',
-    /x-habiterall-day-end/i.test(vary), vary);
-  ck('...and still on the zone', /x-habiterall-timezone/i.test(vary), vary);
+  ck('the response varies on the zone', /x-habiterall-timezone/i.test(vary), vary);
+  ck('...and does NOT vary on the day-end header, whose value changes while the worker holds entries',
+    !/x-habiterall-day-end/i.test(vary), vary);
 
   const putEarly = (date) => early('06:00')(`/api/habits/${owl.id}/entries/${date}`,
     { method: 'PUT', body: JSON.stringify({ value: 2 }) });

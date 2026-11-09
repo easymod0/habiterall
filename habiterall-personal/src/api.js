@@ -71,9 +71,10 @@ api.use((req, res, next) => {
   // direction to be wrong in, and the alternative is remembering to add it to
   // the fourth.
   res.vary(DEVICE_ZONE_HEADER);
-  // The boundary is as much a part of the key: two clients in one zone with
-  // different `dayEndsAt` ask the same URL at 00:30 and want different anchors.
-  res.vary(DAY_END_HEADER);
+  // The zone varies and the boundary deliberately does not: its VALUE changes
+  // when the setting does, and a `Vary` on it would make every entry in the
+  // worker's data cache unmatchable offline until each URL was refetched.
+  // `/api` responses carry no freshness headers, so nothing else needs it.
 
   const zone = reportedZone(req.get(DEVICE_ZONE_HEADER));
   if (zone && zone !== lastReportedZone) {

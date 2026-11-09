@@ -370,8 +370,9 @@ const sw = self;
 // now reaches `./time.js`, `ui/nudge.js` reaches `./dates.js` and `offline.js`
 // reaches `./ui/dates.js`, none of which it imported before, and all of them are
 // already in `SHELL`, so nothing is added or removed. And `offline.js` now sends
-// `X-Habiterall-Day-End` on every request, which the routes `Vary` on: a data
-// cache filled under v34 holds responses that were never keyed on it.
+// `X-Habiterall-Day-End` on every request. The routes deliberately do not `Vary`
+// on it: its value changes with the setting, and the Cache API matches on the
+// stored response's `Vary` by VALUE, so every cached entry would stop matching.
 const CACHE_VERSION = 'v35';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;

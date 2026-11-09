@@ -374,6 +374,109 @@ try {
   ck('at 00:00 the calendar date is a gridcell again', reopened === true,
     `${calendar}: ${await cellRole(calendar)}`);
 
+  /* ---------- the worker's cache survives a change of the setting ---------- */
+
+  console.log('\n--- changing the setting does not strand the offline cache ---');
+  // The Cache API selects a stored response by comparing the VALUES of the
+  // headers its `Vary` names. A route that varied on `X-Habiterall-Day-End`
+  // would leave every entry in the data cache stored under the value in force
+  // when it was fetched, so changing the setting once - at an hour where
+  // `todayISO()` does not move, so nothing is refetched - makes every entry
+  // miss for the new value, and an offline reload falls through to the worker's
+  // synthetic 503. Hence: 00:00 -> 01:00 in a zone whose local hour is 1-4,
+  // where both leave the app on the same date, verified below in the page.
+  const serverEnd = (want) => waitUntil(ev, `(async () => {
+    const r = await (await fetch('/api/settings')).json();
+    return r.dayEndsAt === '${want}'; })()`,
+  { what: `the server to hold dayEndsAt ${want}`, timeoutMs: 10_000 })
+    .then(() => true, () => false);
+  const pickDayEnd = async (value) => {
+    await ev(`document.getElementById('btn-settings').click()`);
+    await waitUntil(ev, `document.getElementById('settings-dialog').open === true`,
+      { what: 'the settings dialog to open' });
+    const got = await ev(`(() => {
+      const s = [...document.querySelectorAll('#settings-body select')]
+        .find((s) => [...s.options].some((o) => o.value === '${value}'));
+      if (!s) return false;
+      s.value = '${value}';
+      s.dispatchEvent(new Event('change', { bubbles: true }));
+      return s.value; })()`);
+    await ev(`document.getElementById('settings-close').click()`);
+    await waitUntil(ev, `document.getElementById('settings-dialog').open === false`,
+      { what: 'the dialog to close' });
+    return got;
+  };
+  const appToday = () => ev(`(async () => (await import('/shared/ui/dates.js')).todayISO())()`);
+
+  ck('the server holds the 00:00 this section starts from', await serverEnd('00:00'));
+  await reloadAndWaitFor(ev,
+    `!!document.querySelector('#grid .habit-row') && !!navigator.serviceWorker.controller`, {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'the dashboard under the worker at 00:00',
+    });
+  // `cache.put` is not awaited by the worker before it answers, so the entry is
+  // polled for rather than assumed.
+  const cachedOverview = await waitUntil(ev, `(async () => {
+    for (const name of await caches.keys()) {
+      const keys = await (await caches.open(name)).keys();
+      if (keys.some((k) => /\\/api\\/overview/.test(k.url))) return true;
+    }
+    return false; })()`,
+  { what: 'the worker to cache /api/overview', timeoutMs: 10_000 }).then(() => true, () => false);
+  ck('the worker holds /api/overview, stored under the 00:00 header', cachedOverview === true);
+
+  const todayBefore = await appToday();
+  const beforeChange = (await reqs()).length;
+  ck('the app picked 01:00 in the dialog', await pickDayEnd('01:00') === '01:00');
+  ck('the server holds 01:00', await serverEnd('01:00'));
+  const todayAfter = await appToday();
+  ck('01:00 does not move the app\'s date in this zone, so no refetch is owed',
+    todayBefore === todayAfter && todayAfter === calendar, `${todayBefore} -> ${todayAfter}, calendar ${calendar}`);
+  const refetchedOnChange = (await reqs()).slice(beforeChange)
+    .filter((r) => /\/api\/(overview|habits)/.test(r.url) && r.method === 'GET');
+  ck('...and nothing the worker caches was refetched, which is the premise of the case',
+    refetchedOnChange.length === 0, JSON.stringify(refetchedOnChange.map((r) => r.url)));
+
+  // Cut the worker's own fetches (the page's offline throttle does not reach
+  // them, as `gridcheck.mjs` records) and the page's.
+  const swTargets = await send('Target.getTargets', {});
+  const swTarget = swTargets.targetInfos.find(
+    (t) => t.type === 'service_worker' && t.url.startsWith(APP));
+  ck('the service worker target was found', !!swTarget, swTarget?.url ?? 'none');
+  const { sessionId: swSid } =
+    await send('Target.attachToTarget', { targetId: swTarget.targetId, flatten: true });
+  await send('Network.enable', {}, swSid);
+  const setNet = async (offline) => {
+    const conditions = { offline, latency: 0,
+      downloadThroughput: offline ? 0 : -1, uploadThroughput: offline ? 0 : -1 };
+    await send('Network.emulateNetworkConditions', conditions, swSid);
+    await send('Network.emulateNetworkConditions', conditions, sessionId);
+  };
+  await setNet(true);
+  try {
+    await reloadAndWaitFor(ev, `!!document.querySelector('#grid .habit-row')
+      || document.getElementById('view-error').hidden === false`, {
+      reload: () => send('Page.navigate', { url: APP }, sessionId),
+      what: 'an offline reload to render the dashboard or say it could not',
+      timeoutMs: 20_000,
+    });
+    const offlineState = await ev(`({
+      rows: document.querySelectorAll('#grid .habit-row').length,
+      errorShown: document.getElementById('view-error').hidden === false,
+      errorText: document.getElementById('boot-error')?.textContent ?? '' })`);
+    ck('the offline reload renders the dashboard\'s habits',
+      offlineState.rows > 0, JSON.stringify(offlineState));
+    ck('...and not the offline failure state', offlineState.errorShown === false,
+      JSON.stringify(offlineState));
+    const offlineOverview = (await reqs()).filter((r) => /\/api\/overview/.test(r.url));
+    ck('...asking under the NEW boundary, so the cached entry matched across the change',
+      offlineOverview.length >= 1 && header(offlineOverview.at(-1)) === '01:00',
+      JSON.stringify(offlineOverview.map(header)));
+  } finally {
+    await setNet(false);
+    await ev(`window.dispatchEvent(new Event('online')); true`);
+  }
+
   // Put the account back, for whoever runs next on this instance. `reset()`
   // clears settings too, but a suite that leaves its mark is one that fails
   // somewhere else.

@@ -233,10 +233,10 @@ if (EARLY_ZONE) {
     calendarTomorrow.status === 400, `HTTP ${calendarTomorrow.status} for ${EARLY_TOMORROW}`);
 
   const vary = (await get('/overview', early('06:00'))).headers.get('vary') ?? '';
-  ck('the response says it varies on the day-end header',
-    /x-habiterall-day-end/i.test(vary), vary);
-  ck('...and still on the zone',
+  ck('the response varies on the zone',
     /x-habiterall-timezone/i.test(vary), vary);
+  ck('...and does NOT vary on the day-end header, whose value changes while the worker holds entries',
+    !/x-habiterall-day-end/i.test(vary), vary);
 }
 
 server.close();
