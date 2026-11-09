@@ -661,6 +661,12 @@ await withUser(alice, (db) => db.query(
     // (`true`), or this compares `true` with `true` and passes with `awards`
     // dropped from `PORTABLE_SETTINGS` entirely.
     awards: false,
+    // The day boundary (#76). `'03:00'` rather than the registry default
+    // `'00:00'`, for the reason `theme` is `'dark'`: a fixture holding the
+    // default compares equal to itself and passes with `dayEndsAt` dropped from
+    // `PORTABLE_SETTINGS` entirely — and this one decides which DAY a restored
+    // account's next tap and reminder belong to.
+    dayEndsAt: '03:00',
     discordWebhook: 'https://discord.com/api/webhooks/1/secret',
   }), alice]
 ));
@@ -681,7 +687,7 @@ ck('a backup carries the tracking settings',
   // in a list, and a key that quietly stopped travelling would show up only as
   // a page that came back longer than it was left.
   exported.gridDays === '7' && exported.habitSort === 'strength' &&
-  exported.awards === false &&
+  exported.awards === false && exported.dayEndsAt === '03:00' &&
   JSON.stringify(exported.detailCards) === JSON.stringify(nonCanonicalDetailCards),
   JSON.stringify(exported));
 ck('and no notification destination',

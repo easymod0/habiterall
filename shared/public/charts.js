@@ -17,6 +17,7 @@ import { SKIP, YES } from './ui/values.js';
 import {
   WIDTH_SAFETY, estimateTextWidth, formatDateShort, formatStamp, fromISOLocal,
   addDaysISO, formatDayRange, formatMonthShort, formatYear, gutterFor, iso,
+  todayISO as appToday,
   weekdayLetters,
   weekdayNames,
 } from './ui/dates.js';
@@ -211,8 +212,12 @@ export function calendarChart(entriesByDate, color, habit, opts = {}) {
   const empty = themed('--grid-empty');
 
 
-  const realToday = new Date();
-  realToday.setHours(0, 0, 0, 0);
+  // The app's own today — `appToday()`, which is the calendar date until the
+  // account's day-end passes — and not `new Date()`: this is where the grid
+  // stops drawing editable cells, and it has to be the date the dashboard's
+  // last column and the server's anchors name. Renamed on import because this
+  // function has a local `todayISO` of its own (the string below).
+  const realToday = fromISOLocal(appToday());
   const todayISO = iso(realToday);
 
   // The grid ends on `endDate` (or today) and runs `weeks` back from there.

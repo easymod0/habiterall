@@ -72,8 +72,9 @@ surface that answers "as of when", and it has its own range controls.
 
 **...so the list is fetched for ONE local day, and it asks again when that day
 ends.** `load()` records the browser's own date and `refreshIfDayChanged`
-refetches when the clock has moved past it, on a timer armed for the next local
-midnight and on `visibilitychange` — the same pair, and the same argument for
+refetches when the clock has moved past it, on a timer armed for the next day
+boundary (`nextDayStart()` — local midnight until the account sets `dayEndsAt`)
+and on `visibilitychange` — the same pair, and the same argument for
 needing both, as `ui/detail.js`'s day watch, restated here rather than shared
 because a helper either module could import would be a new export under
 `shared/public/` and so a `CACHE_VERSION` bump. Three things differ from the
@@ -364,12 +365,30 @@ the page is frozen at render time the same way, and fixing one card moves the
 page from "one card is stale" to "one card jumps differently". The browser's
 own date, never a named zone: `callerDay`'s question, not `resolveTimeZone`'s
 (`docs/decisions/timezones.md`). **Two triggers, and neither is enough alone**
-— a timer armed for the next local midnight (`setHours(24, 0, 0, 0)`, so a DST
-day gets the right instant) and re-armed per fire, plus `visibilitychange`,
+— a timer armed for the next day boundary (`nextDayStart()`, which is
+`setHours` on the boundary hour, so a DST day gets the right instant; midnight
+at the default) and re-armed per fire, plus `visibilitychange`,
 since a suspended device runs no timer. Both ask the same date comparison, so
 an early fire or a same-day tab switch does nothing, and a zone CHANGE is
 covered by the same rule. A refetch and not a local redraw: every figure is
 computed as of a date the SERVER anchors.
+
+**"Today" is `todayISO()`, and `dayEndsAt` moves it (#76).** `ui/dates.js`
+holds the account's boundary as its one piece of module state, set by an
+`onApply` applier `app.js` registers before any view; `todayISO`,
+`effectiveMinutes` and `nextDayStart` all read it, and the rule itself is
+`effectiveDay` in `ui/time.js`, which the server imports too. Four things bite.
+The applier is `onApply` and NOT `onChange`: `onChange` fires only when the
+server's answer differed from the cache, and the dialog's own Done applies
+locally first, so it would miss the change it exists for. The dashboard's and
+the detail view's own appliers must be registered AFTER that one (appliers run
+in registration order), or they re-arm against the old boundary. Any code that
+asks "what day is it" with `new Date()` is a second opinion — `calendarChart`'s
+`realToday` was one, and it decides which cells are still editable.
+And `deviceClockHeader` sends `X-Habiterall-Day-End` on EVERY request, `00:00`
+included, because `sw.js` forbids varying on a header sent only sometimes.
+`docs/decisions/day-boundary.md` has the rest; `dayboundary.mjs` pins the
+wiring in a real browser.
 
 **A memoised `Intl` formatter is only valid while the device's clock stays
 put, and `ui/dates.js` drops its own when the UTC offset moves.** A formatter

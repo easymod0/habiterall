@@ -413,6 +413,75 @@ try {
     Number(notesAfterPress?.value) === 2 && notesAfterPress?.notes === NOTE_224,
     JSON.stringify(notesAfterPress));
 
+  /* ---------- an account whose day ends at 03:00 (#76) ---------- */
+  //
+  // `collect` asks BOTH queries — the entries and the watermark — about a date,
+  // and with `dayEndsAt` that date is the day before the calendar's until the
+  // hour passes. Reading `zonedClock(...).date` there, as it did before the
+  // setting, passes every check above because none of them set it. The account
+  // names `notifyTimezone` and says why in habiterall-cloud/CLAUDE.md: without
+  // it the zone follows whatever device last checked in, and a day asserted
+  // here would be the server's. Literal dates: Monday is 2026-08-10.
+  console.log('--- a day that ends at 03:00 ---');
+  const nightOwl = await mkUser('sub-night-owl', {
+    notifyChannels: ['discord'],
+    discordWebhook: WEBHOOK,
+    notifyTimezone: 'UTC',
+    dayEndsAt: '03:00',
+  });
+  const lateHabit = await mkHabit(nightOwl, 'Late evening', '23:00');
+  const smallHours = await mkHabit(nightOwl, 'Small hours', '01:00');
+  const monday2300 = new Date(Date.UTC(2026, 7, 10, 23, 0));
+  const tuesday0030 = new Date(Date.UTC(2026, 7, 11, 0, 30));
+  const tuesday0100 = new Date(Date.UTC(2026, 7, 11, 1, 0));
+  const quiet = { debug: () => {}, info: () => {}, warn: () => {} };
+  const owlAt = async (instant, habitId) => {
+    const account = (await notifier.collect(instant)).find((a) => a.id === nightOwl);
+    const f = fakeFetch();
+    const out = await deliverAccount({
+      ...account, habits: account.habits.filter((h) => h.id === habitId),
+    }, { instant, mark: notifier.mark, fetch: f, log: quiet });
+    return { account, out, f };
+  };
+  const owlLog = (habitId) => withUser(nightOwl, (db) =>
+    db.query('SELECT date FROM notify_log WHERE habit_id = $1 ORDER BY date', [habitId])
+      .then((r) => r.rows.map((x) => x.date)));
+
+  const eve = await owlAt(monday2300, lateHabit);
+  check('a 23:00 reminder sends at 23:00 on Monday', eve.out.sent === 1, JSON.stringify(eve.out));
+  check('...and its watermark is Monday',
+    JSON.stringify(await owlLog(lateHabit)) === '["2026-08-10"]',
+    JSON.stringify(await owlLog(lateHabit)));
+
+  const past = await owlAt(tuesday0030, lateHabit);
+  check('at 00:30 on Tuesday it is not sent again',
+    past.out.sent === 0 && past.f.calls.length === 0, JSON.stringify(past.out));
+  check('...because the watermark was asked against Monday',
+    past.out.skipped?.already_sent === 1, JSON.stringify(past.out.skipped));
+
+  await withUser(nightOwl, (db) => db.query(
+    `INSERT INTO entries (habit_id, user_id, date, value) VALUES ($1, $2, '2026-08-10', 2)`,
+    [lateHabit, nightOwl]));
+  check('an entry dated Monday counts as answered at 00:30 on Tuesday',
+    (await notifier.collect(tuesday0030)).find((a) => a.id === nightOwl)
+      .doneToday.has(lateHabit) === true);
+  check('...and one for the small-hours habit is still unanswered',
+    (await notifier.collect(tuesday0030)).find((a) => a.id === nightOwl)
+      .doneToday.has(smallHours) === false);
+
+  const dawn = await owlAt(tuesday0100, smallHours);
+  check('a 01:00 reminder fires at 01:00 on Tuesday', dawn.out.sent === 1, JSON.stringify(dawn.out));
+  check('...and is logged under Monday, the day it is about',
+    JSON.stringify(await owlLog(smallHours)) === '["2026-08-10"]',
+    JSON.stringify(await owlLog(smallHours)));
+
+  await withUser(nightOwl, (db) => db.query(
+    `INSERT INTO entries (habit_id, user_id, date, value) VALUES ($1, $2, '2026-08-11', 2)`,
+    [smallHours, nightOwl]));
+  check('an entry dated Tuesday does not answer Monday\'s day at 01:00 on Tuesday',
+    (await notifier.collect(tuesday0100)).find((a) => a.id === nightOwl)
+      .doneToday.has(smallHours) === false);
+
   /* ---------- answering from an ntfy button: the tenancy question ---------- */
   //
   // ntfy's button carries no session and no channel to resolve an account

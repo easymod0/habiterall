@@ -107,7 +107,7 @@ const { child, base } = await boot(issuer, port);
 // cleanup cannot drift apart into deleting a different set.
 const SUBJECTS = [
   'sub-ntfy-http', 'sub-ntfy-http-e', 'sub-ntfy-http-w',
-  'sub-ntfy-http-e-auto', 'sub-ntfy-http-w-auto',
+  'sub-ntfy-http-e-auto', 'sub-ntfy-http-w-auto', 'sub-ntfy-http-late',
 ];
 
 try {
@@ -346,6 +346,73 @@ try {
     JSON.stringify(westAuto.ntfy));
   ck('and nothing was written for the west-auto account',
     westAuto.entries.length === 0);
+
+  // #76: a day that ends after midnight. `interactionAdapter().today` is what
+  // this route dates the press by, and with `dayEndsAt` set it answers the
+  // PREVIOUS date until that hour passes — so "today" and the calendar date
+  // disagree for part of every night, which is the only time this can be seen.
+  // Wanted: a zone whose local hour is 1-4 right now, so a 06:00 boundary has
+  // not passed and neither edge of it (midnight, 06:00) is a minute away.
+  // Every offset from -12 to +14 is a fixed-offset `Etc/GMT` zone, so one of
+  // them is always in that window; scanned at runtime and asserted found.
+  const hourIn = (zone) => Number(new Intl.DateTimeFormat('en-GB', {
+    timeZone: zone, hour: '2-digit', hourCycle: 'h23',
+  }).format(new Date()));
+  const dateIn = (zone) => new Intl.DateTimeFormat('en-CA', {
+    timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
+  const nightZone = [...Array.from({ length: 14 }, (_, n) => `Etc/GMT-${n + 1}`),
+    'Etc/GMT', ...Array.from({ length: 12 }, (_, n) => `Etc/GMT+${n + 1}`)]
+    .find((z) => { const h = hourIn(z); return h >= 1 && h <= 4; });
+  ck('a zone whose local hour is between 01:00 and 04:59 exists to test with',
+    nightZone !== undefined, String(nightZone));
+
+  if (nightZone) {
+    const calendarToday = dateIn(nightZone);
+    const back = (n) => {
+      const d = new Date(`${calendarToday}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() - n);
+      return d.toISOString().slice(0, 10);
+    };
+    // The reported device zone is UTC, the wrong answer, as for the pairs above:
+    // the account's named zone is tier 1 and must be what is used.
+    const owlId = (await admin.query(
+      `INSERT INTO users (idp_subject, idp_issuer, display_name, settings, device_time_zone)
+       VALUES ('sub-ntfy-http-late', 'https://idp', 'ntfy http test late day',
+               $1::jsonb, 'UTC') RETURNING id`,
+      [JSON.stringify({ notifyTimezone: nightZone, dayEndsAt: '06:00' })]
+    )).rows[0].id;
+    const press = async (date, name) => {
+      const habitId = await mkHabit(owlId, name);
+      const ntfy = await postNtfy(signNtfyAnswer({
+        secret: SECRET, account: String(owlId), habitId, date, action: 'yes',
+      }));
+      return { ntfy, entries: await entriesFor(owlId, habitId) };
+    };
+
+    const yesterday = await press(back(1), 'ntfy late-day yesterday');
+    ck(`before the boundary (${nightZone}), yesterday's date is accepted`,
+      yesterday.ntfy.status === 200, JSON.stringify(yesterday.ntfy));
+    ck('and lands on yesterday, read back from storage',
+      yesterday.entries.some((e) => e.date === back(1) && Number(e.value) === 2),
+      JSON.stringify(yesterday.entries));
+
+    const todayCal = await press(calendarToday, 'ntfy late-day calendar today');
+    ck("the calendar's today is still in the future, refused 400",
+      todayCal.ntfy.status === 400 && /future/i.test(todayCal.ntfy.body?.error ?? ''),
+      JSON.stringify(todayCal.ntfy));
+    ck('and nothing was written for it', todayCal.entries.length === 0);
+
+    // The far edge, which is where `today()` being a day behind shows from the
+    // other side: three calendar days back is age 2 against yesterday, so it
+    // is inside MAX_ANSWER_AGE_DAYS, and four is age 3, outside it.
+    const edge = await press(back(3), 'ntfy late-day age two');
+    ck('a date three calendar days back is age 2 against the account\'s day, so accepted',
+      edge.ntfy.status === 200, JSON.stringify(edge.ntfy));
+    const tooOld = await press(back(4), 'ntfy late-day age three');
+    ck('and four back is age 3, refused 410',
+      tooOld.ntfy.status === 410, JSON.stringify(tooOld.ntfy));
+  }
 
   // The limiter is written inline at the route, keyed on IP, and there is no
   // env switch in this edition that turns it off (unlike personal's

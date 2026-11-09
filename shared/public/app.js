@@ -14,7 +14,7 @@ import * as categories from '/shared/ui/categories.js';
 import * as connectivity from '/shared/ui/connectivity.js';
 import * as dashboard from '/shared/ui/dashboard.js';
 import * as dataDialog from '/shared/ui/data-dialog.js';
-import { todayISO } from '/shared/ui/dates.js';
+import { setDayEnd, todayISO } from '/shared/ui/dates.js';
 import * as detail from '/shared/ui/detail.js';
 import * as dayDialog from '/shared/ui/day-dialog.js';
 import * as dayStrip from '/shared/ui/day-strip.js';
@@ -139,6 +139,14 @@ export async function start(adapter) {
   // Wiring first, and synchronously: every listener must be attached before
   // the first `emit`, and the connectivity watcher should be running before
   // the awaits below — those are the requests most likely to find no network.
+  // Where the day ends, before ANY view is wired or painted: `onApply` hands
+  // over the cached values straight away and again whenever they move, so the
+  // first `todayISO()` already knows the account's boundary and the header
+  // `offline.js` sends carries it. It is registered ahead of `dashboard.init()`
+  // and `detail.init()` on purpose — each of those registers its own applier to
+  // re-arm its day watch, and appliers run in registration order, so theirs
+  // must read a boundary this one has already set.
+  settings.onApply((values) => setDayEnd(values.dayEndsAt));
   initTopBar();
   connectivity.init();
   habitDialog.init();

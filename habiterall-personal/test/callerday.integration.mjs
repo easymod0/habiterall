@@ -160,6 +160,85 @@ const unplacedStats = await fetch(
 ck('...and an unplaced caller still gets the server\'s clock here too',
   unplacedStats.status === 400, `HTTP ${unplacedStats.status}`);
 
+/* ---------- the day boundary (#76) ---------- */
+
+// `X-Habiterall-Day-End` moves the READ anchors and nothing else: the write
+// guard stays on the calendar day, so a client that has not fetched the
+// setting yet is not refused for tapping the column it can see.
+//
+// The zone is found at run time, because "it is 02:00 somewhere" is true at
+// every hour and a fixed zone is only right for one of them. Fixed-offset
+// Etc/ zones: no DST, so the hour cannot move under the scan. Hours 1-4 rather
+// than 1-5 keeps a 06:00 boundary a full hour clear of the edge while the
+// suite runs.
+const localHour = (zone) => Number(new Intl.DateTimeFormat('en-GB', {
+  timeZone: zone, hour: '2-digit', hourCycle: 'h23',
+}).format(Date.now()));
+const BOUNDARY_ZONES = [
+  'Etc/GMT+12', 'Etc/GMT+11', 'Etc/GMT+10', 'Etc/GMT+9', 'Etc/GMT+8', 'Etc/GMT+7',
+  'Etc/GMT+6', 'Etc/GMT+5', 'Etc/GMT+4', 'Etc/GMT+3', 'Etc/GMT+2', 'Etc/GMT+1',
+  'Etc/GMT', 'Etc/GMT-1', 'Etc/GMT-2', 'Etc/GMT-3', 'Etc/GMT-4', 'Etc/GMT-5',
+  'Etc/GMT-6', 'Etc/GMT-7', 'Etc/GMT-8', 'Etc/GMT-9', 'Etc/GMT-10', 'Etc/GMT-11',
+  'Etc/GMT-12', 'Etc/GMT-13', 'Etc/GMT-14',
+];
+const EARLY_ZONE = BOUNDARY_ZONES.find((z) => localHour(z) >= 1 && localHour(z) <= 4);
+ck('a zone where it is between 01:00 and 04:59 was found',
+  EARLY_ZONE !== undefined, String(EARLY_ZONE));
+
+if (EARLY_ZONE) {
+  const EARLY_TODAY = dayIn(EARLY_ZONE);
+  const EARLY_YESTERDAY = dayIn(EARLY_ZONE, -1);
+  const EARLY_TOMORROW = dayIn(EARLY_ZONE, 1);
+  const early = (dayEnd) => ({
+    'Content-Type': 'application/json',
+    'X-Habiterall-Timezone': EARLY_ZONE,
+    ...(dayEnd === undefined ? {} : { 'X-Habiterall-Day-End': dayEnd }),
+  });
+  const earlyHabit = await post('/habits', { name: 'Night owl', type: 'boolean' });
+
+  const anchored = async (dayEnd) =>
+    (await fetch(`${base}/api/overview?days=30`, { headers: early(dayEnd) })
+      .then((r) => r.json())).end;
+
+  ck('/overview: before the boundary, the anchor is the PREVIOUS local date',
+    await anchored('06:00') === EARLY_YESTERDAY,
+    `end=${await anchored('06:00')}, wanted ${EARLY_YESTERDAY} (calendar ${EARLY_TODAY})`);
+  ck('/overview: a day-end of 00:00 anchors on the calendar date',
+    await anchored('00:00') === EARLY_TODAY, `wanted ${EARLY_TODAY}`);
+  ck('/overview: a junk day-end anchors on the calendar date',
+    await anchored('7:30') === EARLY_TODAY, `wanted ${EARLY_TODAY}`);
+  ck('/overview: no day-end header anchors on the calendar date',
+    await anchored(undefined) === EARLY_TODAY, `wanted ${EARLY_TODAY}`);
+
+  // /habits/:id/stats reads the same anchor: a range that starts on the
+  // calendar day is past the end the caller is still living in.
+  const statsFrom = (start, dayEnd) => fetch(
+    `${base}/api/habits/${earlyHabit.id}/stats?start=${start}&granularity=day`,
+    { headers: early(dayEnd) });
+  const onPrevious = await statsFrom(EARLY_YESTERDAY, '06:00');
+  ck('/stats: a range starting on the effective day is computed',
+    onPrevious.status === 200, `HTTP ${onPrevious.status}`);
+  const onCalendar = await statsFrom(EARLY_TODAY, '06:00');
+  ck('/stats: a range starting on the calendar day is past the anchor',
+    onCalendar.status === 400, `HTTP ${onCalendar.status}`);
+
+  // The write guard stays on the calendar day, with the boundary reported.
+  const putEarly = (date) => put(
+    `/habits/${earlyHabit.id}/entries/${date}`, { value: 2 }, early('06:00'));
+  const calendarToday = await putEarly(EARLY_TODAY);
+  ck('a PUT of calendar-today is accepted even though the anchor is yesterday',
+    calendarToday.status === 200, `HTTP ${calendarToday.status} for ${EARLY_TODAY}`);
+  const calendarTomorrow = await putEarly(EARLY_TOMORROW);
+  ck('a PUT of calendar-tomorrow is still refused',
+    calendarTomorrow.status === 400, `HTTP ${calendarTomorrow.status} for ${EARLY_TOMORROW}`);
+
+  const vary = (await get('/overview', early('06:00'))).headers.get('vary') ?? '';
+  ck('the response says it varies on the day-end header',
+    /x-habiterall-day-end/i.test(vary), vary);
+  ck('...and still on the zone',
+    /x-habiterall-timezone/i.test(vary), vary);
+}
+
 server.close();
 rmSync(workdir, { recursive: true, force: true });
 console.log(fails ? `\n${fails} check(s) failed` : '\nall checks passed');

@@ -22,7 +22,7 @@ import {
 } from '@habiterall/shared/export-loop.js';
 import { buildCsvArchive } from '@habiterall/shared/export-csv.js';
 import {
-  DEVICE_ZONE_HEADER, callerDay, reportedZone,
+  DAY_END_HEADER, DEVICE_ZONE_HEADER, callerDay, callerEffectiveDay, reportedZone,
 } from '@habiterall/shared/notify.js';
 import { log } from '@habiterall/shared/log.js';
 // Format sniffing and every parser live in shared: the two editions had
@@ -127,6 +127,9 @@ api.use(route(async (req, res, next) => {
   // matters more here: one origin serves every account, so the zones asking
   // the same URL are as many as the instance has users.
   res.vary(DEVICE_ZONE_HEADER);
+  // The boundary is as much a part of the key: two clients in one zone with
+  // different `dayEndsAt` ask the same URL at 00:30 and want different anchors.
+  res.vary(DAY_END_HEADER);
 
   const user = uid(req);
   const zone = reportedZone(req.get(DEVICE_ZONE_HEADER));
@@ -223,7 +226,8 @@ api.use((req, res, next) => {
  * That it needs no row is a second benefit — this is on the hot path of every
  * request, where the stored zone is a query.
  */
-const callerToday = (req) => callerDay(req.get(DEVICE_ZONE_HEADER));
+const callerToday = (req) =>
+  callerEffectiveDay(req.get(DEVICE_ZONE_HEADER), req.get(DAY_END_HEADER));
 
 /**
  * Resolve an already-parsed habit's `category_id` into something safe to
@@ -788,7 +792,11 @@ api.put('/habits/:id/entries/:date', route(async (req, res) => {
   const date = req.params.date;
 
   assertDate(date);
-  assertNotFuture(date, callerToday(req));
+  // The CALENDAR day, deliberately not `callerToday`: a client that has not yet
+  // fetched `dayEndsAt` taps calendar-today at 00:30, and a 400 here is dropped
+  // from its outbox as permanently inapplicable. The boundary moves what a
+  // client reads as "today", never what it may write.
+  assertNotFuture(date, callerDay(req.get(DEVICE_ZONE_HEADER)));
 
   const parsed = parseEntry(habit, req.body, { UNSET, YES, SKIP });
 

@@ -359,7 +359,20 @@ const sw = self;
 // `index.html` and `style.css` do not move: the page reuses `#view-categories`
 // and the comparison's own rules. No file added or removed, so `SHELL` is
 // unchanged — `ui/categories.js` is already in it.
-const CACHE_VERSION = 'v34';
+// v35: the day boundary (#76) — new EXPORTS and two new IMPORT EDGES, and no new
+// file. `ui/dates.js` gains `setDayEnd`, `currentDayEnd`, `effectiveMinutes` and
+// `nextDayStart`, imported STATICALLY by `app.js`, `ui/dashboard.js`,
+// `ui/detail.js`, `ui/nudge.js` and `offline.js`; `ui/time.js` gains
+// `DAY_END_TIMES`, `effectiveDay` and three more, which `ui/dates.js` and
+// `ui/nudge.js` import. A shell holding the new `app.js` over a cached v34
+// `ui/dates.js` is "does not provide an export named 'setDayEnd'" at module LINK
+// time, before `start()` — outside `#view-error`. v32's case too: `ui/dates.js`
+// now reaches `./time.js`, `ui/nudge.js` reaches `./dates.js` and `offline.js`
+// reaches `./ui/dates.js`, none of which it imported before, and all of them are
+// already in `SHELL`, so nothing is added or removed. And `offline.js` now sends
+// `X-Habiterall-Day-End` on every request, which the routes `Vary` on: a data
+// cache filled under v34 holds responses that were never keyed on it.
+const CACHE_VERSION = 'v35';
 const SHELL_CACHE = `habiterall-shell-${CACHE_VERSION}`;
 const DATA_CACHE = `habiterall-data-${CACHE_VERSION}`;
 

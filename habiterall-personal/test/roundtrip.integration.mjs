@@ -839,7 +839,11 @@ await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right
   // `true`), for the same reason `theme` is `'dark'` above: a fixture holding
   // the default compares equal to itself and passes with `awards` dropped
   // from PORTABLE_SETTINGS entirely.
-  habitSort: 'strength', awards: false });
+  habitSort: 'strength', awards: false,
+  // The day boundary (#76), and `'03:00'` rather than the default `'00:00'` for
+  // the reason `theme` is `'dark'`: a fixture holding the default compares equal
+  // to itself and passes with `dayEndsAt` dropped from PORTABLE_SETTINGS.
+  dayEndsAt: '03:00' });
 const withSettings = Buffer.from(await (await api('/api/export')).arrayBuffer());
 const exported = JSON.parse(withSettings.toString('utf8')).settings ?? {};
 
@@ -848,7 +852,7 @@ ck('the JSON backup carries the settings',
   exported.dayOrder === 'newest-right' && exported.atMostUnlogged === 'success' &&
   exported.theme === 'dark' && exported.numberFormat === 'comma' &&
   exported.gridDays === '7' && exported.habitSort === 'strength' &&
-  exported.awards === false &&
+  exported.awards === false && exported.dayEndsAt === '03:00' &&
   JSON.stringify(exported.detailCards) === JSON.stringify(nonCanonicalDetailCards),
   JSON.stringify(exported));
 
@@ -881,7 +885,7 @@ await restore(jsonBackup, 'replace');
 await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right',
   atMostUnlogged: 'success', theme: 'dark', numberFormat: 'comma',
   gridDays: '7', detailCards: nonCanonicalDetailCards, habitSort: 'strength',
-  awards: false });
+  awards: false, dayEndsAt: '03:00' });
 
 // Every key overwritten with a DIFFERENT value, so the restore below has
 // something to put back. `habitSort` is `'name'` here rather than `'manual'`
@@ -891,7 +895,8 @@ await putSettings({ skipDays: true, questionMarks: true, dayOrder: 'newest-right
 // OFF the fixture's `false` for the restore below to be observed at all.
 await putSettings({ skipDays: false, questionMarks: false, dayOrder: 'newest-left',
   atMostUnlogged: 'miss', theme: 'light', numberFormat: 'point',
-  gridDays: 'auto', detailCards: ['awards'], habitSort: 'name', awards: true });
+  gridDays: 'auto', detailCards: ['awards'], habitSort: 'name', awards: true,
+  dayEndsAt: '05:00' });
 const restored = await restore(withSettings, 'replace');
 const back = await getSettings();
 
@@ -900,7 +905,7 @@ ck('a replace-mode restore puts them back',
   back.dayOrder === 'newest-right' && back.atMostUnlogged === 'success' &&
   back.theme === 'dark' && back.numberFormat === 'comma' &&
   back.gridDays === '7' && back.habitSort === 'strength' &&
-  back.awards === false &&
+  back.awards === false && back.dayEndsAt === '03:00' &&
   JSON.stringify(back.detailCards) === JSON.stringify(nonCanonicalDetailCards),
   JSON.stringify(back));
 ck('and says how many it applied', restored.settings >= 3, String(restored.settings));

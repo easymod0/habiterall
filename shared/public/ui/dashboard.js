@@ -25,7 +25,7 @@ import { openDayDialog } from '/shared/ui/day-dialog.js';
 import { dateColumns, dayCells } from '/shared/ui/day-strip.js';
 import {
   addDaysISO, datesEndingOn, freqLabel, iso,
-  formatDayRange, targetLabel, todayISO,
+  formatDayRange, nextDayStart, targetLabel, todayISO,
 } from '/shared/ui/dates.js';
 import { openDialog } from '/shared/ui/habit-dialog.js';
 import * as routes from '/shared/ui/routes.js';
@@ -524,7 +524,8 @@ function refreshIfDayChanged() {
 }
 
 /**
- * Ask again at the next local midnight — and on the way back to the tab.
+ * Ask again when the day ends — the next local midnight, or the account's
+ * `dayEndsAt` hour — and on the way back to the tab.
  *
  * A restatement of `armDayWatch` in `ui/detail.js` rather than a shared helper,
  * and the reason is the one `showAmount` above is written out in three modules
@@ -536,11 +537,15 @@ function refreshIfDayChanged() {
  * own view is the one showing — and both are armed at `init()` whichever view
  * boots, because either can be reached without a reload.
  *
- * **Not a poll.** One timer, armed for the next local midnight and re-armed from
- * the clock each time it fires, so an open page costs one wake-up a day.
- * `setHours(24, 0, 0, 0)` is the start of the next LOCAL day and so is DST-aware
- * — a 23- or 25-hour calendar day gets the right instant, where `+ 86400000`
- * would be an hour out twice a year.
+ * **Not a poll.** One timer, armed for the next moment the day rolls over
+ * (`nextDayStart`: the boundary hour, local, today or tomorrow) and re-armed from
+ * the clock each time it fires, so an open page costs one wake-up a day. It is
+ * `setHours` on the local date and so is DST-aware — a 23- or 25-hour calendar
+ * day gets the right instant, where `+ 86400000` would be an hour out twice a
+ * year. A change of `dayEndsAt` moves that instant, so `init()` re-arms on every
+ * settings change and asks `refreshIfDayChanged` at once: lengthening the day at
+ * 03:00 turns today back into yesterday, and the grid has to follow without a
+ * reload.
  *
  * **Why the timer alone is not enough, and why the pair is.** A background tab
  * clamps a timer to roughly one a minute, which is harmless — it fires late, and
@@ -556,8 +561,7 @@ function refreshIfDayChanged() {
 let dayTimer = 0;
 function armDayWatch() {
   clearTimeout(dayTimer);
-  const next = new Date();
-  next.setHours(24, 0, 0, 0);
+  const next = nextDayStart();
   // A second past the boundary, so the handler cannot read `todayISO()` a
   // millisecond before the day it was armed for has actually ended.
   dayTimer = setTimeout(() => {
@@ -1326,6 +1330,16 @@ export function init() {
   armDayWatch();
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
+    refreshIfDayChanged();
+  });
+  // `dayEndsAt` moves the instant the timer was armed for AND what today is. An
+  // applier rather than `onChange`, which fires only when the SERVER's answer
+  // differed from the cache — the dialog's own Done applies locally first, so
+  // that would miss the very change it is for. `app.js` registers the applier
+  // that sets the boundary ahead of this one, so `todayISO()` below already
+  // answers for the new value.
+  settings.onApply(() => {
+    armDayWatch();
     refreshIfDayChanged();
   });
 }

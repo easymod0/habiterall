@@ -335,6 +335,23 @@ export const SETTINGS = {
       { value: 'sunday', label: 'Sunday' },
     ],
   },
+  dayEndsAt: {
+    section: 'Dashboard',
+    label: 'My day ends at',
+    help: 'For a day that runs past midnight: a check-off made before this ' +
+      'hour counts for the previous day. Entries already recorded do not move.',
+    type: 'select',
+    default: '00:00',
+    options: [
+      { value: '00:00', label: 'Midnight' },
+      { value: '01:00', label: '01:00' },
+      { value: '02:00', label: '02:00' },
+      { value: '03:00', label: '03:00' },
+      { value: '04:00', label: '04:00' },
+      { value: '05:00', label: '05:00' },
+      { value: '06:00', label: '06:00' },
+    ],
+  },
   calendarZoom: {
     section: 'Dashboard',
     label: 'Calendar zoom',

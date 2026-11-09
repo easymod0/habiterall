@@ -39,7 +39,9 @@ import { isAvoided } from '../public/ui/toggle.js';
 // the file the Kotlin `ReminderTime` mirrors, so the weekday a reminder fires on
 // is ONE declaration shared by the browser, this scheduler and `parseHabit`
 // (`validate.js` imports the same module), with the phone as the only mirror.
-import { parseReminderDays, remindsOn } from '../public/ui/time.js';
+import {
+  effectiveDay, effectiveReminderMinutes, parseReminderDays, remindsOn,
+} from '../public/ui/time.js';
 
 /** 'YYYY-MM-DD'. Kept local rather than imported from validate.js, which
  *  imports this file for its settings rules. */
@@ -800,6 +802,44 @@ export function callerDay(reported, instant = Date.now()) {
   return zonedClock(instant, reportedZone(reported)).date;
 }
 
+/** The header a caller reports its boundary on — see `callerEffectiveDay`. */
+export const DAY_END_HEADER = 'X-Habiterall-Day-End';
+
+/**
+ * The date the CALLING DEVICE is living in, once its day is allowed to end
+ * after midnight: `callerDay` with the caller's own boundary applied.
+ *
+ * Read anchors use this and the write guard does not. The boundary arrives on a
+ * header, never from a settings query, because a route must not gain a read for
+ * it (cloud's `/overview` computes its day before it touches the database) and
+ * because a client that has not yet loaded the setting reports none. A missing
+ * or unrecognised value is midnight, which is `callerDay` exactly.
+ *
+ * @param {unknown} reportedZoneRaw the `DEVICE_ZONE_HEADER` value, if any
+ * @param {unknown} reportedEnd the `DAY_END_HEADER` value, if any
+ * @param {Date|number} [instant]
+ * @returns {string} 'YYYY-MM-DD'
+ */
+export function callerEffectiveDay(reportedZoneRaw, reportedEnd, instant = Date.now()) {
+  const clock = zonedClock(instant, reportedZone(reportedZoneRaw));
+  return effectiveDay(clock.date, clock.minutes, reportedEnd).date;
+}
+
+/**
+ * The day an ACCOUNT is living in at an instant, for the paths with no client
+ * to ask: the notifier and the reminder buttons. The zone is the one
+ * `resolveTimeZone` answered; the boundary is the stored setting.
+ *
+ * @param {Date|number} instant
+ * @param {string} timeZone IANA name; '' uses the host zone
+ * @param {{dayEndsAt?: unknown}} [settings]
+ * @returns {{date: string, minutes: number}}
+ */
+export function accountDay(instant, timeZone, settings) {
+  const clock = zonedClock(instant, timeZone);
+  return effectiveDay(clock.date, clock.minutes, settings?.dayEndsAt);
+}
+
 /**
  * Which clock a server-sent reminder is on, for one account.
  *
@@ -1257,6 +1297,9 @@ export function answeredIds(habits, rows) {
  * @param {(habitId: number, date: string) => boolean} [args.alreadySent]
  * @param {Set<number>} [args.doneToday] answered today — see `answeredIds`
  * @param {number} [args.catchUpMinutes]
+ * @param {string} [args.dayEnd] the account's `dayEndsAt`; a reminder timed
+ *   before it belongs to the day that is ENDING, so it is asked of that date's
+ *   weekday and watermark, and fires at its wall-clock time the next morning
  * @param {(habit: import('./types.js').Habit, reason: string, detail: Record<string, any>) => void} [args.onSkip]
  * @returns {{habit: import('./types.js').Habit, date: string, time: string}[]}
  */
@@ -1267,9 +1310,14 @@ export function dueReminders({
   alreadySent = () => false,
   doneToday = new Set(),
   catchUpMinutes = CATCH_UP_MINUTES,
+  dayEnd = '00:00',
   onSkip = () => {},
 }) {
   const clock = zonedClock(instant, timeZone);
+  // The day this moment BELONGS to. Everything below that names a day — the
+  // weekday, the watermark, the date reported — reads `day`, and `clock.time`
+  // stays the wall clock a person would recognise.
+  const day = effectiveDay(clock.date, clock.minutes, dayEnd);
   const due = [];
 
   /**
@@ -1286,7 +1334,7 @@ export function dueReminders({
     // '' for a zone Intl refused, and reporting the requested one made a
     // `too_late` line name a zone that had nothing to do with the verdict.
     onSkip(habit, reason, {
-      now: clock.time, date: clock.date,
+      now: clock.time, date: day.date,
       zone: effectiveZone(timeZone) || 'system', ...detail,
     });
     return undefined;
@@ -1312,7 +1360,7 @@ export function dueReminders({
     // lost reminder, and `too_late` is a WARN that says one was lost. Below the
     // lateness gate, every masked-out habit would put that warning in the log
     // once per channel for the rest of its day.
-    if (!remindsOn(habit.reminder_days, clock.date)) {
+    if (!remindsOn(habit.reminder_days, day.date)) {
       // The mask the gate USED, normalised, for the reason `skip` reports the
       // zone the clock used rather than the one asked for.
       skip(habit, 'not_this_weekday', {
@@ -1321,7 +1369,7 @@ export function dueReminders({
       continue;
     }
 
-    const late = clock.minutes - at;
+    const late = day.minutes - effectiveReminderMinutes(at, dayEnd);
     if (late < 0) { skip(habit, 'not_yet', { at: habit.reminder_time, in_minutes: -late }); continue; }
 
     // Answered and sent are asked BEFORE lateness, and the order is the whole
@@ -1330,14 +1378,14 @@ export function dueReminders({
     // a lost one on every tick for the rest of the day. Nothing was lost — the
     // day was handled — and `too_late` is a warning precisely because it is not.
     if (doneToday.has(habit.id)) { skip(habit, 'done_today'); continue; }
-    if (alreadySent(habit.id, clock.date)) { skip(habit, 'already_sent'); continue; }
+    if (alreadySent(habit.id, day.date)) { skip(habit, 'already_sent'); continue; }
 
     if (late > catchUpMinutes) {
       skip(habit, 'too_late', { at: habit.reminder_time, late_minutes: late, catch_up: catchUpMinutes });
       continue;
     }
 
-    due.push({ habit, date: clock.date, time: habit.reminder_time });
+    due.push({ habit, date: day.date, time: habit.reminder_time });
   }
 
   return due;

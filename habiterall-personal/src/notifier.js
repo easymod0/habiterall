@@ -13,7 +13,7 @@
 import { db, UNSET, YES, SKIP, clearHabitSummary } from './db.js';
 import {
   answeredIds, answerText, channelInteractive, needsServerDelivery, resolveTimeZone,
-  serverChannels, zonedClock,
+  accountDay, serverChannels,
 } from '@habiterall/shared/notify.js';
 import {
   notifierConfig, sendToChannel, startNotifier, warnUnreachable,
@@ -124,16 +124,17 @@ export function collect(now = new Date()) {
   const habits = /** @type {any[]} */ (q.habits.all());
   if (!habits.length) return [];
 
-  // The user's own day, not the server's: `zonedClock` is what decides which
-  // date "already done" and "already sent" are asked about, and
+  // The user's own day, not the server's: `accountDay` is what decides which
+  // date "already done" and "already sent" are asked about (the zone's calendar
+  // date, or the one before it while the account's `dayEndsAt` has not passed), and
   // `resolveTimeZone` is what decides whose clock that is — the zone the
   // account NAMED, else the one its last client reported, else this server's.
   const timeZone = resolveTimeZone(settings, deviceZone());
-  const clock = zonedClock(now, timeZone);
+  const day = accountDay(now, timeZone, settings).date;
 
-  const doneToday = answeredIds(habits, /** @type {any} */ (q.entriesOn.all(clock.date)));
+  const doneToday = answeredIds(habits, /** @type {any} */ (q.entriesOn.all(day)));
   const sent = new Set(
-    q.sentOn.all(clock.date).map((r) => `${r.habit_id}:${r.channel}`)
+    q.sentOn.all(day).map((r) => `${r.habit_id}:${r.channel}`)
   );
 
   return [{
@@ -220,8 +221,8 @@ export function interactionAdapter() {
     },
 
     today(account) {
-      return zonedClock(new Date(),
-        resolveTimeZone(account.settings, deviceZone())).date;
+      return accountDay(new Date(),
+        resolveTimeZone(account.settings, deviceZone()), account.settings).date;
     },
 
     findHabit(account, habitId) {

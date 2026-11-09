@@ -23,9 +23,8 @@
 import { forgetAccount } from './cache.js';
 import { pool, withNotifierScope, withUser, withUserWrite } from './db/pool.js';
 import {
-  answeredIds, answerText, CHANNELS, channelInteractive, needsServerDelivery,
+  accountDay, answeredIds, answerText, CHANNELS, channelInteractive, needsServerDelivery,
   serverChannels, resolveTimeZone,
-  zonedClock,
 } from '@habiterall/shared/notify.js';
 import {
   mapWithLimit, notifierConfig, sendToChannel, startNotifier, warnUnreachable,
@@ -203,7 +202,10 @@ export async function collect(instant) {
       // reported, else this server's. `resolveTimeZone` is the only place that
       // precedence exists, so the tick and the Discord handler cannot drift.
       const timeZone = resolveTimeZone(settings, String(row.device_time_zone ?? ''));
-      const clock = zonedClock(instant, timeZone);
+      // The day this account is living in: the zone's calendar date, or the one
+      // before it while its `dayEndsAt` has not yet passed. Both queries below
+      // ask about it, and `deliverAccount` is handed the same boundary.
+      const day = accountDay(instant, timeZone, settings).date;
 
       return await withUser(row.id, async (db) => {
         const { rows: habits } = await db.query(
@@ -215,11 +217,11 @@ export async function collect(instant) {
 
         const { rows: entries } = await db.query(
           `SELECT habit_id, value, status FROM entries WHERE date = $1`,
-          [clock.date]
+          [day]
         );
         const { rows: sent } = await db.query(
           `SELECT habit_id, channel FROM notify_log WHERE date = $1`,
-          [clock.date]
+          [day]
         );
         const { rows: status } = await db.query(
           `SELECT channel, ok, status, error, permanent FROM notify_status`
@@ -401,8 +403,8 @@ export function interactionAdapter() {
     },
 
     today(account) {
-      return zonedClock(new Date(),
-        resolveTimeZone(account.settings, account.deviceZone ?? '')).date;
+      return accountDay(new Date(),
+        resolveTimeZone(account.settings, account.deviceZone ?? ''), account.settings).date;
     },
 
     findHabit(account, habitId) {

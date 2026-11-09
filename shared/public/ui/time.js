@@ -283,3 +283,76 @@ export function describeReminderDays(mask, names) {
   if (days === 0) return 'No days';
   return names.filter((_, weekday) => ((days >> weekday) & 1) === 1).join(', ');
 }
+
+/* ---------- where the day ends ---------- */
+
+/**
+ * The hours an account may say its day ends at: whole hours from midnight to
+ * 06:00 ('00:00' … '06:00'), as 'HH:MM' strings like every other time this app stores. Enumerated
+ * rather than parsed, so `SETTING_VALUES` can use it as its array form and a
+ * header carrying anything else reads as the default.
+ */
+export const DAY_END_TIMES = Object.freeze(
+  // Built, not written out: `dates.test.js` refuses any seven-item list of short
+  // quoted strings under `public/` as a hardcoded weekday list, and this one
+  // is seven hours.
+  Array.from({ length: 7 }, (_, hour) => `0${hour}:00`));
+
+/** Midnight: the calendar day, which is every behaviour from before the setting. */
+export const DEFAULT_DAY_END = '00:00';
+
+/**
+ * Minutes after midnight at which a day ends, for a member of `DAY_END_TIMES`;
+ * anything else is 0. `includes` rather than a parse: the value may be a request
+ * header, and a header that is not one of the seven is the default, not an error.
+ *
+ * @param {unknown} value
+ * @returns {number}
+ */
+export function dayEndMinutes(value) {
+  const at = DAY_END_TIMES.indexOf(/** @type {string} */ (value));
+  return at < 0 ? 0 : at * 60;
+}
+
+/**
+ * Which DATE a wall-clock moment belongs to, once a day is allowed to end after
+ * midnight — and the same moment's minutes on that date's own clock.
+ *
+ * Before the boundary it is still the previous date, so those minutes run on
+ * past 1440 (00:30 is 1470 of the day that is ending). The previous date is
+ * worked out on the date's PARTS, in UTC, and never by subtracting hours from
+ * an instant: this is asked after the zone has been resolved to a wall-clock
+ * reading, and an instant-based subtraction is wrong twice a year across a DST
+ * change.
+ *
+ * @param {string} date 'YYYY-MM-DD', the calendar date on the wall clock
+ * @param {number} minutes minutes since midnight on that wall clock
+ * @param {unknown} dayEnd one of `DAY_END_TIMES`; anything else never moves it
+ * @returns {{date: string, minutes: number}}
+ */
+export function effectiveDay(date, minutes, dayEnd) {
+  if (!(minutes < dayEndMinutes(dayEnd))) return { date, minutes };
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(date ?? ''));
+  if (!m) return { date, minutes };
+  // Setting all three fields at once, for the reason `weekdayOf` does: a
+  // four-digit year below 100 is otherwise read as 19xx.
+  const at = new Date(0);
+  at.setUTCFullYear(Number(m[1]), Number(m[2]) - 1, Number(m[3]) - 1);
+  const year = String(at.getUTCFullYear()).padStart(4, '0');
+  const month = String(at.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(at.getUTCDate()).padStart(2, '0');
+  return { date: `${year}-${month}-${day}`, minutes: minutes + 1440 };
+}
+
+/**
+ * A reminder's time on the clock of the day it belongs to. A time
+ * before the boundary belongs to the day that is ENDING, so it is compared as
+ * `at + 1440` against `effectiveDay`'s extended minutes.
+ *
+ * @param {number} at minutes since midnight
+ * @param {unknown} dayEnd one of `DAY_END_TIMES`
+ * @returns {number}
+ */
+export function effectiveReminderMinutes(at, dayEnd) {
+  return at < dayEndMinutes(dayEnd) ? at + 1440 : at;
+}
