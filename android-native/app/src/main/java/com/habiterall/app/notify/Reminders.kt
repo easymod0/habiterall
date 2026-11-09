@@ -187,7 +187,7 @@ object Reminders {
         dayEnd: String,
     ): Long? {
         val belongsToPreviousDay =
-            time.hour * 60 + time.minute < ReminderTime.dayEndMinutes(dayEnd)
+            ReminderTime.effectiveReminderMinutes(time.hour * 60 + time.minute, dayEnd) >= 1440
         var cursor = now
         repeat(7) {
             val at = nextOccurrence(time, cursor)
@@ -718,6 +718,7 @@ object Reminders {
             // failed settings fetch falls back to the cached answer rather than
             // to "enabled": one flaky request must not resurrect alarms the
             // user turned off.
+            var boundaryMoved = false
             val enabled = try {
                 // A property on the response, not a call — and `cachedAndroidReminders`
                 // below is the suspend read of the mirror. Two similarly-named
@@ -739,7 +740,9 @@ object Reminders {
                 // alarm, because `schedule` decides which night owns a reminder
                 // against it — and this path runs when nobody opened the app,
                 // so it may be the only one to ever learn a changed boundary.
-                runCatching { DayEnd.adopt(applicationContext, fresh.dayEndsAtOrDefault) }
+                boundaryMoved = runCatching {
+                    DayEnd.adopt(applicationContext, fresh.dayEndsAtOrDefault)
+                }.getOrDefault(false)
                 fresh.androidRemindersEnabled
             } catch (e: Exception) {
                 settings.cachedAndroidReminders()
@@ -747,7 +750,10 @@ object Reminders {
 
             Notifications.ensureChannel(applicationContext)
 
-            if (only != null) {
+            // A moved boundary changes which night EVERY reminder belongs to, so
+            // re-arming the one habit this run was asked about would leave the
+            // rest armed under the old boundary: it takes the full branch.
+            if (only != null && !boundaryMoved) {
                 // A habit deleted server-side would otherwise keep its alarm
                 // and re-fire every day forever: an absent habit must cancel,
                 // not just skip. `schedule` already cancels for archived or

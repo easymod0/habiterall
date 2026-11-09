@@ -135,4 +135,33 @@ class MainActivityWiringTest {
             source.substring(fresh, reschedule).contains("PatchOutcome("),
         )
     }
+
+    /**
+     * `HabiterallApp.onCreate` is never run by a test (every suite is
+     * `@Config(application = Application::class)`), so nothing but this reads
+     * that `DayEnd.load` happens, and before `rescheduleAll`: an alarm armed
+     * from the cache before the boundary is loaded is armed under midnight.
+     * Both calls are asserted PRESENT, so a rename reads as a failure and not
+     * as an order that holds vacuously.
+     */
+    @Test
+    fun `the app loads the day boundary before it reschedules the alarms`() {
+        var dir: File? = File("").absoluteFile
+        var app: String? = null
+        while (dir != null && app == null) {
+            val candidate = File(dir, "android-native/app/src/main/java/com/habiterall/app/HabiterallApp.kt")
+            if (candidate.isFile) app = candidate.readText()
+            dir = dir.parentFile
+        }
+        assertTrue("HabiterallApp.kt not found above ${File("").absolutePath}", app != null)
+        val load = app!!.indexOf("DayEnd.load(this)")
+        val reschedule = app.indexOf("Reminders.rescheduleAll(")
+        assertTrue("no DayEnd.load(this) in HabiterallApp", load >= 0)
+        assertTrue("no Reminders.rescheduleAll( in HabiterallApp", reschedule >= 0)
+        assertTrue(
+            "`DayEnd.load(this)` must come before `Reminders.rescheduleAll(`, or " +
+                "the alarms re-armed at launch are aimed under midnight",
+            load < reschedule,
+        )
+    }
 }

@@ -86,6 +86,19 @@ object DayEnd {
     }
 
     /**
+     * Back to a phone that has never been told. Tests only: this is an `object`
+     * that outlives a test class, and `load` in an `@After` re-reads the file the
+     * test just wrote, so a leaked 03:00 would fail unrelated suites only when
+     * they happen to run between midnight and 03:00.
+     */
+    internal fun reset(context: Context) {
+        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().clear().apply()
+        held = ReminderTime.DEFAULT_DAY_END
+        clock = null
+    }
+
+    /**
      * Take the server's answer, and be the ONE place that does.
      *
      * @return true when it changed. A change redraws the widgets, and that is
@@ -102,6 +115,10 @@ object DayEnd {
         val app = context.applicationContext
         app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY, next).apply()
         held = next
+        // The day may have moved BACKWARDS (a later boundary at 00:45), which
+        // no other path does: a record dated past the new today is rewound
+        // before it is drawn, or it reads unknown and swallows the next tap.
+        Settings(app).updateWidgets { all -> all.map { Widgets.rewound(it, today()) } }
         HabitWidget.redraw(app)
         return true
     }

@@ -87,8 +87,7 @@ class MainActivityDayEndTest {
     @After
     fun tearDown() {
         scenario?.close()
-        DayEnd.clock = null
-        DayEnd.load(context)
+        DayEnd.reset(context)
         server.shutdown()
     }
 

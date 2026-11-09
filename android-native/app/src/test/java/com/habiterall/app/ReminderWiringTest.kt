@@ -77,6 +77,10 @@ class ReminderWiringTest {
     @Before
     fun forgetTheLastArm() {
         Reminders.lastArmWasExact = null
+        // The previous test's `@After` reloads from the file ITS adopt wrote, so
+        // a class that ran a 03:00 test last starts the next one at 03:00 —
+        // and an adopt of "03:00" then changes nothing and returns false.
+        DayEnd.load(app)
     }
 
     /**
@@ -87,8 +91,7 @@ class ReminderWiringTest {
      */
     @After
     fun putTheDayBack() {
-        DayEnd.clock = null
-        DayEnd.load(app)
+        DayEnd.reset(app)
     }
 
     private val manager
@@ -382,6 +385,59 @@ class ReminderWiringTest {
                 "a Monday-only 01:00 reminder under 03:00 is about Monday and fires Tuesday",
                 ZonedDateTime.of(2026, 8, 18, 1, 0, 0, 0, toronto),
                 fires,
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    /**
+     * A sync asked about ONE habit still adopts a changed boundary, and a moved
+     * boundary changes which night every OTHER reminder belongs to — so the
+     * single-habit branch, which would leave habit B armed under the old one,
+     * must give way to the full one. B is Monday-only 01:00: under midnight
+     * it waits for the next Monday, under 03:00 it fires Tuesday.
+     */
+    @Test
+    fun `a single-habit sync that moves the boundary re-arms the other habits too`() {
+        DayEnd.clock = clockAt(2026, 8, 17, 12, 0)
+        val other = 78L
+        val server = MockWebServer()
+        server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+            override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse {
+                val path = request.path.orEmpty()
+                val body = when {
+                    path.startsWith("/api/habits") ->
+                        """[{"id":$delivered,"name":"Meditate","reminder_time":"08:00"},""" +
+                            """{"id":$other,"name":"Stretch","reminder_time":"01:00","reminder_days":2}]"""
+                    path.startsWith("/api/settings") -> """{"dayEndsAt":"03:00"}"""
+                    else -> return MockResponse().setResponseCode(404).setBody("{}")
+                }
+                return MockResponse().setResponseCode(200).setBody(body)
+            }
+        }
+        server.start()
+        try {
+            runBlocking { Settings(app).setServerUrl(server.url("/").toString()) }
+            assertEquals("starts at midnight", "00:00", DayEnd.current)
+
+            runBlocking {
+                val worker = TestListenableWorkerBuilder<Reminders.ScheduleWorker>(
+                    app,
+                    inputData = workDataOf(Notifications.EXTRA_HABIT_ID to delivered),
+                ).build()
+                assertEquals(ListenableWorker.Result.success(), worker.doWork())
+            }
+
+            assertEquals("03:00", DayEnd.current)
+            val b = alarms().singleOrNull {
+                shadowOf(it.operation).savedIntent?.data?.toString() ==
+                    Reminders.alarmUri(other, snoozed = false)
+            }
+            assertTrue("the habit the sync was NOT about is armed", b != null)
+            assertEquals(
+                ZonedDateTime.of(2026, 8, 18, 1, 0, 0, 0, toronto),
+                Instant.ofEpochMilli(b!!.triggerAtTime).atZone(toronto),
             )
         } finally {
             server.shutdown()

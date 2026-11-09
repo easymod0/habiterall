@@ -38,6 +38,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.habiterall.app.data.AppSettings
+import com.habiterall.app.notify.ReminderTime
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
@@ -319,8 +320,9 @@ fun SettingsScreen(
             )
             ChoiceRow(
                 title = "My day ends at",
-                options = listOf("00:00" to "Midnight") +
-                    (1..6).map { "%02d:00".format(it).let { hour -> hour to hour } },
+                options = ReminderTime.DAY_END_TIMES.map {
+                    it to if (it == ReminderTime.DEFAULT_DAY_END) "Midnight" else it
+                },
                 selected = settings.dayEndsAtOrDefault,
                 enabled = !busy,
                 onPick = { put("dayEndsAt", "when your day ends", JsonPrimitive(it)) },

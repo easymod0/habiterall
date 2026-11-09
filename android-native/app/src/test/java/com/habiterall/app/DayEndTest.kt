@@ -60,8 +60,18 @@ class DayEndTest {
 
     @After
     fun putTheClockBack() {
-        DayEnd.clock = null
+        DayEnd.reset(app)
+    }
+
+    @Test
+    fun `reset leaves a phone that has never been told`() {
+        runBlocking { DayEnd.adopt(app, "03:00") }
+        DayEnd.clock = Clock.fixed(Instant.EPOCH, ZoneId.of("UTC"))
+        DayEnd.reset(app)
+        assertEquals("00:00", DayEnd.current)
+        assertNull(DayEnd.clock)
         DayEnd.load(app)
+        assertEquals("the file went too, or a later load brings 03:00 back", "00:00", DayEnd.current)
     }
 
     @Test

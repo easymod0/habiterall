@@ -71,8 +71,7 @@ class WidgetDayEndTest {
     /** `DayEnd` is an `object` and outlives this class: see `DayEndTest`. */
     @After
     fun putTheDayBack() {
-        DayEnd.clock = null
-        DayEnd.load(context)
+        DayEnd.reset(context)
     }
 
     private fun habit() = Habit(id = 1, name = "Meditate")
@@ -219,4 +218,72 @@ class WidgetDayEndTest {
             assertEquals(Sentinels.YES, after.value)
             assertEquals(sunday, after.historyThrough)
         }
+
+    /**
+     * The boundary moving LATER at 00:45 on a Tuesday takes "today" backwards to
+     * Monday, which nothing else does. A record dated Tuesday would then read
+     * unknown, a tap would cycle from there over a stored Monday answer, and
+     * `answered` would ignore it as older — until a refresh the phone may not
+     * get for hours.
+     */
+    @Test
+    fun `adopting a later boundary at 00-45 rewinds a record dated past the new today`(): Unit =
+        runBlocking {
+            val tuesday = "2026-08-18"
+            DayEnd.clock = clockAt(ZonedDateTime.of(2026, 8, 18, 0, 45, 0, 0, toronto))
+            bind(55)
+            val settings = Settings(context)
+            settings.putWidgets(
+                listOf(
+                    record(habit(), 55, date = tuesday).copy(
+                        history = "$monday:${Sentinels.YES}",
+                    )
+                )
+            )
+
+            assertTrue(DayEnd.adopt(context, "03:00"))
+
+            val rewound = settings.cachedWidget(55)!!
+            assertEquals(monday, rewound.date)
+            assertEquals("Monday's own answer, read from the history", Sentinels.YES, rewound.value)
+            assertFalse(rewound.skip)
+            assertEquals("and it is drawn", "✓", markDrawnFor(55))
+
+            HabitWidget().tap(context, 55)
+
+            val after = settings.cachedWidget(55)!!
+            assertEquals(monday, after.date)
+            assertEquals("DONE cycles to NO, where unknown would have cycled to YES", 0.0, after.value)
+            assertTrue(Outbox.isPending(context, 1, monday))
+            assertFalse(Outbox.isPending(context, 1, tuesday))
+        }
+
+    @Test
+    fun `rewound takes the day's answer from the history, and unanswered when there is none`() {
+        val base = record(habit(), 56, date = "2026-08-18", value = Sentinels.YES)
+
+        val no = Widgets.rewound(base.copy(history = "$monday:0.0"), monday)
+        assertEquals(monday, no.date)
+        assertEquals(0.0, no.value)
+        assertFalse(no.skip)
+
+        val skipped = Widgets.rewound(base.copy(history = "$monday:s"), monday)
+        assertEquals(null, skipped.value)
+        assertTrue(skipped.skip)
+
+        val unknown = Widgets.rewound(base.copy(skip = true, history = ""), monday)
+        assertEquals(monday, unknown.date)
+        assertEquals(null, unknown.value)
+        assertFalse(unknown.skip)
+    }
+
+    @Test
+    fun `rewound leaves a record that is not after today exactly as it was`() {
+        val same = record(habit(), 57, date = monday, value = Sentinels.YES)
+            .copy(history = "$sunday:0.0")
+        assertEquals(same, Widgets.rewound(same, monday))
+
+        val older = record(habit(), 57, date = sunday, value = 0.0)
+        assertEquals(older, Widgets.rewound(older, monday))
+    }
 }

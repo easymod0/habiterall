@@ -162,6 +162,16 @@ boundary. `armMidnight` keeps its name and aims at the boundary,
 freeze the zone at class load. `DayEndTest` moves the default zone and checks it
 followed.
 
+**Two things the phone does not fix, as before.** A worker delayed past the
+boundary can drop a reminder once, as it could at midnight. A sign-out or a server
+change leaves the old boundary in force until the first settings fetch, as the
+other mirrors do.
+
+**A later boundary can take today backwards**, at 00:45 with `00:00` going to
+`03:00`, so `adopt` rewinds any widget record dated past the new today to that
+day's answer from its own history, and the worker, if the boundary moved, re-arms
+every habit rather than the one it was asked about.
+
 ## Edges left open
 
 **A change of `dayEndsAt` can send one reminder twice.** The watermark

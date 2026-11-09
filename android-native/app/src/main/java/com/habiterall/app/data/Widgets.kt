@@ -692,6 +692,29 @@ object Widgets {
         }
 
     /**
+     * The record after the day moved BACKWARDS under it (#76): the account's day
+     * now ends later, so [today] is earlier than the date the record holds.
+     *
+     * Nothing else produces this — [refreshed] and [answered] only move a date
+     * forward — but a boundary change does, at 00:45 with the day end going
+     * from 00:00 to 03:00. Left alone, [stateOn] answers UNKNOWN for a record
+     * dated after [today], a tap cycles from that and can overwrite a stored
+     * answer for [today], and [answered] ignores the record's date as "older"
+     * so the cell never advances; it heals at the next refresh, which offline
+     * may be a long way off.
+     *
+     * The day's answer is read from the same place [stripStates] reads every
+     * date but `record.date`: the encoded history. Nothing there is
+     * unanswered, never "no". A record not after [today] is returned as it
+     * came.
+     */
+    fun rewound(record: Record, today: String): Record {
+        if (record.date <= today) return record
+        val entry = decodeHistory(record.history)[today]
+        return record.copy(date = today, value = entry?.first, skip = entry?.second ?: false)
+    }
+
+    /**
      * `widgetId|habitId|name|type|target|targetType|showAs|color|unit|date|value|skip`.
      *
      * A flat line for the reason the reminder cache is one: it is read with no
