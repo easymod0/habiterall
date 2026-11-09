@@ -29,6 +29,9 @@ Nor on a header whose VALUE can change while cached entries remain:
 `X-Habiterall-Day-End` is the case. The Cache API compares header values, so
 changing the setting once, at an hour where `todayISO()` does not move and
 nothing is refetched, leaves every stored entry unmatchable for the new value.
+`X-Habiterall-Timezone` has the same exposure and still varies: a device that
+changes zone without changing date strands its entries the same way. That
+predates this rule and is an open question, not an exemption.
 
 **The measurement is historical and the rule is not.** It was taken in Chrome
 against cloud's `X-Habiterall-Fresh`, a header #192 has since deleted — no

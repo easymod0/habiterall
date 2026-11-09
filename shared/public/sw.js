@@ -557,8 +557,10 @@ async function networkFirst(request, url) {
     // without, and the survivor then matched neither `cache.match` nor
     // `caches.match` for any ordinary request, so the fallback below fell
     // through to the synthetic 503 and the installed app opened offline to
-    // nothing. `Vary: X-Habiterall-Timezone` is safe in the same place because
-    // a device sends one zone on every request.
+    // nothing. A header whose VALUE can change while entries remain cached has
+    // the same effect, which is why `X-Habiterall-Day-End` is not in `Vary`.
+    // `X-Habiterall-Timezone` is: every request carries one, so it is only
+    // exposed when a device changes zone, which `CLAUDE.md` records as open.
     if (response.ok && CACHEABLE_API.some((re) => re.test(url.pathname))) {
       const cache = await caches.open(DATA_CACHE);
       cache.put(request, response.clone());

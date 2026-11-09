@@ -93,6 +93,11 @@ without revalidating, the worker fetches with `cache: 'no-store'`, and cloud's
 memo key already carries the resulting day. `dayboundary.mjs` reloads offline
 after a change and asserts the dashboard still renders.
 
+The same argument reaches `X-Habiterall-Timezone`, which is still in `Vary`: a
+device that changes zone without changing date strands its cached entries in
+just this way. That predates this change and was left alone, so it is an open
+question rather than a case this reasoning settles.
+
 Paths with NO client — the notifier's `collect`, `adapter.today` for the
 Discord and ntfy buttons — read `settings.dayEndsAt` through `accountDay`, with
 the zone `resolveTimeZone` chose. That is the same split `timezones.md` draws
