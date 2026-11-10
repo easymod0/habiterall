@@ -13,8 +13,8 @@ third and fourth copy in the interaction handlers is how "not done" would start
 meaning something different depending on where you answered from.
 
 **A client mirrors a rule only if it must work OFFLINE.** The native app keeps
-five hand-written copies of shared logic — the tap cycle, reminder-time parsing,
-`needsReminder`, the entry encoding, the channel default — and every one of them
+six hand-written copies of shared logic — the tap cycle, reminder-time parsing,
+`needsReminder`, the entry encoding, the channel default, the day boundary — and every one of them
 runs when there may be no network, which is why they are worth the cost of
 keeping in step. Nothing else is copied. Creating a habit, reordering, and the
 settings screen are all server-authoritative: the phone submits and renders
@@ -22,7 +22,7 @@ whatever comes back, including the error, because `parseHabit` and
 `SETTING_VALUES` normalise as well as validate and are the only opinion that
 decides what gets stored. That rule is what let the phone become a full client
 without doubling the mirror surface — and it is the question to ask of anything
-added next, because a sixth mirror is a real cost and a sixth server call is not.
+added next, because a seventh mirror is a real cost and one more server call is not.
 
 **A setting's DEFAULT is a mirror even though its rule is not.** `GET /settings`
 returns only the keys that have been stored — neither edition fills gaps — so a

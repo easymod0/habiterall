@@ -100,4 +100,68 @@ class MainActivityWiringTest {
             Regex("""\bmanualOrder\s*=\s*data\.manualOrderEnabled\b""").containsMatchIn(overviewSpan),
         )
     }
+
+    /**
+     * The patch path — a setting changed on the phone's own settings screen —
+     * must adopt the boundary BEFORE it reschedules: a reminder's owner date is
+     * decided against the boundary held when `schedule` runs, so the other
+     * order arms every alarm under the old one.
+     *
+     * A source guard for the reason the one above is: the patch lambda is inside
+     * `MainActivity`, with no seam a test can reach. It checks that it SEES both
+     * calls, in this lambda, and not merely that they are in order somewhere.
+     */
+    @Test
+    fun `the patch path adopts the day boundary before it reschedules`() {
+        val fresh = source.indexOf("val fresh = api.settings()")
+        assertTrue(
+            "the patch path's settings re-read (`val fresh = api.settings()`) is " +
+                "not where this test expects it — has it moved or been renamed?",
+            fresh >= 0,
+        )
+        val adopt = source.indexOf("DayEnd.adopt(", fresh)
+        val reschedule = source.indexOf("Reminders.rescheduleAll(", fresh)
+        assertTrue("no DayEnd.adopt( after the patch path's re-read", adopt > fresh)
+        assertTrue("no Reminders.rescheduleAll( after the patch path's re-read", reschedule > fresh)
+        assertTrue(
+            "in the patch lambda `DayEnd.adopt(` must come before " +
+                "`Reminders.rescheduleAll(`, or the reschedule arms under the old boundary",
+            adopt < reschedule,
+        )
+        // Both belong to the SAME lambda: nothing between the re-read and the
+        // reschedule may close it, or the order proved is of two unrelated spans.
+        assertFalse(
+            "the re-read and the reschedule are not in one lambda",
+            source.substring(fresh, reschedule).contains("PatchOutcome("),
+        )
+    }
+
+    /**
+     * `HabiterallApp.onCreate` is never run by a test (every suite is
+     * `@Config(application = Application::class)`), so nothing but this reads
+     * that `DayEnd.load` happens, and before `rescheduleAll`: an alarm armed
+     * from the cache before the boundary is loaded is armed under midnight.
+     * Both calls are asserted PRESENT, so a rename reads as a failure and not
+     * as an order that holds vacuously.
+     */
+    @Test
+    fun `the app loads the day boundary before it reschedules the alarms`() {
+        var dir: File? = File("").absoluteFile
+        var app: String? = null
+        while (dir != null && app == null) {
+            val candidate = File(dir, "android-native/app/src/main/java/com/habiterall/app/HabiterallApp.kt")
+            if (candidate.isFile) app = candidate.readText()
+            dir = dir.parentFile
+        }
+        assertTrue("HabiterallApp.kt not found above ${File("").absolutePath}", app != null)
+        val load = app!!.indexOf("DayEnd.load(this)")
+        val reschedule = app.indexOf("Reminders.rescheduleAll(")
+        assertTrue("no DayEnd.load(this) in HabiterallApp", load >= 0)
+        assertTrue("no Reminders.rescheduleAll( in HabiterallApp", reschedule >= 0)
+        assertTrue(
+            "`DayEnd.load(this)` must come before `Reminders.rescheduleAll(`, or " +
+                "the alarms re-armed at launch are aimed under midnight",
+            load < reschedule,
+        )
+    }
 }

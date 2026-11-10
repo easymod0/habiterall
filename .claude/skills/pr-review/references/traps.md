@@ -45,8 +45,8 @@ whether you believe it.
 
 ## Mirrors and registries
 
-A rule is copied only when it must run **offline**. Five copies exist; adding a
-sixth is a cost worth flagging.
+A rule is copied only when it must run **offline**. Six copies exist; adding a
+seventh is a cost worth flagging.
 
 | rule | copies |
 |---|---|
@@ -56,6 +56,7 @@ sixth is a cost worth flagging.
 | is a day answered | `answeredIds` (`notify.js`) ↔ `Reminders.needsReminder` |
 | channel default / `skipDays` / `questionMarks` | server settings ↔ `AppSettings` |
 | wire values | `src/constants.js` ↔ `public/ui/values.js` ↔ `toggle.js`'s local decls |
+| day boundary | `ui/time.js` `effectiveDay`, `dayEndMinutes` ↔ `ReminderTime.kt` (`notify.test.js` / `ReminderTimeTest`, same examples); `DAY_END_HEADER` `notify.js` ↔ `Api.kt`; `SETTINGS.dayEndsAt` ↔ `AppSettings` |
 | channel list | `notify.js` `CHANNELS` ↔ `ui/settings.js` (`shared/src` is not served) |
 
 Checks:

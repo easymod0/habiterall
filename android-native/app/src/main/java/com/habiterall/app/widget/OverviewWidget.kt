@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.widget.RemoteViews
 import androidx.core.content.ContextCompat
 import com.habiterall.app.R
+import com.habiterall.app.data.DayEnd
 import com.habiterall.app.data.Settings
 import com.habiterall.app.data.Widgets
 import com.habiterall.app.notify.Notifications
@@ -186,7 +187,7 @@ class OverviewWidget : AppWidgetProvider() {
                 render(
                     app,
                     records,
-                    LocalDate.now().toString(),
+                    DayEnd.today(),
                     rows = rowsFor(options),
                     columns = columnsFor(options),
                 ),

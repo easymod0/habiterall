@@ -13,7 +13,7 @@ import java.util.Locale
  * the habit form, the notification number pad and the day dialog's count
  * field alike; this is what tells all three which spelling of a thousands
  * group to refuse. See [deviceAmountFormat] for where the value comes from
- * and `android-native/CLAUDE.md` for why this is deliberately NOT a sixth
+ * and `android-native/CLAUDE.md` for why this is deliberately NOT another
  * hand-written mirror of a server setting.
  */
 enum class AmountFormat { POINT, COMMA }

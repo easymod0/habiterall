@@ -188,6 +188,10 @@ internal fun ManageScreen(
                 // at the next successful overview.
                 Settings(context).cacheAndroidReminders(fresh.androidRemindersEnabled)
                 Settings(context).cacheSkipDays(fresh.skipDaysEnabled)
+                // Before the reschedule: a reminder's owner date is decided
+                // against the boundary, so arming under the old one would aim
+                // the alarm at the wrong night.
+                DayEnd.adopt(context, fresh.dayEndsAtOrDefault)
                 Reminders.rescheduleAll(context)
                 PatchOutcome(fresh, ignored)
             },
@@ -925,7 +929,7 @@ class MainActivity : ComponentActivity() {
          * headed "Yesterday", because `dayLabel` asks the clock afresh. The
          * reminder that wakes you at 8am is exactly the path that gets there.
          */
-        var today by remember { mutableStateOf(LocalDate.now().toString()) }
+        var today by remember { mutableStateOf(DayEnd.today()) }
         val api = remember(serverUrl, onUnauthorized) { Api(serverUrl, onUnauthorized) }
 
         LaunchedEffect(reload, serverUrl, windowDays, refreshKey) {
@@ -976,6 +980,15 @@ class MainActivity : ComponentActivity() {
                 // the widget and this grid disagreeing about where a tap goes
                 // next is the drift these mirrors exist to prevent.
                 settings.cacheQuestionMarks(fetched.questionMarksEnabled)
+                // Where the account's day ends, and BEFORE the overview below:
+                // that request carries the boundary as a header and the server
+                // anchors its window on it, so the fetch that first learns a
+                // new boundary must already be sent under it. The `today` here
+                // is re-read for the same reason — the grid's newest column and
+                // the window asked for have to be the one day. Not a key of
+                // this effect: a change of boundary arrives inside it.
+                DayEnd.adopt(this@MainActivity, fetched.dayEndsAtOrDefault)
+                today = DayEnd.today()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
@@ -1127,9 +1140,9 @@ class MainActivity : ComponentActivity() {
                     first = false
                 } else {
                     // Before the refetch, so the window asked for is the one
-                    // the phone believes in. Past midnight this is a different
-                    // day and every column moves.
-                    today = LocalDate.now().toString()
+                    // the phone believes in. Past the day's end this is a
+                    // different day and every column moves.
+                    today = DayEnd.today()
                     reload++
                     // A query is about the list you were looking at, not a
                     // setting that should follow you back into the app — and
@@ -1556,7 +1569,7 @@ class MainActivity : ComponentActivity() {
  */
 private fun dayLabel(date: String): String = runCatching {
     val day = LocalDate.parse(date)
-    val today = LocalDate.now()
+    val today = LocalDate.parse(DayEnd.today())
     when (day) {
         today -> "Today"
         today.minusDays(1) -> "Yesterday"

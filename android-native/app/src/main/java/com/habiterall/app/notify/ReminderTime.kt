@@ -3,6 +3,13 @@ package com.habiterall.app.notify
 import java.time.LocalDate
 
 /**
+ * Which DATE a wall-clock moment belongs to once a day may end after midnight,
+ * and the same moment's minutes on that date's own clock — so 00:30 under a
+ * 03:00 boundary is yesterday at 1470, not today at 30.
+ */
+data class EffectiveDay(val date: LocalDate, val minutes: Int)
+
+/**
  * Reading and writing a reminder time on this client, and the weekdays it
  * fires on.
  *
@@ -177,8 +184,8 @@ object ReminderTime {
      * Which weekday a 'YYYY-MM-DD' falls on, as `getDay()` numbers them.
      *
      * Read off the STRING, so no zone is involved: the caller has already
-     * decided whose day this is — `LocalDate.now()` in `NotifyWorker`, the
-     * alarm's own local date in [Reminders.nextAllowedOccurrence] — and
+     * decided whose day this is — `DayEnd.today()` in `NotifyWorker`, the
+     * day the alarm is about in [Reminders.nextAllowedOccurrence] — and
      * re-resolving it here would be a second clock.
      *
      * One divergence from `weekdayOf` in `shared/public/ui/time.js`, stated
@@ -217,4 +224,53 @@ object ReminderTime {
         val weekday = weekdayOf(isoDate) ?: return false
         return (parseReminderDays(mask) shr weekday) and 1 == 1
     }
+
+    /* ---------- where the day ends (#76) ---------- */
+
+    /**
+     * The hours an account may say its day ends at, '00:00' through '06:00'.
+     * Mirrors `DAY_END_TIMES` in `shared/public/ui/time.js` — the sixth rule
+     * this client copies, because every one of its callers (a tap, a widget, a
+     * reminder's alarm) runs with no network. Written out, and checked against
+     * the web registry's own options by `AppSettingsDefaultsTest`.
+     */
+    val DAY_END_TIMES = listOf("00:00", "01:00", "02:00", "03:00", "04:00", "05:00", "06:00")
+
+    /** Midnight: the calendar day, which is every behaviour from before the setting. */
+    const val DEFAULT_DAY_END = "00:00"
+
+    /**
+     * Minutes after midnight at which a day ends, for a member of
+     * [DAY_END_TIMES]; anything else — null, junk, "03:30" — is 0. Membership
+     * and not a numeric parse, as on the server, where the value may be a header
+     * a client controls: a value that is not one of the seven is the default,
+     * not an error.
+     */
+    fun dayEndMinutes(value: String?): Int {
+        val at = DAY_END_TIMES.indexOf(value)
+        return if (at < 0) 0 else at * 60
+    }
+
+    /**
+     * Which date a wall-clock moment belongs to. Mirrors `effectiveDay` in
+     * `shared/public/ui/time.js`, and the rule is the same: before the boundary
+     * it is still the PREVIOUS date, whose own minutes run on past 1440.
+     *
+     * [minutes] is the wall clock's, read once, after the zone is resolved. The
+     * boundary is never subtracted from an instant — "03:00 earlier than now" is
+     * an hour out twice a year across a DST change, where "are the wall-clock
+     * minutes under 180" is not — and the previous date is calendar arithmetic
+     * on a [LocalDate].
+     */
+    fun effectiveDay(date: LocalDate, minutes: Int, dayEnd: String?): EffectiveDay =
+        if (minutes < dayEndMinutes(dayEnd)) EffectiveDay(date.minusDays(1), minutes + 1440)
+        else EffectiveDay(date, minutes)
+
+    /**
+     * A reminder's time on the clock of the day it belongs to. A time before the
+     * boundary belongs to the day that is ENDING, so it compares as `at + 1440`.
+     * Mirrors `effectiveReminderMinutes` in `shared/public/ui/time.js`.
+     */
+    fun effectiveReminderMinutes(at: Int, dayEnd: String?): Int =
+        if (at < dayEndMinutes(dayEnd)) at + 1440 else at
 }

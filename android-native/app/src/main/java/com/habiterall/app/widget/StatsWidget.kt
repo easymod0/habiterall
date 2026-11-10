@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.widget.RemoteViews
 import androidx.core.content.ContextCompat
 import com.habiterall.app.R
+import com.habiterall.app.data.DayEnd
 import com.habiterall.app.data.Settings
 import com.habiterall.app.data.Widgets
 import com.habiterall.app.notify.Notifications
@@ -16,7 +17,6 @@ import com.habiterall.app.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.time.LocalDate
 import kotlin.math.roundToInt
 
 /**
@@ -109,7 +109,7 @@ class StatsWidget : AppWidgetProvider() {
             val settings = Settings(context.applicationContext)
             val record = settings.cachedWidget(appWidgetId) ?: return@async
             val columns = columnsFor(newOptions)
-            val today = LocalDate.now().toString()
+            val today = DayEnd.today()
             appWidgetManager.updateAppWidget(appWidgetId, render(context, record, today, columns))
         }
     }

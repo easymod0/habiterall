@@ -3,6 +3,7 @@ package com.habiterall.app
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.isSelected
@@ -116,6 +117,7 @@ class SettingsScreenTest {
             val value = (v as JsonPrimitive).content
             next = when (k) {
                 "dayOrder" -> next.copy(dayOrder = value)
+                "dayEndsAt" -> next.copy(dayEndsAt = value)
                 "historyGranularity" -> next.copy(historyGranularity = value)
                 else -> next
             }
@@ -153,8 +155,9 @@ class SettingsScreenTest {
             listOf(
                 // Habits with a limit → atMostUnlogged: miss
                 "Counts as a miss",
-                // Display → dayOrder: newest-left, weekStart: monday
+                // Display → dayOrder: newest-left, dayEndsAt: 00:00, weekStart: monday
                 "Today on the left",
+                "Midnight",
                 "Monday",
                 // Charts → historyGranularity: WEEK, historyMode: percent,
                 // scoreGranularity: day, calendarZoom: default
@@ -209,6 +212,39 @@ class SettingsScreenTest {
         compose.waitUntil { sent.isNotEmpty() }
         // The KEY the server knows and the VALUE, not the label on the button.
         assertEquals(listOf("dayOrder=newest-right"), sent)
+    }
+
+    /**
+     * The day boundary row shows what is stored, and a pick sends the HOUR.
+     *
+     * `03:00` is a label and a value at once for every option but the first, so
+     * the literal on the wire is what is asserted — a row that sent `Midnight`,
+     * or `3`, would be a value the server's list refuses and silently drops.
+     */
+    @Test
+    fun `the day boundary row shows the stored hour and a pick sends it`() {
+        show(AppSettings(dayEndsAt = "02:00"))
+
+        compose.onNodeWithText("My day ends at").assertIsDisplayed()
+        compose.onNodeWithText("02:00").assertIsSelected()
+        compose.onNodeWithText("Midnight").assertIsNotSelected()
+
+        compose.onNodeWithText("02:00").performClick()
+        compose.waitForIdle()
+        assertEquals("the selected hour must not write", emptyList<String>(), sent)
+
+        compose.onNodeWithText("03:00").performClick()
+        compose.waitUntil { sent.isNotEmpty() }
+        assertEquals(listOf("dayEndsAt=03:00"), sent)
+        // The one option whose label is not its value: the stored 03:00 is a
+        // non-default boundary, and going back to midnight must send "00:00".
+        compose.onNodeWithText("Midnight").performClick()
+        compose.waitUntil { sent.size == 2 }
+        assertEquals(listOf("dayEndsAt=03:00", "dayEndsAt=00:00"), sent)
+        // All seven are reachable, midnight first and 06:00 last.
+        for (hour in listOf("Midnight", "01:00", "04:00", "05:00", "06:00")) {
+            compose.onNodeWithText(hour).assertIsDisplayed()
+        }
     }
 
     /**

@@ -558,7 +558,7 @@ fun HabitList(
                                 // permanently — the same "corrupts stored data"
                                 // hazard the `habits`-not-`visible` choice above
                                 // guards, not merely a screen that would render
-                                // oddly. This is not a sixth mirror of sort LOGIC
+                                // oddly. This is not another mirror of sort LOGIC
                                 // (the phone never decides how to sort; it draws
                                 // whatever `/overview` returns, in that order, as
                                 // it always has) — it is `Overview.manualOrderEnabled`,

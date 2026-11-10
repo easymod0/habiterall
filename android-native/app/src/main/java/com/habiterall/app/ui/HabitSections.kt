@@ -22,7 +22,7 @@ sealed interface ListRow {
  * `shared/public/ui/dashboard.js`'s grouped branch (`:315-330`) so the two
  * clients draw the same sections in the same order from the same input.
  *
- * Not a sixth mirror, for the reason `HabitFilter`'s KDoc gives for itself: a
+ * Not another mirror, for the reason `HabitFilter`'s KDoc gives for itself: a
  * mirror exists so two clients agree about a value that reaches storage, and
  * this partition reaches none — it only decides where a habit is DRAWN, not
  * what is stored about it. Disagreeing here costs a section a habit lands in

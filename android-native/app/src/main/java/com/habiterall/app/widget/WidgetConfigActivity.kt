@@ -9,13 +9,13 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.lifecycle.lifecycleScope
 import com.habiterall.app.R
+import com.habiterall.app.data.DayEnd
 import com.habiterall.app.data.Habit
 import com.habiterall.app.data.Settings
 import com.habiterall.app.data.Widgets
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.time.LocalDate
 
 /**
  * Asks which habit a newly-placed widget is for — and, for the one provider
@@ -109,7 +109,7 @@ class WidgetConfigActivity : ComponentActivity() {
      * about it.
      */
     private suspend fun seed(widgetId: Int, habits: List<Habit>) {
-        val today = LocalDate.now().toString()
+        val today = DayEnd.today()
         withContext(Dispatchers.IO) {
             Settings(applicationContext).putWidgetSet(
                 widgetId,
@@ -129,7 +129,7 @@ class WidgetConfigActivity : ComponentActivity() {
             .setTitle(R.string.widget_pick_habit)
             .setItems(names) { _, which ->
                 lifecycleScope.launch {
-                    val today = LocalDate.now().toString()
+                    val today = DayEnd.today()
                     val habit = habits[which]
                     val record =
                         Widgets.refreshed(Widgets.blank(widgetId, habit.id), habit, today)

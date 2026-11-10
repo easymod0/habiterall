@@ -12,8 +12,8 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import com.habiterall.app.data.DayEnd
 import com.habiterall.app.data.Settings
-import java.time.LocalDate
 
 /** `adb logcat -s habiterall.notify` is the whole point of this being one tag. */
 private const val TAG = "habiterall.notify"
@@ -113,7 +113,7 @@ class ReminderReceiver : BroadcastReceiver() {
                 return drop(habitId, "archived, or its reminder time was cleared")
             }
 
-            val today = LocalDate.now().toString()
+            val today = DayEnd.today()
             // A snoozed alarm names the day it was armed for, and by the time it
             // arrives that may no longer be today. Arming is not the last chance
             // to be wrong here: `setAlarm` falls back to `setAndAllowWhileIdle`

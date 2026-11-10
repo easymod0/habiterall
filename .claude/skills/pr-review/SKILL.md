@@ -77,7 +77,7 @@ it.
 
 They account for most of what has shipped broken.
 
-1. **Mirror drift.** Five rules are hand-copied between `shared/public/ui/`,
+1. **Mirror drift.** Six rules are hand-copied between `shared/public/ui/`,
    `shared/src/` and Kotlin, because they run offline. If the diff moves one
    copy, every copy moves or there is a finding. List: `references/traps.md`.
 2. **The fourth state.** `entries` has four states — `done`, `skip`, `no` (a row

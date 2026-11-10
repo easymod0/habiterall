@@ -1,6 +1,8 @@
 package com.habiterall.app.data
 
+import com.habiterall.app.notify.ReminderTime
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.ZonedDateTime
 
 /**
@@ -11,7 +13,7 @@ import java.time.ZonedDateTime
  * `Grid.valueForState` (including the inversion for a habit shown as something
  * to avoid), what a stored day MEANS is `Habit`'s, and the write is [Outbox]'s.
  * A widget is squarely on the offline side of "a client mirrors a rule only if
- * it must work offline", and it needed no sixth mirror to get there: what it
+ * it must work offline", and it needed no further mirror to get there: what it
  * adds is a CACHE, and the two questions a cache raises — which day is this
  * about, and who wins while a write is in flight.
  */
@@ -201,7 +203,7 @@ object Widgets {
      * A record is about ONE day and says which, so a day that has rolled over
      * paints as unknown rather than as yesterday's answer. That is the whole of
      * the midnight problem: a widget has no `onResume` — `MainActivity` re-reads
-     * `LocalDate.now()` on every one and nothing here can — so a record made
+     * `DayEnd.today()` on every one and nothing here can — so a record made
      * yesterday would otherwise show a tick against today, and be tapped from
      * the wrong state into the wrong write.
      */
@@ -296,16 +298,30 @@ object Widgets {
         if (n == n.toLong().toDouble()) n.toLong().toString() else n.toString()
 
     /**
-     * The next local midnight, which is when a widget's day becomes the wrong
-     * day.
+     * The next instant a widget's day becomes the wrong day: the start of the
+     * next day, which is the account's boundary ([dayEnd], #76) and midnight
+     * for one that has never set it.
      *
-     * `atStartOfDay` rather than `atTime(0, 0)`, because in a zone that springs
-     * forward AT midnight — America/Santiago does — there is no 00:00 on that
-     * date at all, and java.time answers 01:00 rather than throwing or landing
-     * on the day before.
+     * At midnight this is `atStartOfDay` rather than `atTime(0, 0)`, because in
+     * a zone that springs forward AT midnight — America/Santiago does — there is
+     * no 00:00 on that date at all, and java.time answers 01:00 rather than
+     * throwing or landing on the day before.
+     *
+     * Otherwise the boundary's wall-clock time is placed on [now]'s own local
+     * date, and on the next one if that is not after [now]. Local-calendar
+     * arithmetic only, never `now` plus a number of hours, which is an hour out
+     * twice a year; `ZonedDateTime.of` resolves a boundary that falls in a
+     * spring-forward gap to the first instant after it, the same shift a
+     * reminder's alarm takes.
      */
-    fun nextMidnight(now: ZonedDateTime): ZonedDateTime =
-        now.toLocalDate().plusDays(1).atStartOfDay(now.zone)
+    fun nextDayStart(now: ZonedDateTime, dayEnd: String): ZonedDateTime {
+        val minutes = ReminderTime.dayEndMinutes(dayEnd)
+        if (minutes == 0) return now.toLocalDate().plusDays(1).atStartOfDay(now.zone)
+        val at = LocalTime.of(minutes / 60, minutes % 60)
+        val today = ZonedDateTime.of(now.toLocalDate(), at, now.zone)
+        return if (today.isAfter(now)) today
+        else ZonedDateTime.of(now.toLocalDate().plusDays(1), at, now.zone)
+    }
 
     /**
      * Re-point records at the widget ids a restore has just handed out.
@@ -674,6 +690,32 @@ object Widgets {
                 historyThrough = record.historyThrough.ifEmpty { record.date },
             )
         }
+
+    /**
+     * The record after the day moved BACKWARDS under it (#76): the account's day
+     * now ends later, so [today] is earlier than the date the record holds.
+     *
+     * [refreshed] and [answered] only move a date forward, but three things
+     * take the day backwards under a record: a later boundary adopted at 00:45
+     * (00:00 to 03:00), a write made under the old boundary and delivered after
+     * the change (its date is the newer one, so [answered] advances the record
+     * past today again), and a phone changing zone westward. `redraw` calls this
+     * on every pass, so all three end here. Left alone, [stateOn] answers UNKNOWN for a record
+     * dated after [today], a tap cycles from that and can overwrite a stored
+     * answer for [today], and [answered] ignores the record's date as "older"
+     * so the cell never advances; it heals at the next refresh, which offline
+     * may be a long way off.
+     *
+     * The day's answer is read from the same place [stripStates] reads every
+     * date but `record.date`: the encoded history. Nothing there is
+     * unanswered, never "no". A record not after [today] is returned as it
+     * came.
+     */
+    fun rewound(record: Record, today: String): Record {
+        if (record.date <= today) return record
+        val entry = decodeHistory(record.history)[today]
+        return record.copy(date = today, value = entry?.first, skip = entry?.second ?: false)
+    }
 
     /**
      * `widgetId|habitId|name|type|target|targetType|showAs|color|unit|date|value|skip`.

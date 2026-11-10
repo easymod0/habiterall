@@ -108,7 +108,7 @@ but a plan that makes any of them likely should say what to do instead:
 - a named file, function or registry row is not there;
 - two instructions contradict each other;
 - the step turns out to need a decision — a default, a representation, a
-  semantic change, a new dependency, a sixth offline mirror.
+  semantic change, a new dependency, another offline mirror.
 
 ## Fix briefs
 

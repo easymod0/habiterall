@@ -14,10 +14,8 @@ hours. While the wall clock in the relevant zone is short of that hour, the
 date the app treats as today is the PREVIOUS calendar date. At the default,
 every behaviour is what it was before the setting existed.
 
-Scope of this record: the server and the web client. The native Android client
-is the next PR, which is why `dayEndsAt` is in `AppSettingsDefaultsTest`'s
-`notMirrored` map for now, with that reason, and why the phone keeps the
-calendar day until then.
+Scope of this record: the server, the web client and the native Android client
+(a second PR, "The phone" below).
 
 ## Decision 1 — the rule is one function, and the server imports it
 
@@ -30,9 +28,9 @@ available to it).
 
 The design as planned put a rule in each tier. As built there is no second copy
 to drift: the only thing the server and the browser each own is WHICH wall
-clock and WHICH boundary to hand it. Android will mirror it in Kotlin, the one
-place a copy is unavoidable (it works offline), and `ReminderTimeTest`'s shape —
-the same literal examples on both sides — is the model.
+clock and WHICH boundary to hand it. Android mirrors it in Kotlin (`ReminderTime`), the one
+place a copy is unavoidable (it works offline), and `ReminderTimeTest` carries
+the same literal examples as `shared/test/notify.test.js`.
 
 ## Decision 2 — wall clock against the boundary, once, after the zone is resolved
 
@@ -134,6 +132,55 @@ The alternative — a reminder at 01:00 belongs to the NEW day and merely fires
 late in it — was refused: it would ask about a date for which nothing has been
 lived yet, and "did you do it?" at 01:00 means last night's.
 
+## The phone
+
+The same rule, mirrored in `ReminderTime.kt` — the sixth offline mirror, approved
+because a tap, a widget and a reminder's alarm all decide a day with no network.
+`DayEnd` holds the boundary and `DayEnd.today()` is the one answer to "what day
+is it"; `LocalDate.now()` is the calendar's and is wrong for this account.
+
+**The holder is SharedPreferences and not the DataStore `Settings` uses.** The
+OkHttp interceptor, the first composition, `dayLabel` and the snooze action have
+no suspend path, and a blocking DataStore read from any of them is an ANR. The
+header goes on every request, `00:00` included, for Decision 4's reason, and a
+blank zone still sends it.
+
+**One entry, `DayEnd.adopt`, called from three places** — the list's fetch (before
+the overview request, so that request already carries the new header), the
+settings patch (before `rescheduleAll`) and the six-hourly worker (before the
+`schedule` calls, since it may be the only path that ever sees a change). A change
+redraws the widgets, which re-aims the alarm. The phone has a control for it, one
+row beside `dayOrder`.
+
+**The reminder's owner date comes from the nominal time**, not the fire time's
+wall clock: on a DST gap the fire time is shifted and would read as after the
+boundary. `armMidnight` keeps its name and aims at the boundary,
+`Widgets.nextDayStart`, by local-calendar arithmetic.
+
+**Zone changes with the process alive.** `DayEnd.now()` reads
+`ZoneId.systemDefault()` on each call; a stored `Clock.systemDefaultZone()` would
+freeze the zone at class load. `DayEndTest` moves the default zone and checks it
+followed.
+
+**Two things the phone does not fix, as before.** A worker delayed past the
+boundary can drop a reminder once, as it could at midnight. A sign-out or a server
+change leaves the old boundary in force until the first settings fetch, as the
+other mirrors do.
+
+**Today can go backwards, and `redraw` is where that is mended.** Three things do
+it: a later boundary adopted at 00:45 (`00:00` going to `03:00`), a write made
+under the old boundary and delivered after the change (its date is the newer one,
+so `answered` moves the record past today again), and a phone changing zone
+westward. A first version rewound in `adopt` alone, which covered the first and
+left the other two producing the same record: dated past today, read as unknown,
+drawn blank and swallowing the next tap. Every path ends in `redraw`, so the
+rewind to the day's answer from the record's own history lives there, and writes
+only when a record is actually dated past today. `adopt` also finishes its redraw
+under `NonCancellable`: it commits the new value first, so a cancelled fetch
+effect that skipped the redraw would leave every later `adopt` seeing no change.
+The worker, if the boundary moved, re-arms every habit rather than the one it
+was asked about.
+
 ## Edges left open
 
 **A change of `dayEndsAt` can send one reminder twice.** The watermark
@@ -169,6 +216,16 @@ the new day has begun and the reminder (compared as `at + 1440`, the day that is
 ending) is not yet due. Once a year, one boundary value, one reminder. Accepted rather than
 special-cased.
 
+**On the phone the same hour behaves differently, and it is accepted too.** An
+alarm armed inside a skipped hour is not lost: it is armed from the nominal
+02:30, so the weekday gate is the night that is ending (Saturday), and AlarmManager
+fires it at the shifted instant (03:30 on 2027-03-28). The receiver then reads the
+day at FIRE time, where 03:30 is not before the boundary, so it asks about the NEW
+date — Sunday — and a Saturday-only reminder is dropped as not due that weekday.
+The server's version never sends it at all; this one sends or drops it, once a
+year, for one boundary value and one reminder, and is left alone for the same
+reason.
+
 ## How the web client follows a change
 
 `ui/dates.js` holds the boundary as module state, set by `settings.onApply` in
@@ -190,5 +247,4 @@ date's does, then that the calendar date becomes one again at `00:00`.
 ## What it does not do
 
 No re-bucketing of history: entries already recorded stay where they are, and
-the dialog's help says so. No Android client (next PR). No widgets or midnight
-alarm. No settings read in any route.
+the dialog's help says so. No settings read in any route.

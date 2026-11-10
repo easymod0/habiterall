@@ -1,11 +1,13 @@
 package com.habiterall.app
 
+import com.habiterall.app.notify.EffectiveDay
 import com.habiterall.app.notify.ReminderTime
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.LocalDate
 
 /**
  * The same cases as `shared/test/time.test.js`, deliberately.
@@ -287,5 +289,74 @@ class ReminderTimeTest {
         assertFalse(ReminderTime.remindsOn(127, "not-a-date"))
         assertFalse(ReminderTime.remindsOn(127, ""))
         assertFalse(ReminderTime.remindsOn(127, null))
+    }
+
+    /* ---------- where the day ends (#76) ---------- */
+
+    // Every literal below is one of `shared/test/notify.test.js`'s "where the day
+    // ends" cases, on purpose and for the reason this file exists: the server and
+    // the web decide the day with one function, and this is the copy that has to
+    // agree with it with no network. Literals, not `DAY_END_TIMES`, so a test
+    // importing the list pins the name and nothing else.
+
+    private fun day(date: String, minutes: Int, dayEnd: String?) =
+        ReminderTime.effectiveDay(LocalDate.parse(date), minutes, dayEnd)
+
+    @Test
+    fun `before the boundary it is still the previous date`() {
+        assertEquals(
+            EffectiveDay(LocalDate.parse("2026-08-12"), 179 + 1440),
+            day("2026-08-13", 179, "03:00"),
+        )
+        // 03:00 on the dot is today.
+        assertEquals(EffectiveDay(LocalDate.parse("2026-08-13"), 180), day("2026-08-13", 180, "03:00"))
+        assertEquals(EffectiveDay(LocalDate.parse("2026-08-12"), 1440), day("2026-08-13", 0, "03:00"))
+        assertEquals(
+            EffectiveDay(LocalDate.parse("2026-08-12"), 359 + 1440),
+            day("2026-08-13", 359, "06:00"),
+        )
+        assertEquals(EffectiveDay(LocalDate.parse("2026-08-13"), 360), day("2026-08-13", 360, "06:00"))
+    }
+
+    @Test
+    fun `the previous date rolls a month, a leap February and a year`() {
+        assertEquals("2026-02-28", day("2026-03-01", 30, "01:00").date.toString())
+        assertEquals("2028-02-29", day("2028-03-01", 30, "01:00").date.toString())
+        assertEquals("2026-12-31", day("2027-01-01", 30, "01:00").date.toString())
+    }
+
+    @Test
+    fun `the default and anything unrecognised never move the day`() {
+        for (end in listOf("00:00", null, "", "07:00", "03:30", "3:00", "junk")) {
+            assertEquals(
+                "moved the day for $end",
+                EffectiveDay(LocalDate.parse("2026-08-13"), 30),
+                day("2026-08-13", 30, end),
+            )
+        }
+        // Midnight itself, at the default: where `<` and `<=` part company, and
+        // the latter would move every account that has never set this.
+        assertEquals(EffectiveDay(LocalDate.parse("2026-08-13"), 0), day("2026-08-13", 0, "00:00"))
+    }
+
+    @Test
+    fun `a reminder before the boundary belongs to the ending day`() {
+        assertEquals(1500, ReminderTime.effectiveReminderMinutes(60, "03:00"))
+        assertEquals(179 + 1440, ReminderTime.effectiveReminderMinutes(179, "03:00"))
+        assertEquals(180, ReminderTime.effectiveReminderMinutes(180, "03:00"))
+        assertEquals(1380, ReminderTime.effectiveReminderMinutes(1380, "03:00"))
+        assertEquals(60, ReminderTime.effectiveReminderMinutes(60, "00:00"))
+        assertEquals(60, ReminderTime.effectiveReminderMinutes(60, "junk"))
+    }
+
+    @Test
+    fun `the boundary is read by membership, not by a numeric parse`() {
+        assertEquals(0, ReminderTime.dayEndMinutes("00:00"))
+        assertEquals(180, ReminderTime.dayEndMinutes("03:00"))
+        assertEquals(360, ReminderTime.dayEndMinutes("06:00"))
+        // "03:30" and "3:00" parse as a time and are not on the list.
+        for (junk in listOf(null, "", "07:00", "03:30", "3:00", "junk")) {
+            assertEquals("read $junk as a boundary", 0, ReminderTime.dayEndMinutes(junk))
+        }
     }
 }

@@ -128,12 +128,12 @@ once made a single request block the event loop for 32 seconds. Never call
 `dateRange` on a start date that came from the database.
 
 **A client mirrors a rule only if it must work OFFLINE.** The native app keeps
-five hand-written copies of shared logic — the tap cycle, reminder-time parsing,
-`needsReminder`, the entry encoding, the channel default — and every one runs
+six hand-written copies of shared logic — the tap cycle, reminder-time parsing,
+`needsReminder`, the entry encoding, the channel default, the day boundary — and every one runs
 when there may be no network. Nothing else is copied: creating a habit,
 reordering and the settings screen are server-authoritative, because
 `parseHabit` and `SETTING_VALUES` normalise as well as validate. Ask this of
-anything added next — a sixth mirror is a real cost and a sixth server call is
+anything added next — a seventh mirror is a real cost and one more server call is
 not.
 
 **A setting's DEFAULT is a mirror even though its rule is not.** `GET /settings`

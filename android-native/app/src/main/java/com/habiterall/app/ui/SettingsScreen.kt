@@ -38,6 +38,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.habiterall.app.data.AppSettings
+import com.habiterall.app.notify.ReminderTime
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
@@ -316,6 +317,21 @@ fun SettingsScreen(
                 selected = settings.dayOrderOrDefault,
                 enabled = !busy,
                 onPick = { put("dayOrder", "the day order", JsonPrimitive(it)) },
+            )
+            ChoiceRow(
+                title = "My day ends at",
+                options = ReminderTime.DAY_END_TIMES.map {
+                    it to if (it == ReminderTime.DEFAULT_DAY_END) "Midnight" else it
+                },
+                selected = settings.dayEndsAtOrDefault,
+                enabled = !busy,
+                onPick = { put("dayEndsAt", "when your day ends", JsonPrimitive(it)) },
+            )
+            Text(
+                "For a day that runs past midnight: a check-off made before this hour " +
+                    "counts for the previous day. Entries already recorded do not move.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             ChoiceRow(
                 title = "Week starts on",
